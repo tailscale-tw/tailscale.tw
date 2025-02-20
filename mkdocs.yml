@@ -1,0 +1,6 @@
+# $schema: https://squidfunk.github.io/mkdocs-material/schema.json
+
+site_name: Tailscale 台灣
+site_url: https://tailscale.tw
+theme:
+  name: material
