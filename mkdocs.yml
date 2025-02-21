@@ -12,6 +12,7 @@ theme:
   icon:
     repo: fontawesome/brands/github-alt
   features:
+    - content.code.copy
     - navigation.tabs
 
 plugins:
