@@ -10,4 +10,4 @@ theme:
   name: material
   language: zh-TW
   icon:
-    repo: https://github.com/tailscale-tw/tailscale.tw
+    repo: fontawesome/brands/github-alt
