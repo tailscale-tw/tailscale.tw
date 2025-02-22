@@ -39,4 +39,7 @@ nav:
   - PVE(Proxmox Virtual Edition):
       - pve/index.md
       - 憑證自動更新: pve/auto-renew-tailscale-certificate-on-pve.md
+  - Synology:
+      - synology/index.md
+      - 在 Synology NAS 上安裝 Tailscale 憑證方法: synology/install-tailscale-certificate-on-synology.md
 

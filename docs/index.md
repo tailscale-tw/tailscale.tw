@@ -5,3 +5,7 @@
 ## PVE
 
 * [PVE(Proxmox Virtual Edition)](pve/index.md)
+
+## Synolog
+
+* [Synology](synology/index.md)
