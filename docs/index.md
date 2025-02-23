@@ -9,3 +9,8 @@
 ## Synolog
 
 * [Synology](synology/index.md)
+
+## 友站連結
+
+* [Tailscale Community](https://tailscale.dev/)
+* [Tailscale YouTube channel](https://www.youtube.com/@Tailscale)
