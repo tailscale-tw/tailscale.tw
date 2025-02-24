@@ -1,3 +1,4 @@
+# $schema: https://json.schemastore.org/github-action.json
 name: build site and deploy it to Cloudflare Pages with Wrangler2
 
 on:
