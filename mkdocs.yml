@@ -43,3 +43,11 @@ nav:
       - synology/index.md
       - 在 Synology NAS 上安裝 Tailscale 憑證方法: synology/install-tailscale-certificate-on-synology.md
 
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
