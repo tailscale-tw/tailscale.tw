@@ -37,7 +37,7 @@ jobs:
 
       - name: Install dependencies and build site
         run: |
-          pip install mkdocs-material==9.6.5
+          pip install mkdocs-material==9.6.12
           mkdocs build --site-dir public
 
       - name: Deploy to Cloudflare
