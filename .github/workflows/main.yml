@@ -6,6 +6,11 @@ on:
     branches:
       - main
 
+env:
+  PYTHON_VERSION: '3.13.3'
+  MKDOCS_MATERIAL_VERSION: '9.6.12'
+  CLOUDFLARE_PROJECT_NAME: 'tailscale-tw'  # 改為您的專案名稱
+
 permissions:
   contents: write
 
@@ -20,7 +25,7 @@ jobs:
       - name: Setup Python environment
         uses: actions/setup-python@v5
         with:
-          python-version: 3.13.2
+          python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Set cache id
         run: echo "cache_id=$(date --utc '+%V')" >> $GITHUB_ENV
@@ -37,7 +42,7 @@ jobs:
 
       - name: Install dependencies and build site
         run: |
-          pip install mkdocs-material==9.6.12
+          pip install mkdocs-material==${{ env.MKDOCS_MATERIAL_VERSION }}
           mkdocs build --site-dir public
 
       - name: Deploy to Cloudflare
@@ -46,7 +51,7 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy public --project-name=tailscale-tw
+          command: pages deploy public --project-name=${{ env.CLOUDFLARE_PROJECT_NAME }}
 
       - name: Print wrangler command output
         env:
