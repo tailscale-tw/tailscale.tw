@@ -7,8 +7,8 @@ on:
       - main
 
 env:
-  PYTHON_VERSION: '3.13.3'
-  MKDOCS_MATERIAL_VERSION: '9.6.12'
+  PYTHON_VERSION: '3.14.0'
+  MKDOCS_MATERIAL_VERSION: '9.6.23'
   CLOUDFLARE_PROJECT_NAME: 'tailscale-tw'  # 改為您的專案名稱
 
 permissions:
