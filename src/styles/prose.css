@@ -1,0 +1,382 @@
+/* Docs markdown styling scoped to docs content containers only.
+   排版語言取自 astro-monospace-theme：
+   - 16px / 24px 行高（--nb-line 的倍數）、寬度用 ch
+   - h1 橘色左邊線、h2 灰色底線、h3 以 '### ' 前綴
+   - 連結藍色、strong 700 對比色
+   - 直角、細框線、無陰影；程式碼 inline 與 pre 同一套等寬字型 */
+
+.docs-content {
+  font-size: 1rem;
+  line-height: var(--nb-line);
+  color: var(--nb-foreground);
+  /* Break a long unbroken token (URL, hash, no-space string) so it wraps within
+     the content column instead of leaking past the page width. Inherited, so it
+     covers headings, paragraphs, list items, and inline code; `pre` code blocks
+     are unaffected (their `white-space: pre` doesn't wrap — they scroll instead,
+     via `pre.astro-code { overflow-x: auto }`), and wide tables keep their own
+     `.nb-table-scroll` handling. */
+  overflow-wrap: break-word;
+}
+
+/* Vertical rhythm — every direct child sits on the 24px grid.
+   Components can override with their own margin utilities (my-4, mt-6, etc.)
+   because :where() keeps specificity at (0,1,0) and utilities come later. */
+.docs-content > :where(:not(:first-child)) {
+  margin-top: var(--nb-line);
+}
+
+/* Headings sit two lines above their section. */
+.docs-content :where(h2:not([class])),
+.docs-content :where(h3:not([class])) {
+  margin-top: calc(var(--nb-line) * 2);
+}
+
+.docs-content :where(h2[id], h3[id], h4[id]) {
+  scroll-margin-top: 5rem;
+}
+
+.docs-content :where([data-footnote-ref][id], [data-footnotes] li[id]) {
+  scroll-margin-top: 8rem;
+}
+
+@media (min-width: 80rem) {
+  .docs-content :where([data-footnote-ref][id], [data-footnotes] li[id]) {
+    scroll-margin-top: 5rem;
+  }
+}
+
+/* Typographic wrapping — balance multi-line headings (no orphan words),
+   pretty-wrap body copy (no single-word last lines). Progressive
+   enhancement; unsupported browsers ignore both. */
+.docs-content :where(h1:not([class]), h2:not([class]), h3:not([class]), h4:not([class])) {
+  text-wrap: balance;
+}
+
+.docs-content :where(p:not([class]), li:not([class]), blockquote:not([class])) {
+  text-wrap: pretty;
+}
+
+/* Component boundary — elements with a class attribute are component-owned.
+   Markdown never adds classes to h1–h6 or p; components always do. */
+.docs-content :where(h1, h2, h3, h4, h5, h6, p):where([class]) {
+  margin: 0;
+  font-size: inherit;
+}
+
+/* Markdown heading typography — TUI：與內文同尺寸、一律 700、字距歸零。 */
+.docs-content :where(h1:not([class])) {
+  font-size: var(--nb-h1-size);
+  font-weight: var(--nb-h1-weight);
+  letter-spacing: var(--nb-h1-tracking);
+  color: var(--nb-heading);
+  margin-top: calc(var(--nb-line) * 2);
+  margin-bottom: 0;
+  /* 橘色左邊線 */
+  margin-left: calc(var(--nb-gutter) * -1);
+  padding-left: calc(var(--nb-gutter) - 2px);
+  border-left: 2px solid var(--nb-primary);
+}
+
+.docs-content :where(h2:not([class])) {
+  font-size: var(--nb-h2-size);
+  font-weight: var(--nb-h2-weight);
+  letter-spacing: var(--nb-h2-tracking);
+  color: var(--nb-heading);
+  /* 灰色底線 */
+  text-decoration: underline 1px var(--nb-muted-foreground);
+  text-underline-offset: 4px;
+}
+
+.docs-content :where(h3:not([class])) {
+  font-size: var(--nb-h3-size);
+  font-weight: var(--nb-h3-weight);
+  letter-spacing: var(--nb-h3-tracking);
+  color: var(--nb-heading);
+}
+
+/* h3 以 '#'-風格前綴標示層級 */
+.docs-content :where(h3:not([class]))::before {
+  content: "### ";
+  color: var(--nb-muted-foreground);
+  font-weight: 400;
+}
+
+.docs-content :where(h4:not([class]), h5:not([class]), h6:not([class])) {
+  font-weight: var(--nb-h4-weight);
+  color: var(--nb-heading);
+}
+
+.docs-content .heading-anchor {
+  margin-left: 0.5rem;
+  color: var(--nb-muted-foreground);
+  text-decoration: none;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s;
+}
+
+.docs-content :where(h2[id], h3[id], h4[id]):hover .heading-anchor,
+.docs-content .heading-anchor:focus-visible {
+  opacity: 1;
+}
+
+.docs-content .heading-anchor:hover {
+  color: var(--nb-heading);
+}
+
+/* Lists — Monospace：'* ' 文字符號，換行對齊符號後方。 */
+.docs-content :where(ul:not([class])) {
+  padding-left: 0;
+  list-style: none;
+}
+
+.docs-content :where(ul:not([class]) > li) {
+  padding-left: 2ch;
+  text-indent: -2ch;
+}
+
+.docs-content :where(ul:not([class]) > li)::before {
+  content: "* ";
+  color: var(--nb-muted-foreground);
+}
+
+.docs-content :where(ol:not([class])) {
+  padding-left: 3ch;
+  list-style-type: decimal;
+}
+
+.docs-content :where(li:not([class])) {
+  margin: 0;
+}
+
+.docs-content :where(li:not([class]) + li:not([class])) {
+  margin-top: 8px;
+}
+
+/* Ordered-list markers in muted gray so the numbers don't shout. */
+.docs-content :where(ol:not([class]))::marker,
+.docs-content :where(ol:not([class])) li::marker {
+  color: var(--nb-muted-foreground);
+}
+
+.docs-content :where(blockquote:not([class])) {
+  margin: var(--nb-line) 0;
+  padding-left: 2ch;
+  border-left: 2px solid var(--nb-border);
+  color: var(--nb-muted-foreground);
+}
+
+/* hr → 一整行的點狀分隔線 */
+.docs-content :where(hr:not([class])) {
+  position: relative;
+  border: 0;
+  width: 100%;
+  height: var(--nb-line);
+  margin: calc(var(--nb-line) * 2) 0;
+  overflow: hidden;
+  color: var(--nb-foreground);
+}
+
+.docs-content :where(hr:not([class]))::before {
+  content: "........................................................................................................................................................................";
+  position: absolute;
+  inset: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  line-height: var(--nb-line);
+}
+
+/* Links — Monospace：藍色連結、hover 細底線。 */
+.docs-content :where(a:not([class])) {
+  color: var(--nb-info);
+  text-decoration: none;
+}
+
+.docs-content :where(h1 a, h2 a, h3 a):not([class]) {
+  color: var(--nb-heading);
+  text-decoration-color: var(--nb-muted-foreground);
+}
+
+.docs-content :where(p:not([class]) a:not([class]), li:not([class]) a:not([class]), dd:not([class]) a:not([class]), td:not([class]) a:not([class])):hover {
+  text-decoration: underline 1px var(--nb-info);
+  text-underline-offset: 4px;
+}
+
+.docs-content :where(strong:not([class])) {
+  font-weight: 700;
+  color: var(--nb-heading);
+}
+
+/* Inline code — 與 pre 同一套等寬字型、同尺寸；灰底、直角、無框線。 */
+.docs-content :where(code:not([class])):not(:where(pre *)) {
+  font-family: var(--nb-font-mono);
+  direction: ltr;
+  unicode-bidi: isolate;
+  background: var(--nb-muted);
+  color: var(--nb-heading);
+  border: none;
+  border-radius: 0;
+  padding: 0 4px;
+  font-size: inherit;
+  font-weight: 400;
+}
+
+.docs-content :where(code:not([class])):not(:where(pre *))::before,
+.docs-content :where(code:not([class])):not(:where(pre *))::after {
+  content: none;
+}
+
+.docs-content :where(pre:not([class])) {
+  font-family: var(--nb-font-mono);
+}
+
+/* Shiki-rendered code blocks — margin matches the 24px rhythm; inline
+   code-token styling is reset because Shiki spans already carry their own
+   colors via inline styles. */
+.docs-content .nb-code-figure {
+  margin: var(--nb-line) 0;
+}
+
+.docs-content pre.astro-code code {
+  direction: ltr;
+  unicode-bidi: isolate;
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: inherit;
+  font-weight: inherit;
+  border-radius: 0;
+}
+
+/* Tables — Monospace：無外框、無底色，列間細框線。 */
+.docs-content :where(table:not([class])) {
+  display: table;
+  width: 100%;
+  max-width: 100%;
+  text-align: left;
+  border-collapse: collapse;
+  border-spacing: 0;
+  border: none;
+  border-radius: 0;
+  table-layout: auto;
+}
+
+/* Wide tables scroll within this box at all widths instead of overflowing the
+   page; short tables still fill it via the inner `width: 100%`. */
+.docs-content :where(.nb-table-scroll) {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+.docs-content :where(th:not([class])),
+.docs-content :where(td:not([class])) {
+  padding: 8px 16px 8px 0;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--nb-border);
+}
+
+.docs-content :where(th:not([class])) {
+  background: transparent;
+  color: var(--nb-heading);
+  font-weight: 700;
+  font-size: inherit;
+  white-space: nowrap;
+}
+
+.docs-content :where(tbody:not([class]) tr:not([class]):last-child td:not([class])) {
+  border-bottom: none;
+}
+
+/* ---- Long-tail prose vocabulary ----
+   Elements markdown/MDX authors can reach for that would otherwise
+   render with raw browser defaults. Same component boundary as the rest
+   of the file: `:not([class])` leaves component-owned markup alone. */
+
+/* Keycaps — 直角、細框線；底部粗一點的框線代表按下邊緣。 */
+.docs-content :where(kbd:not([class])) {
+  display: inline-block;
+  font-family: var(--nb-font-mono);
+  font-size: 0.875em;
+  font-weight: 400;
+  line-height: 1;
+  color: var(--nb-heading);
+  background: var(--nb-muted);
+  border: 1px solid var(--nb-border);
+  border-bottom-width: 2px;
+  border-radius: 0;
+  padding: 0.1875rem 0.375rem;
+  vertical-align: 0.0625rem;
+}
+
+/* Inline highlight — 對比底色、直角。 */
+.docs-content :where(mark:not([class])) {
+  background: var(--nb-selected);
+  color: var(--nb-heading);
+  border-radius: 0;
+  padding: 0.0625rem 0.25rem;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
+/* Native disclosure. Scope guard: FileTree builds classless <details>
+   internally (`.file-tree :global(details)`), so exclude its subtree —
+   without this the rows below would grow double carets and borders. */
+.docs-content :where(details:not([class]):not(.file-tree *)) {
+  border: 1px solid var(--nb-border);
+  border-radius: 0;
+  padding: 0.5rem 0.875rem;
+}
+
+.docs-content :where(details:not([class]):not(.file-tree *) > summary) {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.625rem;
+  cursor: pointer;
+  font-weight: 700;
+  color: var(--nb-heading);
+  list-style: none;
+  user-select: none;
+}
+
+.docs-content :where(details:not([class]):not(.file-tree *) > summary)::-webkit-details-marker {
+  display: none;
+}
+
+/* Trailing chevron — label left, indicator right. */
+.docs-content :where(details:not([class]):not(.file-tree *) > summary)::after {
+  content: "";
+  flex-shrink: 0;
+  width: 0.4375em;
+  height: 0.4375em;
+  border-right: 1.5px solid var(--nb-muted-foreground);
+  border-bottom: 1.5px solid var(--nb-muted-foreground);
+  transform: rotate(-45deg);
+  transition: transform 0.2s cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.docs-content :where(details[open]:not([class]):not(.file-tree *) > summary)::after {
+  transform: rotate(45deg) translateY(-0.125em);
+}
+
+.docs-content :where(details[open]:not([class]):not(.file-tree *) > summary) {
+  margin-bottom: 0.5rem;
+}
+
+/* Definition lists — term/description pairs. */
+.docs-content :where(dt:not([class])) {
+  font-weight: 700;
+  color: var(--nb-heading);
+}
+
+.docs-content :where(dt:not([class]):not(:first-child)) {
+  margin-top: var(--nb-line);
+}
+
+.docs-content :where(dd:not([class])) {
+  margin-left: 2ch;
+  color: var(--nb-muted-foreground);
+}

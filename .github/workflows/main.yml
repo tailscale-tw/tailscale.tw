@@ -1,57 +1,45 @@
 # $schema: https://json.schemastore.org/github-action.json
-name: build site and deploy it to Cloudflare Pages with Wrangler2
+name: build site and deploy it to Cloudflare Workers
 
 on:
   push:
     branches:
       - main
 
-env:
-  PYTHON_VERSION: '3.14.0'
-  MKDOCS_MATERIAL_VERSION: '9.6.23'
-  CLOUDFLARE_PROJECT_NAME: 'tailscale-tw'  # 改為您的專案名稱
-
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build-and-deploy:
-    name: Build site and deploy it to Cloudflare Pages
+    name: Build site and deploy it to Cloudflare Workers
     runs-on: ubuntu-latest
     steps:
       - name: Checkout git repository
         uses: actions/checkout@v4
 
-      - name: Setup Python environment
-        uses: actions/setup-python@v5
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          version: 12
 
-      - name: Set cache id
-        run: echo "cache_id=$(date --utc '+%V')" >> $GITHUB_ENV
-
-      - name: Cache mkdocs build
-        uses: actions/cache@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          key: mkdocs-material-${{ env.cache_id }}
-          path: |
-            ~/.cache/pip
-            .cache
-          restore-keys: |
-            mkdocs-material-
+          node-version: 22
+          cache: pnpm
 
       - name: Install dependencies and build site
         run: |
-          pip install mkdocs-material==${{ env.MKDOCS_MATERIAL_VERSION }}
-          mkdocs build --site-dir public
+          pnpm install --frozen-lockfile
+          pnpm build
 
-      - name: Deploy to Cloudflare
+      - name: Deploy to Cloudflare Workers
         id: deploy
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy public --project-name=${{ env.CLOUDFLARE_PROJECT_NAME }}
+          command: deploy
 
       - name: Print wrangler command output
         env:
