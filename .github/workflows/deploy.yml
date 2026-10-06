@@ -36,9 +36,6 @@ jobs:
       - name: "📝 Checking code format"
         run: bun run format:check
 
-      - name: "📚 Lint docs"
-        run: bun run lint:docs
-
   deploy:
     name: Build & Deploy
     needs: lint
@@ -67,6 +64,10 @@ jobs:
 
       - name: "🚀 Build the project"
         run: bun run build
+
+      # 內部連結檢查需要建置產生的 .nimbus/routes.json，所以放在 build 之後
+      - name: "📚 Lint docs"
+        run: bun run lint:docs
 
       - name: "☁️ Deploy to Cloudflare Workers"
         uses: cloudflare/wrangler-action@v4

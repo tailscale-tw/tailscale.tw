@@ -20,7 +20,7 @@ bun run lint:text    # autocorrect: CJK/Latin spacing in src/content/; fix:text 
 bun run preview:cf   # build + wrangler dev
 ```
 
-Bun is the package manager (version pinned by `packageManager` in `package.json`); Astro and wrangler still run on Node 22. There are no unit tests. CI (`.github/workflows/ci.yml`, on PRs) runs `lint:text`, `lint`, `format:check`, `lint:docs`, then `typecheck` and `build` — run these before pushing.
+Bun is the package manager (version pinned by `packageManager` in `package.json`); Astro and wrangler still run on Node 22. There are no unit tests. CI (`.github/workflows/ci.yml`, on PRs) runs `lint:text`, `lint`, `format:check`, then `typecheck`, `build` and `lint:docs` (it needs the routes written by the build) — run these before pushing.
 
 ## Architecture
 
