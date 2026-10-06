@@ -1,0 +1,144 @@
+---
+title: Subnet Router：存取整個區網內沒裝 Tailscale 的設備
+description: 用 Subnet Router 把區網網段廣告給 tailnet，從外面存取不能安裝 Tailscale 的印表機、IP Cam 與路由器管理介面
+sidebar:
+  order: 2
+  label: Subnet Router
+---
+
+家裡或公司的印表機、IP Cam、路由器管理介面這類設備沒辦法安裝 Tailscale，卻又想從外面連進來用。在區網內挑一台常開機的裝置當 **Subnet Router**，把它所在的網段「廣告」（advertise）給整個 tailnet，其他裝置就能透過它存取網段內的所有設備，不必在每台設備上都裝 Tailscale。
+
+> 本文以 Tailscale v1.102（2026 年 10 月）為準，指令採官方文件目前的 `tailscale set` 語法；同樣的旗標也相容於舊式的 `tailscale up` 寫法。
+
+## Subnet Router 是什麼
+
+Subnet Router 是 tailnet 裡的一台裝置，扮演 tailnet 與傳統網段之間的閘道：它對 tailnet 廣告某個網段（例如 `192.168.1.0/24`），其他裝置就能把流量經由它送到網段內的設備。經過它存取的設備算是「在 Subnet Router 後面」（behind the subnet router）。
+
+幾個特性（出自[官方文件](https://tailscale.com/kb/1019/subnets)）：
+
+- **位於 Subnet Router 後面的設備不計入方案的人數限制**。不過只要設備裝得了 Tailscale，直接安裝仍然是首選——效能、安全性與設定單純度都比較好。
+- Subnet Router 預設對轉發的流量做 **SNAT**（來源位址轉譯）：網段內的設備看到的來源是 Subnet Router 本身，不是原始裝置。需要保留真實來源 IP 時可以關掉，見[後文](#snat來源-ip-的問題)。
+- 它和 [Exit Node](/features/exit-node/) 是不同用途：Subnet Router 提供**特定私有網段**的存取，Exit Node 則把**所有上網流量**從某台裝置送出去。
+
+## 快速開始（Linux）
+
+Linux 裝置穩定、網路能力完整，是最常見的 Subnet Router 選擇。以下假設區網網段是 `192.168.1.0/24`，換成你自己的網段即可。
+
+### 1. 開啟 IP forwarding
+
+核心要能轉發封包，Subnet Router 才工作。有 `/etc/sysctl.d` 目錄的系統：
+
+```bash
+echo 'net.ipv4.ip_forward = 1' | sudo tee -a /etc/sysctl.d/99-tailscale.conf
+echo 'net.ipv6.conf.all.forwarding = 1' | sudo tee -a /etc/sysctl.d/99-tailscale.conf
+sudo sysctl -p /etc/sysctl.d/99-tailscale.conf
+```
+
+沒有的話把上述設定寫進 `/etc/sysctl.conf`，再跑 `sudo sysctl -p /etc/sysctl.conf`。
+
+> 防火牆應該預設拒絕轉發流量（`ufw`、`firewalld` 的預設值就是如此），再由 Tailscale 精確放行，避免不小心變成對外的路由器。若系統用 `firewalld` 且轉發不通，可照[官方已知問題](https://github.com/tailscale/tailscale/issues/3416)的解法補一句 `firewall-cmd --permanent --add-masquerade`。
+
+### 2. 廣告網段
+
+```bash
+sudo tailscale set --advertise-routes=192.168.1.0/24
+```
+
+`--advertise-routes` 接受逗號分隔的多個網段（IPv4、IPv6 都行；只有 Apple TV 只支援 IPv4）。這只是「提出申請」，路由還要核准後才會生效。
+
+### 3. 到管理後台核准路由
+
+路由要經過核准才會注入其他裝置的路由表：
+
+1. 打開管理後台的 [Machines](https://console.tailscale.com/admin/machines) 頁面
+2. 找到有 **Subnets** 標記的裝置（或在搜尋框用 `property:subnet` 過濾）
+3. 進入該裝置的 **Subnets** 區、點 **Edit**（Edit route settings）
+4. 勾選要核准的網段，**Save**
+
+> Subnet Router 這台裝置的金鑰到期後路由會跟著失效，伺服器性質的裝置建議在後台關掉金鑰到期（key expiry），或改用 tag（tagged 裝置預設就停用金鑰到期）。
+
+### 4. 驗證
+
+在 Subnet Router 上用 `tailscale ip -4` 查到它的 Tailscale IP，從另一台 tailnet 裝置 ping 這個 IP：通了代表路由器本身沒問題，再試網段內的設備（例如 `ping 192.168.1.1`），把問題切一半。
+
+### 5. 用戶端接受路由
+
+**Linux 用戶端預設只接受 Tailscale IP 的路由**，網段路由要明確開啟：
+
+```bash
+sudo tailscale set --accept-routes
+```
+
+Android、iOS、macOS、tvOS 與 Windows 用戶端都預設自動接受網段路由，不必設定。
+
+## 用 autoApprovers 自動核准
+
+每次改路由都要去後台點核准很麻煩，可以在 tailnet policy file 的 `autoApprovers` 區指定誰廣告的網段自動核准：
+
+```json
+"autoApprovers": {
+  "routes": {
+    "192.168.1.0/24": ["group:network-admins", "tag:router"]
+  },
+  "exitNode": ["tag:exit-node"]
+}
+```
+
+幾個重點（出自[語法參考](https://tailscale.com/docs/reference/syntax/policy-file#autoapprovers)）：
+
+- 允許的名單可以放使用者 email、群組、autogroup 或 tag。被授權的人也能只廣告允許網段的**子集**。
+- 伺服器建議用 **tag** 當 autoApprover：路由掛在使用者身上時，該使用者被停權或刪除、或裝置換人重新登入，路由就會停止廣告。
+- **自動核准只在第一次收到廣告時生效**：事後修改 policy 補 autoApprovers，不會回頭核准既有未核准的路由；要先把該路由從裝置上移除再重新廣告一次。
+
+## 存取規則（ACL / grants）
+
+路由注入和存取控制是**兩層獨立的機制**：路由決定封包會不會進隧道，ACL/grants 決定封包會不會被放行。兩者都要滿足才連得上。預設 policy（人人可存取所有裝置）下什麼都不用加；自己改過 policy 的人，記得補上讓使用者存取該網段的規則：
+
+```json
+{
+  "groups": {
+    "group:dev": ["alice@example.com", "bob@example.com"]
+  },
+  "grants": [
+    {
+      "src": ["group:dev"],
+      "dst": ["192.168.1.0/24"],
+      "ip": ["*:*"]
+    }
+  ]
+}
+```
+
+`ip` 欄位放的是埠號／協定（例如 `*`、`443`、`tcp:80-443`），主機範圍放在 `dst`；只開特定連接埠就寫 `"ip": ["80,443"]`。要讓兩個網段互通（通常搭配關閉 SNAT）時，`src` 也可以放網段，官方文件有完整範例。
+
+## SNAT：來源 IP 的問題
+
+預設的 SNAT 讓網段內的設備看到「有人連我」，但看到的是 Subnet Router 的位址，不是原始裝置。印表機、IP Cam 通常無所謂；但如果網段內的服務要記錄、過濾來源 IP（例如內部系統的存取記錄），就得保留真實來源：
+
+```bash
+sudo tailscale up --snat-subnet-routes=false
+```
+
+這個旗標只有 Linux 支援。關閉 SNAT 後，網段內的設備**不會**自己知道要把回程封包送回 Tailscale：要手動加一條回程路由，把 `100.64.0.0/10`（Tailscale 的 IP 範圍）指向 Subnet Router 的區網 IP。這條路由可以加在設備本身、VPC 設定或 DHCP 伺服器上。
+
+> 這台裝置如果**同時**當 [Exit Node](/features/exit-node/)，關閉 SNAT 可能造成上游丟包，[官方建議](https://github.com/tailscale/tailscale/issues/18725)把兩種角色拆到不同裝置上。
+
+## 常見問題
+
+- **路由清單有網段，卻連不到設備？** 先確認 ACL/grants 有放行該網段（路由與 ACL 是兩層），再確認設備本身從 Subnet Router 上連得通、兩邊防火牆沒擋。可用 `tailscale debug netmap` 檢查 `PacketFilter` 裡生效的規則。
+- **用戶端所在的區網用了相同網段？** 例如筆電在外也接 `192.168.1.0/24` 的網路，作業系統會優先走本地路由，流量根本不會進隧道。用 `ip route`（Linux）或 `netstat -rn`（macOS）確認實際生效的路由，最好的解法是別讓兩邊撞網段——規劃家裡網段時避開 `192.168.0.0/24`、`192.168.1.0/24` 這類最熱門的網段。
+- **Linux 用戶端看不到路由？** 檢查 `--accept-routes` 有沒有開：`tailscale debug prefs` 裡 `RouteAll` 應為 `true`。
+- **有路由、也放行了，還是不通？** 到管理後台確認路由已核准（Subnets 標記會亮），並用第 4 步的方式從 tailnet 內先 ping Subnet Router 本身的 Tailscale IP，把問題切一半。
+
+## 延伸
+
+- **其他平台當 Subnet Router**：macOS 的兩個 GUI 版也能當（廣告路由時會自動開 IP forwarding，但 `tailscale` 指令要先照[這篇](/platforms/macos-install/)裝好）；Windows、Android 可以；Apple TV 僅支援 IPv4。Android 裝置當 Subnet Router 很耗電，適合接電源的 Android TV。
+- **高可用性（HA）**：多台 Subnet Router 廣告**完全相同**的網段才互為容錯備援；要注意 HA 備援機別開 `--accept-routes`，否則它會把流量繞去主路由器。更細的網段分配（longest prefix matching）時，記得 Tailscale 不會自動退回較寬的前綴——特定網段的裝置下線，流量就是直接丟包。
+- **效能調校**：Subnet Router 的轉發效能可用 UDP GRO forwarding 和 BBR 大幅提升，本站之後會有專文（尚未上線），等不及可先看[官方效能調校文件](https://tailscale.com/kb/1320/performance-tuning)。
+
+## 參考資料
+
+- [Subnet routers（官方文件）](https://tailscale.com/kb/1019/subnets)
+- [`autoApprovers` 語法參考](https://tailscale.com/docs/reference/syntax/policy-file#autoapprovers)
+- [Route injection（官方文件）](https://tailscale.com/docs/reference/route-injection)
+- [效能調校（官方文件）](https://tailscale.com/kb/1320/performance-tuning)
