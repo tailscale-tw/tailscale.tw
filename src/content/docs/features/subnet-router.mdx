@@ -126,13 +126,13 @@ sudo tailscale set --snat-subnet-routes=false
 ## 常見問題
 
 - **路由清單有網段，卻連不到設備？** 先確認 ACL/grants 有放行該網段（路由與 ACL 是兩層），再確認設備本身從 Subnet Router 上連得通、兩邊防火牆沒擋。可用 `tailscale debug netmap` 檢查 `PacketFilter` 裡生效的規則。
-- **用戶端所在的區網用了相同網段？** 例如筆電在外也接 `192.168.1.0/24` 的網路，兩邊的路由會互相衝突，實際走哪條依平台與路由前綴長度而定，常見結果是本地路由勝出、流量不進隧道。用 `ip route`（Linux）或 `netstat -rn`（macOS）確認實際生效的路由，最好的解法是別讓兩邊撞網段——規劃家裡網段時避開 `192.168.0.0/24`、`192.168.1.0/24` 這類最熱門的網段。
+- **用戶端所在的區網用了相同網段？** 例如筆電在外也接 `192.168.1.0/24` 的網路，兩邊的路由會互相衝突，實際走哪條依平台與路由前綴長度而定，以實際路由表為準。用 `ip route`（Linux）或 `netstat -rn`（macOS）確認實際生效的路由，最好的解法是別讓兩邊撞網段——規劃家裡網段時避開 `192.168.0.0/24`、`192.168.1.0/24` 這類最熱門的網段。
 - **Linux 用戶端看不到路由？** 檢查 `--accept-routes` 有沒有開：`tailscale debug prefs` 裡 `RouteAll` 應為 `true`。
 - **有路由、也放行了，還是不通？** 到管理後台確認路由已核准（Subnets 標記會亮），並用第 4 步的方式從 tailnet 內先 ping Subnet Router 本身的 Tailscale IP，把問題切一半。
 
 ## 延伸
 
-- **其他平台當 Subnet Router**：macOS 三個版本都能當——兩個 GUI 版廣告路由時會自動開 IP forwarding，但 `tailscale` 指令要先照[這篇](/platforms/macos-install/)裝好；開源 `tailscaled` 版沒有這些機制，照本文的 Linux 步驟操作。Windows、Android 可以；Apple TV 僅支援 IPv4。Android 裝置當 Subnet Router 很耗電，適合接電源的 Android TV。
+- **其他平台當 Subnet Router**：macOS 三個版本都能當——兩個 GUI 版廣告路由時會自動開 IP forwarding，但 `tailscale` 指令要先照[這篇](/platforms/macos-install/)裝好；開源 `tailscaled` 版的 `tailscale` 指令照本文的 Linux 步驟下，不過上面的 IP forwarding 設定是 Linux 的做法（`/etc/sysctl.d`、`net.ipv4.ip_forward` 在 macOS 上都不存在），macOS 上要不要、怎麼開官方文件沒有交代——要用 macOS 當 Subnet Router，兩個 GUI 版比較省事。Windows、Android 可以；Apple TV 僅支援 IPv4。Android 裝置當 Subnet Router 很耗電，適合接電源的 Android TV。
 - **高可用性（HA）**：多台 Subnet Router 廣告**完全相同**的網段才互為容錯備援；要注意 HA 備援機別開 `--accept-routes`，否則它會把流量繞去主路由器。更細的網段分配（longest prefix matching）時，記得 Tailscale 不會自動退回較寬的前綴——特定網段的裝置下線，流量就是直接丟包。
 - **效能調校**：Subnet Router 的轉發效能可用 UDP GRO forwarding 和 BBR 大幅提升，本站之後會有專文（尚未上線），等不及可先看[官方效能調校文件](https://tailscale.com/kb/1320/performance-tuning)。
 
