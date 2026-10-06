@@ -1,0 +1,665 @@
+@import "tailwindcss";
+
+/* ============================================================
+ * Tailscale 台灣 — Monospace (TUI) theme
+ *
+ * 色票與節奏取自 astro-monospace-theme（唯讀參考）：
+ *   - 灰階 + 橘色強調（h1 左邊線、選取反白橘色），連結藍色
+ *   - 垂直節奏 --nb-line = 24px 的倍數；寬度用 ch
+ *   - 直角、細框線、點狀分隔線、無陰影、無圓角
+ *   - 字重只有 400 與 700（font-synthesis: none 防止合成字重）
+ *
+ * Architecture:
+ *   1. Monospace palette (--mono-*) — 對照原主題 global.css 的色票
+ *   2. --nb-* design tokens 對應到色票（淺色 :root、深色 [data-mode="dark"]）
+ *   3. `@theme` block exposes them to Tailwind so utilities like
+ *      `bg-card`, `text-foreground`, `border-border` work
+ *   4. Dark mode uses the `[data-mode="dark"]` attribute（Nimbus ThemeToggle）
+ * ============================================================ */
+
+/* ---- Monospace palette ---- */
+:root {
+	--mono-gray-50: #fafafa;
+	--mono-gray-100: #ebebeb;
+	--mono-gray-200: #e1e1e1;
+	--mono-gray-300: #c1c1c1;
+	--mono-gray-400: #a1a1a1;
+	--mono-gray-500: #818181;
+	--mono-gray-550: #737373;
+	--mono-gray-600: #616161;
+	--mono-gray-700: #414141;
+	--mono-gray-800: #2b2b2b;
+	--mono-gray-850: #1a1a1a;
+	--mono-gray-900: #111111;
+
+	--mono-orange-100: #ffe8d8;
+	--mono-orange-500: #f35815;
+	--mono-orange-900: #3c1403;
+
+	--mono-blue-100: #ddf2ff;
+	--mono-blue-400: #47b7f8;
+	--mono-blue-500: #1e9de7;
+	--mono-blue-600: #0b6ec5;
+	--mono-blue-900: #08204e;
+
+	--mono-green-100: #d7fbdf;
+	--mono-green-500: #27b648;
+	--mono-green-600: #13862e;
+	--mono-green-900: #0a2b13;
+
+	--mono-yellow-300: #f2b600;
+	--mono-yellow-600: #7d5903;
+	--mono-neki: #fbca00;
+
+	--mono-red-100: #ffe5e9;
+	--mono-red-400: #ff7082;
+	--mono-red-600: #d92038;
+	--mono-red-900: #341418;
+
+	/* Layout — 欄寬單位 ch、垂直節奏 24px、左右邊距 16px（390px 無水平捲動） */
+	--nb-line: 24px;
+	--nb-gutter: 16px;
+}
+
+/* ---- Light mode ---- */
+:root {
+	color-scheme: light;
+
+	/* Surfaces (paired with foregrounds for contrast) */
+	--nb-background: var(--mono-gray-50);
+	--nb-foreground: var(--mono-gray-700);
+	/* 對比文字（標題、strong）— Monospace 的 --text-contrast */
+	--nb-heading: var(--mono-gray-900);
+
+	--nb-card: #ffffff;
+	--nb-card-foreground: var(--nb-foreground);
+
+	--nb-muted: var(--mono-gray-100);
+	--nb-muted-foreground: var(--mono-gray-550);
+
+	--nb-accent: var(--mono-gray-100);
+	--nb-accent-foreground: var(--mono-gray-900);
+
+	/* Primary action / brand = 橘色強調 */
+	--nb-primary: var(--mono-orange-500);
+	--nb-primary-foreground: #ffffff;
+	--nb-primary-hover: var(--mono-gray-900);
+
+	/* Borders / focus — border 弱線、border-strong 主框線 */
+	--nb-border: var(--mono-gray-300);
+	--nb-border-strong: var(--mono-gray-700);
+	--nb-selected: var(--mono-gray-200);
+	--nb-ring: var(--mono-blue-500);
+
+	/* Status colors — paired (saturated for text/border + muted for bg) */
+	--nb-info: var(--mono-blue-600);
+	--nb-info-foreground: var(--mono-blue-600);
+	--nb-info-muted: var(--mono-blue-100);
+
+	--nb-success: var(--mono-green-600);
+	--nb-success-foreground: var(--mono-green-600);
+	--nb-success-muted: var(--mono-green-100);
+
+	--nb-warning: var(--mono-yellow-600);
+	--nb-warning-foreground: var(--mono-yellow-600);
+	--nb-warning-muted: rgb(251 202 0 / 0.28);
+
+	--nb-danger: var(--mono-red-600);
+	--nb-danger-foreground: var(--mono-red-600);
+	--nb-danger-muted: var(--mono-red-100);
+
+	/* API method palette — shared source of truth for the method chip across the
+	   sidebar, endpoint card, and code rail. Text/tint follow the status tokens;
+	   the line is 25% of the solid colour. */
+	--nb-m-get: var(--nb-success);
+	--nb-m-get-tint: var(--nb-success-muted);
+	--nb-m-get-line: color-mix(in srgb, var(--nb-success) 25%, transparent);
+	--nb-m-post: var(--nb-info);
+	--nb-m-post-tint: var(--nb-info-muted);
+	--nb-m-post-line: color-mix(in srgb, var(--nb-info) 25%, transparent);
+	--nb-m-put: var(--nb-warning);
+	--nb-m-put-tint: var(--nb-warning-muted);
+	--nb-m-put-line: color-mix(in srgb, var(--nb-warning) 25%, transparent);
+	--nb-m-delete: var(--nb-danger);
+	--nb-m-delete-tint: var(--nb-danger-muted);
+	--nb-m-delete-line: color-mix(in srgb, var(--nb-danger) 25%, transparent);
+	--nb-m-other: var(--nb-muted-foreground);
+	--nb-m-other-tint: var(--nb-accent);
+	--nb-m-other-line: var(--nb-border);
+
+	/* Layout */
+	--nb-sidebar-width: 18.75rem;
+	--nb-toc-width: 18rem;
+	--nb-content-max: 43.5rem;
+	/* Used only by the API reference (registry: api-layout); harmless elsewhere. */
+	--nb-code-rail-width: 34rem;
+
+	/* Typography — Sarasa Mono TC（等距更紗黑體 TC），中文 2 欄、英數 1 欄。
+	   self-hosted unicode-range 分包，由 BaseLayout.astro 以 <link> 載入。 */
+	--nb-font-sans:
+		"Sarasa Mono TC", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+		"Liberation Mono", monospace;
+	--nb-font-mono: var(--nb-font-sans);
+
+	/* TUI 標題：與內文同尺寸，僅以字重與裝飾（h1 橘色左邊線、h2 灰色底線）分层 */
+	--nb-h1-size: 1rem;
+	--nb-h1-weight: 700;
+	--nb-h1-tracking: 0;
+	--nb-h2-size: 1rem;
+	--nb-h2-weight: 700;
+	--nb-h2-tracking: 0;
+	--nb-h3-size: 1rem;
+	--nb-h3-weight: 700;
+	--nb-h3-tracking: 0;
+	--nb-h4-weight: 700;
+
+	/* TUI：直角、無陰影 */
+	--nb-shadow-sm: none;
+	--nb-shadow: none;
+	--nb-shadow-lg: none;
+}
+
+/* Wider content area on large displays (e.g. MacBook Pro 16″) */
+@media (min-width: 1536px) {
+	:root {
+		--nb-content-max: 52rem;
+	}
+}
+
+/* ---- Dark mode ---- */
+[data-mode="dark"] {
+	color-scheme: dark;
+
+	--nb-background: var(--mono-gray-900);
+	--nb-foreground: var(--mono-gray-200);
+	--nb-heading: var(--mono-gray-50);
+
+	--nb-card: #000000;
+	--nb-card-foreground: var(--nb-foreground);
+
+	--nb-muted: var(--mono-gray-850);
+	--nb-muted-foreground: var(--mono-gray-400);
+
+	--nb-accent: var(--mono-gray-800);
+	--nb-accent-foreground: var(--mono-gray-50);
+
+	--nb-primary: var(--mono-orange-500);
+	--nb-primary-foreground: #ffffff;
+	--nb-primary-hover: var(--mono-orange-900);
+
+	--nb-border: var(--mono-gray-700);
+	--nb-border-strong: var(--mono-gray-300);
+	--nb-selected: var(--mono-gray-800);
+	--nb-ring: var(--mono-blue-400);
+
+	--nb-info: var(--mono-blue-400);
+	--nb-info-foreground: var(--mono-blue-400);
+	--nb-info-muted: var(--mono-blue-900);
+
+	--nb-success: var(--mono-green-500);
+	--nb-success-foreground: var(--mono-green-500);
+	--nb-success-muted: var(--mono-green-900);
+
+	--nb-warning: var(--mono-neki);
+	--nb-warning-foreground: var(--mono-neki);
+	--nb-warning-muted: rgb(251 202 0 / 0.2);
+
+	--nb-danger: var(--mono-red-400);
+	--nb-danger-foreground: var(--mono-red-400);
+	--nb-danger-muted: var(--mono-red-900);
+
+	--nb-shadow-sm: none;
+	--nb-shadow: none;
+	--nb-shadow-lg: none;
+}
+
+/* ---- Tailwind theme mapping ----
+ * These generate Tailwind utility classes:
+ *   bg-card, text-foreground, border-border, ring-ring, etc.
+ * 字重只有 400/700：medium → 400、semibold → 700；圓角與陰影歸零（直角、無陰影）。
+ */
+@theme {
+	--color-background: var(--nb-background);
+	--color-foreground: var(--nb-foreground);
+
+	--color-card: var(--nb-card);
+	--color-card-foreground: var(--nb-card-foreground);
+
+	--color-muted: var(--nb-muted);
+	--color-muted-foreground: var(--nb-muted-foreground);
+
+	--color-accent: var(--nb-accent);
+	--color-accent-foreground: var(--nb-accent-foreground);
+
+	--color-primary: var(--nb-primary);
+	--color-primary-foreground: var(--nb-primary-foreground);
+	--color-primary-hover: var(--nb-primary-hover);
+
+	--color-border: var(--nb-border);
+	--color-border-strong: var(--nb-border-strong);
+	--color-selected: var(--nb-selected);
+	--color-ring: var(--nb-ring);
+	--color-heading: var(--nb-heading);
+
+	--color-info: var(--nb-info);
+	--color-info-foreground: var(--nb-info-foreground);
+	--color-info-muted: var(--nb-info-muted);
+
+	--color-success: var(--nb-success);
+	--color-success-foreground: var(--nb-success-foreground);
+	--color-success-muted: var(--nb-success-muted);
+
+	--color-warning: var(--nb-warning);
+	--color-warning-foreground: var(--nb-warning-foreground);
+	--color-warning-muted: var(--nb-warning-muted);
+
+	--color-danger: var(--nb-danger);
+	--color-danger-foreground: var(--nb-danger-foreground);
+	--color-danger-muted: var(--nb-danger-muted);
+
+	--font-sans: var(--nb-font-sans);
+	--font-mono: var(--nb-font-mono);
+
+	--font-weight-medium: 400;
+	--font-weight-semibold: 700;
+
+	--radius-xs: 0;
+	--radius-sm: 0;
+	--radius: 0;
+	--radius-md: 0;
+	--radius-lg: 0;
+	--radius-xl: 0;
+	--radius-2xl: 0;
+	--radius-3xl: 0;
+	--radius-4xl: 0;
+
+	--shadow-sm: none;
+	--shadow-default: none;
+	--shadow: none;
+	--shadow-md: none;
+	--shadow-lg: none;
+	--shadow-xl: none;
+	--shadow-2xl: none;
+	--shadow-2xs: none;
+	--shadow-xs: none;
+}
+
+/* ---- Base ---- */
+html {
+	font-family: var(--nb-font-sans);
+	background-color: var(--nb-background);
+	color: var(--nb-foreground);
+}
+
+body {
+	font-size: 1rem;
+	line-height: var(--nb-line);
+	font-synthesis: none;
+	text-wrap: pretty;
+}
+
+/* TUI 標題色：標題用最深的對比色（Monospace 的 --text-contrast） */
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+	color: var(--nb-heading);
+}
+
+/* ---- 頁面標題（DocsLayout 渲染）：橘色左邊線 ---- */
+.nb-page-title {
+	color: var(--nb-heading);
+	margin-left: calc(var(--nb-gutter) * -1);
+	padding-left: calc(var(--nb-gutter) - 2px);
+	border-left: 2px solid var(--nb-primary);
+}
+
+/* ---- Minimal overrides the plugin doesn't cover ---- */
+body {
+	opacity: 1;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+	html:focus-within {
+		scroll-behavior: smooth;
+	}
+}
+
+/* 選取反白：橘底白字 */
+::selection {
+	background: var(--nb-primary);
+	color: #ffffff;
+}
+
+/* ---- Focus indicators ---- */
+@layer base {
+	/* Default the outline to the focus ring's resting values so turning the
+	   ring on (outline-style: none → solid) changes nothing a transition can
+	   animate — no color/width/offset flash under transition-colors/-all. */
+	*,
+	::before,
+	::after {
+		outline-color: var(--nb-ring);
+		outline-width: 2px;
+		outline-offset: 2px;
+	}
+	:focus-visible {
+		outline: 2px solid var(--nb-ring);
+		outline-offset: 2px;
+	}
+}
+
+/* ---- Reduced motion ---- */
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.01ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.01ms !important;
+		scroll-behavior: auto !important;
+	}
+}
+
+/* ---- Scroll lock (used by native <dialog> overlays) ---- */
+[data-scroll-locked] {
+	overflow: hidden;
+}
+
+/* ---- Scrollbar（直角） ---- */
+::-webkit-scrollbar {
+	width: 6px;
+	height: 6px;
+}
+::-webkit-scrollbar-track {
+	background: transparent;
+}
+::-webkit-scrollbar-thumb {
+	background: color-mix(in srgb, var(--nb-foreground) 20%, transparent);
+	border-radius: 0;
+}
+::-webkit-scrollbar-thumb:hover {
+	background: var(--nb-muted-foreground);
+}
+
+/* ---- 一整行的點狀分隔線（Monospace .dot-fill） ---- */
+.dot-fill {
+	position: relative;
+	border: 0;
+	width: 100%;
+	height: var(--nb-line);
+	margin: calc(var(--nb-line) * 2) 0;
+	overflow: hidden;
+	color: var(--nb-foreground);
+}
+.dot-fill::before {
+	content: "........................................................................................................................................................................";
+	position: absolute;
+	inset: 0;
+	white-space: nowrap;
+	overflow: hidden;
+	line-height: var(--nb-line);
+}
+
+/* ---- Shiki code-block styling + copy button ---- */
+
+pre.astro-code {
+	position: relative;
+	margin: var(--nb-line) 0;
+	padding: var(--nb-gutter);
+	border: 1px solid var(--nb-border);
+	background-color: var(--nb-card);
+	overflow-x: auto;
+	font-family: var(--nb-font-mono);
+	font-size: 1rem;
+	line-height: var(--nb-line);
+}
+pre.astro-code > code {
+	background: transparent;
+}
+
+/* Classed Shiki tokens set --shiki-light/--shiki-dark once in _nimbus/shiki.css. */
+pre.astro-code span {
+	color: var(--shiki-light, inherit);
+}
+[data-mode="dark"] pre.astro-code span {
+	color: var(--shiki-dark, inherit);
+}
+
+/* Copy button injected by initCodeCopy. */
+.nb-code-copy {
+	position: absolute;
+	top: 0.5rem;
+	right: 0.5rem;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 1.75rem;
+	height: 1.75rem;
+	margin: 0;
+	padding: 0;
+	border: 1px solid var(--nb-border);
+	background: var(--nb-card);
+	color: var(--nb-muted-foreground);
+	cursor: pointer;
+	opacity: 0;
+	transition:
+		opacity 0.15s ease,
+		color 0.15s ease,
+		background 0.15s ease;
+	z-index: 2;
+}
+.nb-code-figure:hover .nb-code-copy,
+.nb-code-copy:focus-visible {
+	opacity: 1;
+}
+.nb-code-copy:hover {
+	color: var(--nb-foreground);
+	background: var(--nb-muted);
+}
+.nb-code-copy svg {
+	width: 0.875rem;
+	height: 0.875rem;
+}
+.nb-code-copy[data-state="copied"] {
+	color: var(--nb-success);
+}
+
+/* ---- Code chrome（直角、細框線、無陰影） ---- */
+
+/* Every Shiki block is wrapped in a .nb-code-figure (titled or not).
+   Chrome lives on the figure so the language badge + copy button can sit
+   on a non-scrolling ancestor — iOS Safari slides absolutely-positioned
+   children of overflow:auto containers. */
+.nb-code-figure {
+	position: relative;
+	margin: var(--nb-line) 0;
+	border: 1px solid var(--nb-border);
+	background-color: var(--nb-card);
+	overflow: hidden;
+}
+.nb-code-figure > pre.astro-code {
+	margin: 0;
+	border: 0;
+	background-color: transparent;
+}
+.nb-code-title {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 0.75rem;
+	padding: 0.25rem 0.875rem;
+	border-bottom: 1px solid var(--nb-border);
+	background: var(--nb-muted);
+	font-family: var(--nb-font-mono);
+	font-size: 0.75rem;
+	line-height: var(--nb-line);
+}
+.nb-code-title-name {
+	color: var(--nb-foreground);
+	font-weight: 700;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.nb-code-title-lang {
+	flex-shrink: 0;
+	padding: 0 0.375rem;
+	background: var(--nb-accent);
+	color: var(--nb-muted-foreground);
+	font-size: 0.6875rem;
+	letter-spacing: 0;
+	text-transform: uppercase;
+}
+
+/* Language badge — pinned to the figure (which doesn't scroll), so it
+   stays at top-right even when the pre overflows horizontally. Hidden
+   when a figcaption is already showing the language (titled blocks). */
+.nb-code-figure[data-nb-lang]:not(.nb-code-figure-titled)::before {
+	content: attr(data-nb-lang);
+	position: absolute;
+	top: 0.5rem;
+	right: 0.625rem;
+	padding: 0 0.375rem;
+	background: var(--nb-muted);
+	color: var(--nb-muted-foreground);
+	font-family: var(--nb-font-mono);
+	font-size: 0.6875rem;
+	letter-spacing: 0;
+	text-transform: uppercase;
+	pointer-events: none;
+	opacity: 0.75;
+	transition: opacity 0.15s ease;
+	z-index: 1;
+}
+.nb-code-figure:hover::before {
+	opacity: 0;
+}
+/* Hide plaintext/text "language" — it's noise. */
+.nb-code-figure[data-nb-lang="text"]::before,
+.nb-code-figure[data-nb-lang="plaintext"]::before,
+.nb-code-figure[data-nb-lang="plain"]::before,
+.nb-code-figure[data-nb-lang="txt"]::before {
+	display: none;
+}
+
+/* Block-level lines so tints + gutters paint across the full row. */
+pre.astro-code code {
+	display: block;
+	width: max-content;
+	min-width: 100%;
+}
+pre.astro-code .line {
+	display: inline-block;
+	width: 100%;
+	padding-inline: var(--nb-gutter);
+	margin-inline: calc(var(--nb-gutter) * -1);
+	box-sizing: content-box;
+}
+
+/* Highlighted lines (`{1,3-5}` meta or `// [!code highlight]`). */
+pre.astro-code .line.highlighted {
+	background: color-mix(in srgb, var(--nb-info) 12%, transparent);
+	box-shadow: inset 2px 0 0 var(--nb-info);
+}
+
+/* Diff lines (`// [!code ++]` / `// [!code --]`). */
+pre.astro-code .line.diff {
+	position: relative;
+}
+pre.astro-code .line.diff.add {
+	background: color-mix(in srgb, var(--nb-success) 10%, transparent);
+	box-shadow: inset 2px 0 0 var(--nb-success);
+}
+pre.astro-code .line.diff.remove {
+	background: color-mix(in srgb, var(--nb-danger) 10%, transparent);
+	box-shadow: inset 2px 0 0 var(--nb-danger);
+}
+pre.astro-code .line.diff.add::before,
+pre.astro-code .line.diff.remove::before {
+	position: absolute;
+	left: 0.25rem;
+	color: var(--nb-muted-foreground);
+	font-weight: 700;
+}
+pre.astro-code .line.diff.add::before {
+	content: "+";
+	color: var(--nb-success);
+}
+pre.astro-code .line.diff.remove::before {
+	content: "−";
+	color: var(--nb-danger);
+}
+
+/* Focus mode — dim non-focused lines; clears on hover. */
+pre.astro-code.has-focused .line:not(.focused) {
+	opacity: 0.45;
+	transition: opacity 0.2s ease;
+}
+pre.astro-code.has-focused:hover .line:not(.focused) {
+	opacity: 1;
+}
+
+/* Error / warning lines — use muted tokens for theme-tuned tints. */
+pre.astro-code .line.highlighted.error {
+	background: var(--nb-danger-muted);
+	box-shadow: inset 2px 0 0 var(--nb-danger);
+}
+pre.astro-code .line.highlighted.warning {
+	background: var(--nb-warning-muted);
+	box-shadow: inset 2px 0 0 var(--nb-warning);
+}
+
+/* Word highlight (`// [!code word:foo]` and meta `/foo/`). */
+pre.astro-code .highlighted-word {
+	padding: 0.0625rem 0.25rem;
+	margin: -0.0625rem -0.125rem;
+	background: color-mix(in srgb, var(--nb-info) 18%, transparent);
+	box-shadow: 0 0 0 1px color-mix(in srgb, var(--nb-info) 30%, transparent);
+}
+
+/* ---- Mobile sidebar toggle ---- */
+
+/* Hide hamburger on pages without a sidebar dialog. */
+body:not(:has([data-mobile-sidebar])) [data-menu-btn] {
+	display: none;
+}
+
+/* ---- View transitions ---- */
+
+/* Scoped to <main transition:name="nb-content"> only — chrome snap-swaps
+   via the root rule below so the visual field doesn't shift on nav. */
+@media (prefers-reduced-motion: no-preference) {
+	::view-transition-old(nb-content) {
+		animation: nb-content-out 100ms cubic-bezier(0.32, 0.72, 0, 1) both;
+	}
+	::view-transition-new(nb-content) {
+		animation: nb-content-in 100ms cubic-bezier(0.32, 0.72, 0, 1) both;
+	}
+
+	::view-transition-old(root),
+	::view-transition-new(root) {
+		animation: none;
+	}
+
+	@keyframes nb-content-out {
+		from { opacity: 1; }
+		to   { opacity: 0; }
+	}
+
+	@keyframes nb-content-in {
+		from { opacity: 0; transform: translateY(4px); }
+		to   { opacity: 1; transform: translateY(0); }
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	::view-transition-old(nb-content),
+	::view-transition-new(nb-content),
+	::view-transition-old(root),
+	::view-transition-new(root) {
+		animation: none;
+	}
+}

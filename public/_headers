@@ -1,0 +1,6 @@
+# 讓瀏覽器以 UTF-8 解讀純文字與 Markdown 端點（llms.txt、*.md），避免中文亂碼
+/*.txt
+  Content-Type: text/plain; charset=utf-8
+
+/*.md
+  Content-Type: text/markdown; charset=utf-8

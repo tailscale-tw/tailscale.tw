@@ -1,0 +1,100 @@
+---
+/**
+ * Footer — Monospace (TUI) 風格頁尾：點狀分隔線 + 連結欄 + 版權行。
+ * 內容：友站連結（Tailscale Community / YouTube）、GitHub repo。
+ */
+import { config } from "virtual:nimbus/config";
+
+const year = new Date().getFullYear();
+
+const columns = [
+  {
+    heading: "友站連結",
+    links: [
+      { label: "Tailscale Community", href: "https://tailscale.dev/" },
+      { label: "Tailscale YouTube", href: "https://www.youtube.com/@Tailscale" },
+    ],
+  },
+  {
+    heading: "專案",
+    links: [
+      { label: "GitHub：tailscale-tw/tailscale.tw", href: "https://github.com/tailscale-tw/tailscale.tw" },
+    ],
+  },
+];
+---
+
+<footer class="nb-footer">
+  <hr class="dot-fill" />
+  <div class="grid">
+    {
+      columns.map((col) => (
+        <div>
+          <h2 class="col-heading">{col.heading}</h2>
+          <ul>
+            {col.links.map((link) => (
+              <li>
+                <a href={link.href} target="_blank" rel="noopener">
+                  {link.label}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))
+    }
+  </div>
+  <p class="copy">© {year} {config.title}. 字型：Sarasa Mono TC（SIL OFL 1.1）。</p>
+</footer>
+
+<style>
+  .nb-footer {
+    margin-top: auto;
+    margin-inline: auto;
+    width: 100%;
+    max-width: calc(var(--nb-content-max) + var(--nb-gutter) * 2);
+    padding-inline: var(--nb-gutter);
+    padding-bottom: calc(var(--nb-line) * 2);
+  }
+
+  .nb-footer .dot-fill {
+    margin: calc(var(--nb-line) * 2) 0;
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--nb-line);
+  }
+
+  .col-heading {
+    margin: 0 0 8px;
+    text-decoration: none;
+    color: var(--nb-primary);
+    font-weight: 400;
+    font-size: inherit;
+    letter-spacing: 0;
+  }
+
+  ul {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+
+  li a {
+    color: var(--nb-foreground);
+    line-height: var(--nb-line);
+  }
+
+  li a:hover {
+    color: var(--nb-heading);
+    text-decoration: underline 1px var(--nb-ring);
+    text-underline-offset: 4px;
+  }
+
+  .copy {
+    margin: calc(var(--nb-line) * 2) 0 0;
+    color: var(--nb-muted-foreground);
+  }
+</style>
