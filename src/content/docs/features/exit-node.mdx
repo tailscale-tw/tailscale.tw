@@ -1,0 +1,158 @@
+---
+title: Exit Node：讓所有流量經由指定裝置出去
+description: 設定 Tailscale Exit Node，在外面使用公共 Wi-Fi 時讓所有上網流量經由家裡或指定裝置的網路出去
+sidebar:
+  order: 3
+  label: Exit Node
+---
+
+在咖啡廳、機場用不信任的公共 Wi-Fi，或是人在國外需要用本國 IP 連銀行、訂票網站時，可以把流量全部經由自己家裡（或任何信任的裝置）出去。Tailscale 預設只管 tailnet 內裝置之間的流量、不碰上網流量；開啟 **Exit Node** 後，就能像傳統 VPN 一樣讓所有流量從指定裝置出去。
+
+> 本文以 Tailscale v1.102（2026 年 10 月）為準，指令採官方文件目前的 `tailscale set` 語法。同樣的旗標也相容於舊式的 `tailscale up`，但用 `up` 改設定時要把之前設過的所有非預設旗標一次帶齊——漏帶會直接報錯（防止不小心把舊設定清掉）——要改單一設定用 `tailscale set` 就好。
+
+## Exit Node 是什麼
+
+Exit Node 是 tailnet 裡一台被指定為「出口」的裝置：其他裝置把預設路由（`0.0.0.0/0`、`::/0`）指向它，所有上網流量就經由它轉送出去，對外看到的 IP 就是它的。
+
+設計上這件事是**多重同意**（opt-in）的：
+
+1. 裝置要自己廣告（advertise）為 Exit Node
+2. 管理後台的 Owner／Admin／Network admin 要核准
+3. 每台要用它的裝置要自己選擇使用
+
+三步缺一不可，所以家裡有人掛了 Exit Node，不代表整個 tailnet 的流量都被導過去。另外兩個特性：
+
+- 只有「不是已導向 [Subnet Router](/features/subnet-router/) 或 app connector」的流量會經由 Exit Node；連向其他 tailnet 裝置的流量照走原路，不受影響。
+- 使用 Exit Node 時，**預設連不到自己所在的區網**（本地印表機、NAS 都會斷），要開 [Allow LAN access](#連本地區網exit-node-allow-lan-access)。
+
+## 與 Subnet Router 的差異
+
+|            | Exit Node                  | Subnet Router                       |
+| ---------- | -------------------------- | ----------------------------------- |
+| 處理的流量 | 所有上網流量（預設路由）   | 特定私有網段                        |
+| 方向       | 把流量「送出去」           | 讓外部流量「進得來」網段            |
+| 典型情境   | 公共 Wi-Fi 上網、用本國 IP | 存取沒裝 Tailscale 的印表機、IP Cam |
+
+兩者可以同時用：網段流量走 Subnet Router、上網流量走 Exit Node。但同一台裝置**同時**當 Subnet Router 和 Exit Node、又關了 SNAT 的話有已知問題，細節與建議見[該文的 SNAT 一節](/features/subnet-router/#snat來源-ip-的問題)。
+
+## 設定 Exit Node（Linux）
+
+兩端都要 Tailscale v1.20 以上（現在的版本都遠超過）。Linux 是最常見的選擇，macOS、Windows、Android、iOS、tvOS 也都可以當 Exit Node。
+
+### 1. 開啟 IP forwarding
+
+跟 Subnet Router 一樣，核心要能轉發封包。有 `/etc/sysctl.d` 目錄的系統：
+
+```bash
+echo 'net.ipv4.ip_forward = 1' | sudo tee -a /etc/sysctl.d/99-tailscale.conf
+echo 'net.ipv6.conf.all.forwarding = 1' | sudo tee -a /etc/sysctl.d/99-tailscale.conf
+sudo sysctl -p /etc/sysctl.d/99-tailscale.conf
+```
+
+沒有的話把上述設定寫進 `/etc/sysctl.conf`，再跑 `sudo sysctl -p /etc/sysctl.conf`。若系統用 `firewalld` 且轉發不通，可照[官方已知問題](https://github.com/tailscale/tailscale/issues/3416)的解法補一句 `firewall-cmd --permanent --add-masquerade`。
+
+### 2. 廣告為 Exit Node
+
+```bash
+sudo tailscale set --advertise-exit-node
+sudo tailscale up
+```
+
+> 依官方文件：`--advertise-exit-node` 用 `tailscale set` 下時，之後要再跑一次 `tailscale up` 才會生效。
+
+### 3. 到管理後台核准
+
+1. 打開管理後台的 [Machines](https://console.tailscale.com/admin/machines) 頁面
+2. 找到有 **Exit Node** 標記的裝置（或用 `property:exit-node` 過濾）
+3. 進入 **Edit route settings**，啟用 **Use as exit node**，儲存
+
+跟 Subnet Router 一樣可以用 `autoApprovers` 免手動核准，`exitNode` 區塊指定的裝置廣告時自動過：
+
+```json
+"autoApprovers": {
+  "exitNode": ["tag:exit-node"]
+}
+```
+
+> 裝置的金鑰到期後會走 **fail close**：其他裝置上的路由（含 `0.0.0.0/0`）會留著但全部不通，官方刻意這樣設計、避免到期後流量退回直接上網而外洩——所以正在使用這台 Exit Node 的裝置會**整個斷網**，而不是退回自己的網路。伺服器性質的裝置要在後台關掉金鑰到期（key expiry），或改用 tag（tagged 裝置預設就停用金鑰到期）。
+
+其他平台：macOS 選 **Exit Node** > **Run Exit Node**、Windows 選 **Exit node** > **Run exit node**、Android 在 app 的 **Exit Node** > **Run as exit node**，都在該裝置的 Tailscale 用戶端裡操作。Apple TV 也可以，設定方式見[官方文件](https://tailscale.com/docs/install/appletv)。
+
+## 使用 Exit Node
+
+**Linux**：把 `--exit-node` 指到該裝置的 Tailscale IP（管理後台或 `tailscale status` 可查到）：
+
+```bash
+sudo tailscale set --exit-node=100.x.y.z
+```
+
+停用：
+
+```bash
+sudo tailscale set --exit-node=
+```
+
+**macOS**：選單列的 Tailscale 選單 → **Exit Nodes** → 選裝置名稱（v1.60.0 之前選單文字是 **Use exit node**）。**Windows**：系統匣 → **Use exit node** → 選裝置名稱。**iOS**／**Android**：app 的 **Exit Node** 區選裝置，選 **None** 停用。
+
+驗證：隨便開個查 IP 的網站（例如 [whatismyip.com](https://www.whatismyip.com/)），顯示的應該是 Exit Node 的公共 IP，不是你自己的。
+
+## 連本地區網：--exit-node-allow-lan-access
+
+預設使用 Exit Node 時連不到自己所在的區網。想一邊用 Exit Node、一邊連本地印表機或 NAS 的話，就把本地存取打開：
+
+```bash
+sudo tailscale set --exit-node=100.x.y.z --exit-node-allow-lan-access=true
+```
+
+圖形介面裡各平台都有對應開關：macOS 是 **Allow Local Network Access**、Windows 是 **Allow local network access**、Android 是 **Allow LAN access**。注意它只放行**本地區網**，網段路由（Subnet Router 廣告來的）本來就不受影響。
+
+## 自訂 ACL 時要注意
+
+預設 policy 下，tailnet 裡所有人都能使用已核准的 Exit Node，什麼都不用加。但只要改過 tailnet policy file，就得明確放行，而且目的地不是寫那台裝置：
+
+```json
+"grants": [
+  {
+    "src": ["group:dev"],
+    "dst": ["autogroup:internet"],
+    "ip": ["*:*"]
+  }
+]
+```
+
+- `dst` 要寫 **`autogroup:internet`**（「允許經由 Exit Node 上網」），寫成那台裝置的 IP 或名稱只會允許**連到**它（例如 SSH），不能**經由**它上網。
+- 要限定只能經由**特定幾台**出口出去，在 grant 加上 `via` 欄位指定路由裝置的 tag（`via` 只接受 tag），例如限定只能走打上 `tag:exit-node` 的裝置：
+
+```json
+"grants": [
+  {
+    "src": ["group:dev"],
+    "dst": ["autogroup:internet"],
+    "ip": ["*"],
+    "via": ["tag:exit-node"]
+  }
+]
+```
+
+`via` 同樣能指定 subnet router 或 app connector，細節見 grants 語法的 [routing specifications](https://tailscale.com/docs/reference/syntax/grants#routing-specifications)。
+
+## 常見問題
+
+- **用了 Exit Node 之後連不到本地印表機／NAS？** 這是預設行為，開 [Allow LAN access](#連本地區網exit-node-allow-lan-access) 即可。
+- **廣告了，別人的清單裡卻看不到？** 還沒在管理後台核准（或補進 `autoApprovers`），照第 3 步處理。
+- **macOS／Windows 當 Exit Node，速度或穩定度不佳？** 這兩個平台目前以 userspace 路由實作、仍在最佳化中；macOS 另外要防止裝置睡眠，否則睡著 Exit Node 就斷了（[官方 issue #3574](https://github.com/tailscale/tailscale/issues/3574)）——macOS 13 以上在「系統設定」裡：桌機在「能源」、筆電在「電池 › 選項」，開啟防止顯示器關閉時自動睡眠的選項（macOS 12 以前在「系統偏好設定 › 省電 Energy Saver」勾同樣的選項）。Windows 上 DNS 的實作也佔系統執行緒（[官方 issue #3588](https://github.com/tailscale/tailscale/issues/3588)）。要穩定當出口，Linux 仍是最成熟的選擇。
+- **Google Cloud 上的 Linux VM 當 Exit Node 有狀況？** 這是已知組合問題，官方有[參考架構與解法](https://tailscale.com/docs/reference/reference-architectures/gcp#linux-vms-using-exit-nodes)。
+- **Windows 更新重開後 Exit Node 就停了？** 建議開 **Run Unattended**（無人值守模式），登出或重開後 Tailscale 仍會在背景執行。
+
+## 延伸
+
+- **Mullvad Exit Node**：加購 Mullvad VPN 後可以直接把 Mullvad 的伺服器當 Exit Node 用（換國家 IP、公共 IP 隱藏），見[官方文件](https://tailscale.com/docs/features/exit-nodes/mullvad-exit-nodes)。本站之後也會有專文。
+- **Apple TV 當 Exit Node**：接電源、掛在電視旁的 Apple TV 是現成的家庭出口，見[官方文件](https://tailscale.com/docs/install/appletv)。
+- **效能調校**：Linux 上的 Exit Node 可以用 UDP GRO forwarding、BBR 等手法大幅提升轉發效能，本站之後會有專文（尚未上線），等不及可先看[官方效能調校文件](https://tailscale.com/kb/1320/performance-tuning)。
+
+## 參考資料
+
+- [Exit nodes（官方文件）](https://tailscale.com/kb/1103/exit-nodes)
+- [`autoApprovers` 語法參考](https://tailscale.com/docs/reference/syntax/policy-file#autoapprovers)
+- [Mullvad exit nodes（官方文件）](https://tailscale.com/docs/features/exit-nodes/mullvad-exit-nodes)
+- [效能調校（官方文件）](https://tailscale.com/kb/1320/performance-tuning)
