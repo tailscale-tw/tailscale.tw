@@ -8,7 +8,7 @@ sidebar:
 
 在咖啡廳、機場用不信任的公共 Wi-Fi，或是人在國外需要用本國 IP 連銀行、訂票網站時，可以把流量全部經由自己家裡（或任何信任的裝置）出去。Tailscale 預設只管 tailnet 內裝置之間的流量、不碰上網流量；開啟 **Exit Node** 後，就能像傳統 VPN 一樣讓所有流量從指定裝置出去。
 
-> 本文以 Tailscale v1.102（2026 年 10 月）為準，指令採官方文件目前的 `tailscale set` 語法；同樣的旗標也相容於舊式的 `tailscale up` 寫法。
+> 本文以 Tailscale v1.102（2026 年 10 月）為準，指令採官方文件目前的 `tailscale set` 語法。同樣的旗標也相容於舊式的 `tailscale up`，但用 `up` 改設定時要把之前設過的所有非預設旗標一次帶齊——漏帶會直接報錯（防止不小心把舊設定清掉）——要改單一設定用 `tailscale set` 就好。
 
 ## Exit Node 是什麼
 
@@ -23,7 +23,7 @@ Exit Node 是 tailnet 裡一台被指定為「出口」的裝置：其他裝置�
 三步缺一不可，所以家裡有人掛了 Exit Node，不代表整個 tailnet 的流量都被導過去。另外兩個特性：
 
 - 只有「不是已導向 [Subnet Router](/features/subnet-router/) 或 app connector」的流量會經由 Exit Node；連向其他 tailnet 裝置的流量照走原路，不受影響。
-- 使用 Exit Node 時，**預設連不到自己所在的區網**（本地印表機、NAS 都會斷），要開 [Allow LAN access](#連本地區網--exit-node-allow-lan-access)。
+- 使用 Exit Node 時，**預設連不到自己所在的區網**（本地印表機、NAS 都會斷），要開 [Allow LAN access](#連本地區網exit-node-allow-lan-access)。
 
 ## 與 Subnet Router 的差異
 
@@ -33,7 +33,7 @@ Exit Node 是 tailnet 裡一台被指定為「出口」的裝置：其他裝置�
 | 方向       | 把流量「送出去」           | 讓外部流量「進得來」網段            |
 | 典型情境   | 公共 Wi-Fi 上網、用本國 IP | 存取沒裝 Tailscale 的印表機、IP Cam |
 
-兩者可以同時用：網段流量走 Subnet Router、上網流量走 Exit Node。但同一台裝置**同時**當 Subnet Router 和 Exit Node、又關了 SNAT 的話有已知問題，細節與建議見[該文的 SNAT 一節](/features/subnet-router/)。
+兩者可以同時用：網段流量走 Subnet Router、上網流量走 Exit Node。但同一台裝置**同時**當 Subnet Router 和 Exit Node、又關了 SNAT 的話有已知問題，細節與建議見[該文的 SNAT 一節](/features/subnet-router/#snat來源-ip-的問題)。
 
 ## 設定 Exit Node（Linux）
 
@@ -74,7 +74,7 @@ sudo tailscale up
 }
 ```
 
-> 裝置的金鑰到期後 Exit Node 會跟著失效：伺服器性質的裝置建議在後台關掉金鑰到期（key expiry），或改用 tag（tagged 裝置預設就停用金鑰到期）。
+> 裝置的金鑰到期後會走 **fail close**：其他裝置上的路由（含 `0.0.0.0/0`）會留著但全部不通，官方刻意這樣設計、避免到期後流量退回直接上網而外洩——所以正在使用這台 Exit Node 的裝置會**整個斷網**，而不是退回自己的網路。伺服器性質的裝置要在後台關掉金鑰到期（key expiry），或改用 tag（tagged 裝置預設就停用金鑰到期）。
 
 其他平台：macOS 選 **Exit Node** > **Run Exit Node**、Windows 選 **Exit node** > **Run exit node**、Android 在 app 的 **Exit Node** > **Run as exit node**，都在該裝置的 Tailscale 用戶端裡操作。Apple TV 也可以，設定方式見[官方文件](https://tailscale.com/docs/install/appletv)。
 
@@ -121,13 +121,26 @@ sudo tailscale set --exit-node=100.x.y.z --exit-node-allow-lan-access=true
 ```
 
 - `dst` 要寫 **`autogroup:internet`**（「允許經由 Exit Node 上網」），寫成那台裝置的 IP 或名稱只會允許**連到**它（例如 SSH），不能**經由**它上網。
-- ACL 無法限定「只能用某幾台 Exit Node」——只能整體允許或不允許，這個限制的後續發展可以追[官方 issue #1567](https://github.com/tailscale/tailscale/issues/1567)。
+- 要限定只能經由**特定幾台**出口出去，在 grant 加上 `via` 欄位指定路由裝置的 tag（`via` 只接受 tag），例如限定只能走打上 `tag:exit-node` 的裝置：
+
+```json
+"grants": [
+  {
+    "src": ["group:dev"],
+    "dst": ["autogroup:internet"],
+    "ip": ["*"],
+    "via": ["tag:exit-node"]
+  }
+]
+```
+
+`via` 同樣能指定 subnet router 或 app connector，細節見 grants 語法的 [routing specifications](https://tailscale.com/docs/reference/syntax/grants#routing-specifications)。
 
 ## 常見問題
 
-- **用了 Exit Node 之後連不到本地印表機／NAS？** 這是預設行為，開 [Allow LAN access](#連本地區網--exit-node-allow-lan-access) 即可。
+- **用了 Exit Node 之後連不到本地印表機／NAS？** 這是預設行為，開 [Allow LAN access](#連本地區網exit-node-allow-lan-access) 即可。
 - **廣告了，別人的清單裡卻看不到？** 還沒在管理後台核准（或補進 `autoApprovers`），照第 3 步處理。
-- **macOS／Windows 當 Exit Node，速度或穩定度不佳？** 這兩個平台目前以 userspace 路由實作、仍在最佳化中；macOS 另外要在 **Energy Saver**（省電）勾「防止顯示器關閉時自動進入睡眠」，否則裝置睡著 Exit Node 就斷了（[官方 issue #3574](https://github.com/tailscale/tailscale/issues/3574)）。Windows 上 DNS 的實作也佔系統執行緒（[官方 issue #3588](https://github.com/tailscale/tailscale/issues/3588)）。要穩定當出口，Linux 仍是最成熟的選擇。
+- **macOS／Windows 當 Exit Node，速度或穩定度不佳？** 這兩個平台目前以 userspace 路由實作、仍在最佳化中；macOS 另外要防止裝置睡眠，否則睡著 Exit Node 就斷了（[官方 issue #3574](https://github.com/tailscale/tailscale/issues/3574)）——macOS 13 以上在「系統設定」裡：桌機在「能源」、筆電在「電池 › 選項」，開啟防止顯示器關閉時自動睡眠的選項（macOS 12 以前在「系統偏好設定 › 省電 Energy Saver」勾同樣的選項）。Windows 上 DNS 的實作也佔系統執行緒（[官方 issue #3588](https://github.com/tailscale/tailscale/issues/3588)）。要穩定當出口，Linux 仍是最成熟的選擇。
 - **Google Cloud 上的 Linux VM 當 Exit Node 有狀況？** 這是已知組合問題，官方有[參考架構與解法](https://tailscale.com/docs/reference/reference-architectures/gcp#linux-vms-using-exit-nodes)。
 - **Windows 更新重開後 Exit Node 就停了？** 建議開 **Run Unattended**（無人值守模式），登出或重開後 Tailscale 仍會在背景執行。
 
