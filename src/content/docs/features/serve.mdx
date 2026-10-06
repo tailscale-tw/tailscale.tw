@@ -95,28 +95,26 @@ tailscale serve --bg --tcp=2222 tcp://localhost:22
 
 ## 範例一：分享本機開發中的網站
 
-以 Vite（預設 `5173`）為例。有兩個坑要先避開：Serve 永遠轉給 `http://127.0.0.1`，而 Vite 預設聽的 `localhost` 在 Node 17+ 常只綁到 IPv6 的 `[::1]`，轉發會被拒絕；而且 Vite 6.0.9 / 5.4.12 之後預設擋掉非 localhost 的 Host（DNS rebinding 防護），Serve 轉發帶的是 `*.ts.net` 的 Host，不處理會看到「Blocked request」。所以開發伺服器要這樣起：
-
-```bash
-# 明確聽在 127.0.0.1（仍是本機迴路，不會暴露到區網）
-npm run dev -- --host 127.0.0.1
-```
+以 Vite（預設 `5173`）為例。有兩個坑要先避開：Serve 永遠轉給 `http://127.0.0.1`，而 Vite 預設聽的 `localhost` 在 Node 17+ 常只綁到 IPv6 的 `[::1]`，轉發會被拒絕；而且 Vite 6.0.9 / 5.4.12 之後預設擋掉非 localhost 的 Host（DNS rebinding 防護），Serve 轉發帶的是 `*.ts.net` 的 Host，不處理會看到「Blocked request」。兩個都在 `vite.config.js` 裡處理：
 
 ```js
-// vite.config.js：允許 tailnet 網域的 Host
+// vite.config.js
 import { defineConfig } from "vite";
 
 export default defineConfig({
   server: {
+    // 明確聽在 127.0.0.1（仍是本機迴路，不會暴露到區網）
     host: "127.0.0.1",
+    // 允許 tailnet 網址的 Host；開頭的 . 表示包含所有子網域
     allowedHosts: [".ts.net"],
   },
 });
 ```
 
-> 若 tailnet 使用自訂網域，把 `.ts.net` 換成該網域後綴。開頭的 `.` 表示包含該網域本身及所有子網域。
-
 ```bash
+# 開發伺服器照常跑起來
+npm run dev
+
 # 另開一個終端機分享出去
 tailscale serve --bg 5173
 ```
