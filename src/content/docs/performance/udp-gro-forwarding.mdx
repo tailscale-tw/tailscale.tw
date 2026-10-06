@@ -19,14 +19,14 @@ See https://tailscale.com/s/ethtool-config-udp-gro
 
 ## 警告是什麼意思
 
-Linux 上廣告路由時（`--advertise-routes`、`--advertise-exit-node`），`tailscale up` 會順手檢查這台機器的 UDP 轉送配置（[原始碼](https://github.com/tailscale/tailscale/blob/main/net/netkernelconf/netkernelconf_linux.go)）：檢查通過就安靜地繼續；不符合最佳配置就印出上面那段警告。它只是效率建議，不影響功能。
+Linux 上廣告路由時（`--advertise-routes`、`--advertise-exit-node`），`tailscale up` 和 `tailscale set` 都會順手檢查這台機器的 UDP 轉送配置（[原始碼](https://github.com/tailscale/tailscale/blob/main/net/netkernelconf/netkernelconf_linux.go)）：檢查通過就安靜地繼續；不符合最佳配置就印出上面那段警告。它只是效率建議，不影響功能。
 
 檢查的順序值得知道：
 
 1. 先看 TUN 介面有沒有 `tx-udp-segmentation`（UDP segmentation offload）。沒有的話直接略過、不會警告——這時開不開 GRO forwarding 都用不上。
-2. TUN 支援時，再檢查**預設路由那張網卡**：`rx-udp-gro-forwarding` 要開、`rx-gro-list` 要關。兩個條件任一不符，就發警告。
+2. TUN 支援時，再檢查**預設路由那張網卡**：`rx-udp-gro-forwarding` 要開、`rx-gro-list` 要關。兩個條件任一不符，就發警告。另外也有直接略過的情況：跑 [userspace networking 模式](https://tailscale.com/kb/1112/userspace-networking)時本來就沒有 TUN 可查，檢查整個跳過；預設路由網卡根本沒有 `rx-udp-gro-forwarding` 這個 feature（虛擬網卡常見）時也會略過。
 
-也就是說：看到警告，代表 kernel 夠新、TUN 支援 USO，只差網卡那兩個開關；沒看到警告不代表已最佳化，也可能是 kernel 太舊、根本用不上。
+也就是說：看到警告，代表 kernel 夠新、TUN 支援 USO，只差網卡那兩個開關；沒看到警告不代表已最佳化——可能是 kernel 太舊、跑的是 userspace networking 模式，或網卡根本不支援這些 offload、想設也沒得設。
 
 ## 官方建議的設定
 
@@ -62,7 +62,7 @@ rx-udp-gro-forwarding: on
 
 GRO（Generic Receive Offload）讓 kernel 在收封包時，把同一條連線連續到來的小封包合併成一個大封包，再往上層送。後續的路由、防火牆、NAT 都只處理一次，不必對每個小封包各跑一遍。
 
-TCP 很早就有 GRO。UDP 的 GRO 則分兩種情況：封包是給本機 socket 收的，或是要轉送到別的介面去的。exit node 屬於後者：網路上回來的 UDP 封包（例如 QUIC、視訊通話）進了實體網卡，要經過 NAT 轉送到 `tailscale0` 這張 TUN 介面，再由 tailscaled 加密送回 tailnet 裡的裝置。Subnet Router 同樣有轉送路徑：tailnet 裝置存取區網設備的流量，從網卡進出、經過 NAT 在 TUN 之間轉送——UDP 流量（例如 DNS 查詢、QUIC）在同樣的位置受惠。
+TCP 很早就有 GRO。UDP 的 GRO 則分兩種情況：封包是給本機 socket 收的，或是要轉送到別的介面去的。exit node 屬於後者：網路上回來的 UDP 封包（例如 QUIC、視訊通話）進了實體網卡，要經過 NAT 轉送到 `tailscale0` 這張 TUN 介面，再由 tailscaled 加密送回 tailnet 裡的裝置。Subnet Router 同樣有轉送路徑：tailnet 裝置存取區網設備的流量，從網卡進出、經過 NAT 在 TUN 之間轉送——QUIC、影音串流這類大宗 UDP 在同樣的位置受惠。
 
 針對轉送路徑的 UDP GRO，kernel 有兩套做法：
 
@@ -77,7 +77,7 @@ TCP 很早就有 GRO。UDP 的 GRO 則分兩種情況：封包是給本機 socke
 
 TUN 支援 UDP segmentation offload（USO）是 Andrew Melnychenko 的 [TUN/VirtioNet USO patch 系列](https://lkml.iu.edu/hypermail/linux/kernel/2212.0/06933.html)，在 Linux 6.2 合併。有了它，tailscaled 一次 read 就能從 TUN 拿到一批 UDP 資料，加密、送出也能整批處理。Tailscale 這邊的批次處理與 UDP GSO/GRO 支援，背景可以參考官方部落格的 [Surpassing 10Gb/s with Tailscale](https://tailscale.com/blog/more-throughput) 與更早的 [throughput improvements](https://tailscale.com/blog/throughput-improvements)；kernel 端的總覽見 [segmentation offloads 文件](https://docs.kernel.org/networking/segmentation-offloads.html)。
 
-Tailscale 自己的檢查程式也是照這個順序判斷：先看 TUN 有沒有 `tx-udp-segmentation`，沒有就直接略過不檢查，因為這時 UDP GRO forwarding 開不開都用不上；TUN 支援時，才去檢查預設路由網卡是否符合「開 `rx-udp-gro-forwarding`、關 `rx-gro-list`」，不符合就發出開頭那段警告。
+Tailscale 自己的檢查程式也是照這個順序判斷——這就是前面「檢查的順序」先看 TUN 的原因：TUN 收不了 UDP GSO 大封包時，合併了也得切回去，開不開都用不上，檢查乾脆略過。
 
 ## 讓設定重開機後還在
 
@@ -157,13 +157,13 @@ ExecMainStatus=0
 這個調校的作用位置是「**接收 UDP、要轉送進 TUN 的那張網卡**」，所以兩種情境都適用：
 
 - **Exit Node**：tailnet 裝置的所有上網流量經由它出去，QUIC、視訊通話這類大宗 UDP 都在受惠範圍，效果最明顯。
-- **Subnet Router**：tailnet 裝置存取區網設備的 UDP 流量（DNS 查詢、QUIC、串流）同樣經過這條轉送路徑。
+- **Subnet Router**：tailnet 裝置存取區網設備的 UDP 流量（QUIC、影音串流這類大宗 UDP）同樣經過這條轉送路徑。
 
 官方檢查與指令針對的是**預設路由的網卡**。如果 Subnet Router 往區網走的是另一張網卡，把同一行 `ethtool` 指令用在接收該流量的網卡上也是同樣的機制——效果在「收 UDP 的那張」。
 
 ## 常見問題
 
-- **設定了，警告還在？** 確認改的是「預設路由」那張網卡（`ip -o route get 8.8.8.8` 查），再用 `ethtool -k` 確認兩個選項的狀態。改完後重跑一次 `tailscale up`（帶原本的旗標）會再做一次檢查。
+- **設定了，警告還在？** 確認改的是「預設路由」那張網卡（`ip -o route get 8.8.8.8` 查），再用 `ethtool -k` 確認兩個選項的狀態。改完後再跑一次 `tailscale set --advertise-exit-node`（或 `--advertise-routes=...`）會再做一次檢查。
 - **雲端 VM 上從來沒看過警告？** 虛擬網卡或 TUN 不支援這些 offload 時，檢查會直接略過、不會有警告——這時也沒有可設的東西，不用理會。
 - **需要重啟 tailscaled 嗎？** 不用，`ethtool` 的修改即時生效；重跑 `tailscale up` 只是為了讓它再檢查一次。
 - **和 BBR 有關係嗎？** 沒有。UDP GRO forwarding 加速的是**轉送**的 UDP；BBR 是 TCP 擁塞控制，只影響本機發起或終止的連線，見[下一篇](/performance/bbr/)。
