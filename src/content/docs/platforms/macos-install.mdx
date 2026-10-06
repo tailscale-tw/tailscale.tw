@@ -22,7 +22,7 @@ sidebar:
 
 - 不需要 Apple ID，打開 `.pkg` 就能裝
 - 更新由 app 內建的更新器（Sparkle）處理，不用等 App Store 審核，安全修正推出更快
-- 能偵測其他工具干擾 VPN 通道，並主動提醒你
+- 能偵測其他工具干擾 VPN 隧道，並主動提醒你
 
 Tailscale 官方目前最推薦的就是這個版本。
 
@@ -47,61 +47,67 @@ mas install 1475387142
 
 ### Standalone 版
 
-從官方下載頁取回 `.pkg`（[Tailscale-latest-macos.pkg](https://pkgs.tailscale.com/stable/Tailscale-latest-macos.pkg)），點兩下安裝。
+從官方下載頁取回 `.pkg`（[Tailscale-latest-macos.pkg](https://pkgs.tailscale.com/stable/Tailscale-latest-macos.pkg)），點兩下安裝；慣用 Homebrew 的話，`brew install --cask tailscale-app` 裝的也是同一個 `.pkg`。
 
 ### 開源 tailscaled 版
 
 用 Homebrew 安裝並啟動：
 
 ```bash
-brew install tailscale
+brew install --formula tailscale
 sudo brew services start tailscale
 sudo tailscale up
 ```
 
-`brew services` 會透過 launchd 把 `tailscaled` 註冊成開機自動啟動的系統服務。不想用 Homebrew 也可以自己編：先安裝 Go，執行 `go install tailscale.com/cmd/tailscale{,d}@main`，再跑 `sudo tailscaled install-system-daemon` 把它裝成 launchd 服務（詳見[官方 wiki](https://github.com/tailscale/tailscale/wiki/Tailscaled-on-macOS)）。最後一樣執行 `sudo tailscale up` 登入。
+`--formula` 要記得帶：Homebrew 上還有個裝 Standalone 版 GUI 的 cask `tailscale-app`，而且它以前的名字就叫 `tailscale`，明確指定才不會裝錯。`brew services` 會透過 launchd 把 `tailscaled` 註冊成開機自動啟動的系統服務。不想用 Homebrew 也可以自己編譯：先安裝 Go，執行 `go install tailscale.com/cmd/tailscale{,d}@main`，再跑 `sudo tailscaled install-system-daemon` 把它裝成 launchd 服務（詳見[官方 wiki](https://github.com/tailscale/tailscale/wiki/Tailscaled-on-macOS)）。最後一樣執行 `sudo tailscale up` 登入。
 
-> 開源版的 MagicDNS 可用，但 `tailscaled` 不會自動修改你的 DNS 設定：要自己把這台機器的 DNS 指到 `100.100.100.100`，否則連得上 IP、叫不出 MagicDNS 名稱。
+> 開源版的 MagicDNS 由 `tailscaled` 自動設定：它會用 macOS 的 split DNS，在 `/etc/resolver/` 底下為 tailnet 網域建立設定檔，把這些網域指到 `100.100.100.100`，不會動到機器的全域 DNS。
 
 ## 功能差異比較表
 
 完整差異如下（整理自[官方比較表](https://tailscale.com/kb/1065/macos-variants)）：
 
-| 功能                      | App Store 版        | Standalone 版    | 開源 tailscaled 版               |
-| ------------------------- | ------------------- | ---------------- | -------------------------------- |
-| VPN 實作方式              | Network Extension   | System Extension | utun 介面                        |
-| GUI                       | 有                  | 有               | 沒有                             |
-| CLI                       | 有                  | 有               | 有                               |
-| 需要 Apple ID             | 需要                | 不用             | 不用                             |
-| 登入前（開機時）執行      | 不能（沙盒限制）    | 不能             | 能                               |
-| 憑證儲存                  | 使用者 Keychain     | 磁碟上的檔案     | 磁碟上的檔案                     |
-| 沙盒                      | 有                  | 僅系統擴充功能   | 沒有                             |
-| 自動更新                  | 有，由 App Store 管 | 有，app 內建     | 沒有，需手動更新                 |
-| 開放原始碼                | 否                  | 否               | 是                               |
-| MagicDNS                  | 支援                | 支援             | 支援（DNS 要自己設）             |
-| Taildrop                  | 支援                | 支援             | 不完整                           |
-| Funnel                    | 不支援              | 不支援           | 支援                             |
-| Exit node                 | 支援                | 支援             | 部分：可當 exit node，不能用別的 |
-| MDM 支援                  | 有                  | 有               | 沒有                             |
-| 當 Tailscale SSH server   | 不能                | 不能             | 能                               |
-| 當 Tailscale SSH client   | 能                  | 能               | 能                               |
-| `tailscale ssh` 指令      | 沒有，用一般 `ssh`  | 有               | 有                               |
-| 支援 services collection  | 沒有                | 有               | 有                               |
-| 與 Screen Time 過濾器相容 | 不相容              | 相容             | 相容                             |
-| 產生支援用設定報告        | 有限                | 能               | 不能                             |
+| 功能                     | App Store 版        | Standalone 版    | 開源 tailscaled 版               |
+| ------------------------ | ------------------- | ---------------- | -------------------------------- |
+| VPN 實作方式             | Network Extension   | System Extension | utun 介面                        |
+| GUI                      | 有                  | 有               | 沒有                             |
+| CLI                      | 有                  | 有               | 有                               |
+| 需要 Apple ID            | 需要                | 不用             | 不用                             |
+| 登入前（開機時）執行     | 不能（沙盒限制）    | 不能             | 能                               |
+| 金鑰與狀態存放           | 使用者 Keychain     | 磁碟上的檔案     | 磁碟上的檔案                     |
+| 沙盒                     | 有                  | 僅系統擴充功能   | 沒有                             |
+| 自動更新                 | 有，由 App Store 管 | 有，app 內建     | 沒有，需手動更新                 |
+| 開放原始碼               | 否                  | 否               | 是                               |
+| MagicDNS                 | 支援                | 支援             | 支援                             |
+| Taildrop                 | 支援                | 支援             | 不完整                           |
+| Funnel                   | 不支援              | 不支援           | 支援                             |
+| Exit node                | 支援                | 支援             | 部分：可當 exit node，不能用別的 |
+| MDM 支援                 | 有                  | 有               | 沒有                             |
+| 當 Tailscale SSH server  | 不能                | 不能             | 能                               |
+| 當 Tailscale SSH client  | 能                  | 能               | 能                               |
+| `tailscale ssh` 指令     | 沒有，用一般 `ssh`  | 有               | 有                               |
+| 支援 services collection | 沒有                | 有               | 有                               |
+| 與螢幕使用時間過濾器相容 | 不相容              | 相容             | 相容                             |
+| 產生支援用設定報告       | 有限                | 能               | 不能                             |
 
 幾個值得注意的地方：
 
 - 兩個 GUI 版**都不能跑 Funnel、不能當 Tailscale SSH server**——在 macOS 上這兩個功能只有開源版支援。想試 Funnel 的話可先看 [Tailscale Funnel 官方文件](https://tailscale.com/kb/1311/funnel)。
 - Serve 在 GUI 版上受沙盒限制：只能分享連接埠，不能分享檔案或資料夾，詳見本站 [Tailscale Serve](/features/serve/) 一文。
-- App Store 版的憑證存在使用者 Keychain、跟著登入的使用者走，也因為沙盒的關係沒辦法在使用者登入前執行；開源版能辦到這點，斷電重開後不用登入就能連回這台機器（例如遠端 VNC）。
+- App Store 版的金鑰與狀態存在使用者 Keychain、跟著登入的使用者走，也因為沙盒的關係沒辦法在使用者登入前執行；開源版能辦到這點，斷電重開後不用登入就能連回這台機器（例如遠端 VNC）。
 
 ## 怎麼判斷自己裝的是哪一版
 
 - **完全沒有選單列圖示、只能用指令**：就是開源 tailscaled 版，它沒有 GUI。
-- **有選單列圖示**：是兩個 GUI 版之一。兩版都裝在 `/Applications/Tailscale.app`，介面一模一樣，最可靠的方式是回想當初怎麼裝的、更新從哪裡來：
-  - 當初從 App Store 裝、更新出現在 App Store，帳號的「已購項目」也找得到 Tailscale → **App Store 版**
-  - 當初下載 `.pkg` 裝、更新由 app 自己處理 → **Standalone 版**
+- **有選單列圖示**：是兩個 GUI 版之一。兩版都裝在 `/Applications/Tailscale.app`，介面一模一樣，從外觀分不出來。
+
+兩個 GUI 版可以用 App Store 的收據檔分辨——只有 App Store 版的 app 裡會有 `_MASReceipt`：
+
+```bash
+ls /Applications/Tailscale.app/Contents/_MASReceipt
+```
+
+有東西就是 **App Store 版**，顯示 `No such file or directory` 就是 **Standalone 版**。也可以回想當初怎麼裝的：從 App Store 裝、更新出現在 App Store 的是 App Store 版；下載 `.pkg` 裝、更新由 app 自己處理的是 Standalone 版。
 
 ## 切換版本
 
@@ -112,11 +118,11 @@ App Store 版和 Standalone 版**不能同時裝在同一台機器上**：兩個
 3. 重新開機
 4. 再安裝另一個版本
 
-換到開源版也一樣：先照上面的步驟把 GUI 版移乾淨，再 `brew install tailscale`。反方向（開源版換回 GUI 版）則先把服務停掉並移除：
+換到開源版也一樣：先照上面的步驟把 GUI 版移乾淨，再 `brew install --formula tailscale`。反方向（開源版換回 GUI 版）則先把服務停掉並移除：
 
 ```bash
 sudo brew services stop tailscale
-brew uninstall tailscale
+brew uninstall --formula tailscale
 ```
 
 自己編譯安裝的話，改用 `sudo tailscaled uninstall-system-daemon` 移除。
@@ -131,7 +137,6 @@ brew uninstall tailscale
 
 - **兩個版本都裝了，Tailscale 連不上？** App Store 版和 Standalone 版同時存在會讓擴充功能起不來。照「切換版本」一節的步驟移除其中一個，清空垃圾桶再重開機。
 - **裝的是 App Store 版，瀏覽器打不開網頁？** 檢查是不是「螢幕使用時間」的內容與隱私權限制（網站內容過濾器）和 Tailscale 相衝。這是 App Store 版的已知限制，無法相容；換 Standalone 版就能解決。
-- **開源版的 MagicDNS 沒作用？** `tailscaled` 不會自動改 DNS，手動把這台機器的 DNS 設成 `100.100.100.100`。
 - **`tailscale serve` 不能分享資料夾？** GUI 版的沙盒限制：只能分享連接埠。見本站 [Tailscale Serve](/features/serve/) 一文的說明。
 
 ## 參考資料
