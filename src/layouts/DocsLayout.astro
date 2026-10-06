@@ -140,7 +140,7 @@ const hasPagination = Astro.slots.has("pagination");
             <aside
               id="desktop-sidebar"
               data-nb-desktop-sidebar
-              class="hidden md:flex w-60 lg:w-(--nb-sidebar-width) shrink-0 border-r border-border bg-background sticky top-14 h-[calc(100vh-3.5rem)] flex-col overflow-y-auto overscroll-contain relative"
+              class="hidden md:flex w-60 xl:w-(--nb-sidebar-width) shrink-0 border-r border-border bg-background sticky top-14 h-[calc(100vh-3.5rem)] flex-col overflow-y-auto overscroll-contain relative"
             >
               {hasSidebar ? (
                 <slot name="sidebar" />
@@ -304,7 +304,7 @@ const hasPagination = Astro.slots.has("pagination");
                       class={description ? undefined : "mt-3"}
                     />
                     {headings !== false && headings.length > 0 && (
-                      <div class="border-border bg-background/95 supports-[backdrop-filter]:bg-background/80 sticky top-14 z-20 -mx-4 mt-3 border-y px-4 py-2 backdrop-blur md:-mx-6 md:px-6 xl:hidden">
+                      <div class="border-border bg-background/95 supports-[backdrop-filter]:bg-background/80 sticky top-14 z-20 -mx-4 mt-3 border-y px-4 py-2 backdrop-blur md:-mx-6 md:px-6 lg:hidden">
                         <MobileTOC headings={headings} />
                       </div>
                     )}
@@ -366,9 +366,9 @@ const hasPagination = Astro.slots.has("pagination");
           {headings !== false && (hasToc || headings.length > 0) && (
             <aside
               data-nb-toc-scroll-host
-              class="hidden xl:block w-(--nb-toc-width) shrink-0 sticky top-14 h-[calc(100vh-3.5rem)] overflow-y-auto"
+              class="hidden lg:block w-56 xl:w-(--nb-toc-width) shrink-0 sticky top-14 h-[calc(100vh-3.5rem)] overflow-y-auto"
             >
-              <div class="pt-6 pb-8 pl-8 pr-6">
+              <div class="pt-6 pb-8 pl-6 pr-4 xl:pl-8 xl:pr-6">
                 {hasToc ? <slot name="toc" /> : <TOC headings={headings} />}
               </div>
             </aside>
