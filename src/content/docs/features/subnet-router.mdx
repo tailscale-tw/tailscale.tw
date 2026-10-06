@@ -134,11 +134,11 @@ sudo tailscale set --snat-subnet-routes=false
 
 - **其他平台當 Subnet Router**：macOS 三個版本都能當——兩個 GUI 版廣告路由時會自動開 IP forwarding，但 `tailscale` 指令要先照[這篇](/platforms/macos-install/)裝好；開源 `tailscaled` 版的 `tailscale` 指令照本文的 Linux 步驟下，不過上面的 IP forwarding 設定是 Linux 的做法（`/etc/sysctl.d`、`net.ipv4.ip_forward` 在 macOS 上都不存在），macOS 上要不要、怎麼開官方文件沒有交代——要用 macOS 當 Subnet Router，兩個 GUI 版比較省事。Windows、Android 可以；Apple TV 僅支援 IPv4。Android 裝置當 Subnet Router 很耗電，適合接電源的 Android TV。
 - **高可用性（HA）**：多台 Subnet Router 廣告**完全相同**的網段才互為容錯備援；要注意 HA 備援機別開 `--accept-routes`，否則它會把流量繞去主路由器。更細的網段分配（longest prefix matching）時，記得 Tailscale 不會自動退回較寬的前綴——特定網段的裝置下線，流量就是直接丟包。
-- **效能調校**：Subnet Router 的轉發效能可用 UDP GRO forwarding 和 BBR 大幅提升，本站之後會有專文（尚未上線），等不及可先看[官方效能調校文件](https://tailscale.com/kb/1320/performance-tuning)。
+- **效能調校**：轉送 UDP 的效能可以用 [UDP GRO forwarding](/performance/udp-gro-forwarding/) 提升；TCP 的擁塞控制（[BBR](/performance/bbr/)）則只影響節點自己發起或終止的連線，對被轉送的流量沒有作用。
 
 ## 參考資料
 
 - [Subnet routers（官方文件）](https://tailscale.com/kb/1019/subnets)
 - [`autoApprovers` 語法參考](https://tailscale.com/docs/reference/syntax/policy-file#autoapprovers)
 - [Route injection（官方文件）](https://tailscale.com/docs/reference/route-injection)
-- [效能調校（官方文件）](https://tailscale.com/kb/1320/performance-tuning)
+- [效能調校（官方文件）](https://tailscale.com/kb/1320/performance-best-practices)

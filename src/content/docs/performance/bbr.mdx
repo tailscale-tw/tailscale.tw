@@ -1,0 +1,109 @@
+---
+title: BBR：擁塞控制在 Tailscale 節點上的實際效果
+description: 在 Tailscale 節點上啟用 Linux 的 BBR 擁塞控制前，先弄清楚它只影響本機發起或終止的 TCP 連線，對被 Subnet Router 與 Exit Node 轉送的流量沒有影響
+sidebar:
+  order: 2
+  label: BBR
+---
+
+網路上不少文章會叫你在 Linux 的 [Exit Node](/features/exit-node/) 上開 BBR，說「出口會變快」。先把結論寫在前面：**TCP 擁塞控制只作用在由本機發起或終止的 TCP 連線上**。kernel 模式下的 [Subnet Router](/features/subnet-router/) 與 Exit Node 只是轉送封包，被轉送連線的擁塞控制在**兩端裝置**上——在 exit node 上開 BBR，並不會讓經過它的流量變快。這篇說清楚 BBR 在 Tailscale 節點上哪些情境有效、哪些無效，再給啟用與驗證的步驟。
+
+> 本文以 Tailscale v1.102（2026 年 10 月）為準；netstack 的行為以 v1.102.5 的[原始碼](https://github.com/tailscale/tailscale/blob/main/wgengine/netstack/netstack.go)查證。Linux 端的事實以 kernel 原始碼與文件為準。
+
+## BBR 是什麼
+
+BBR 是 Google 開發的 Linux TCP 擁塞控制演算法，2016 年進入 kernel（[Linux 4.9](https://github.com/torvalds/linux/blob/master/net/ipv4/tcp_bbr.c) 起可用）。大多數發行版的預設是 CUBIC。
+
+兩者的差異，照 kernel [原始碼註解](https://github.com/torvalds/linux/blob/master/net/ipv4/tcp_bbr.c)的說法：BBR 根據 ACK 估計的**交付速率**（delivery rate）計算送出速率，核心演算法**不直接對丟包或延遲做反應**；CUBIC 則是以丟包為主要訊號調整擁塞視窗的 loss-based 演算法。在高延遲、會丟包的路徑上，BBR 通常不會像 CUBIC 一樣把速率砍到很低——這是它常被推薦的原因。
+
+## 先弄清楚：BBR 影響哪些連線
+
+擁塞控制是 TCP **端點**的行為，只有「發起」或「終止」這條 TCP 連線的機器，它的擁塞控制才有作用。把這個原則套到 Tailscale 節點上：
+
+- **節點之間的隧道走 WireGuard（UDP）**——隧道本身沒有 TCP 擁塞控制這回事。
+- **kernel 模式（預設）的 Subnet Router／Exit Node 只是轉送 IP 封包**：經過它們的 TCP 連線，擁塞控制在兩端裝置上（用戶端與目的地伺服器各自的核心）。假設筆電透過家裡的 exit node 上 YouTube，這條 TCP 連線的速度由筆電和 YouTube 伺服器的擁塞控制決定，exit node 開什麼演算法都不影響它。
+- **由 tailscaled 的 netstack 終止的連線**（[userspace networking 模式](https://tailscale.com/kb/1112/userspace-networking)、[Tailscale Serve](/features/serve/)、Funnel、Tailscale SSH）：TCP 在 tailscaled 內部的 netstack 終止，**kernel 的 sysctl 影響不到它**。而且 tailscaled 在原始碼裡明確把 netstack 的擁塞控制寫死成 reno（註解說明是為了避開 gVisor cubic 在擁塞視窗計算上的整數溢位問題，見 [gvisor#11632](https://github.com/google/gvisor/issues/11632)）——所以這些連線連「改擁塞控制」的選項都沒有。
+
+整理成表：
+
+| 連線類型                                           | kernel BBR 有沒有影響      |
+| -------------------------------------------------- | -------------------------- |
+| 節點上由 kernel 終止的服務（sshd、nginx 等）       | 有                         |
+| 節點自己對外發起的 TCP（下載、更新、備份）         | 有                         |
+| 經 Subnet Router／Exit Node **轉送**的連線         | 沒有（擁塞控制在兩端）     |
+| 節點之間的隧道流量                                 | 沒有（走 UDP）             |
+| userspace networking、Serve、Funnel、Tailscale SSH | 沒有（netstack 固定 reno） |
+
+所以「在 exit node 上開 BBR」真正的效果是：**這台機器自己的**對外連線（系統更新、拉容器映像檔）和**這台機器上直接跑的服務**變得抗丟包；經它轉送的流量不變。如果你的 exit node 只是單純的路由器，開 BBR 對 tailnet 裡的裝置沒有可感知的差異。
+
+## 啟用方式
+
+先確認 kernel 支援。BBR 從 Linux 4.9 就有（現在的發行版都遠超過），但可能編成模組還沒載入：
+
+```bash
+modprobe tcp_bbr
+sysctl net.ipv4.tcp_available_congestion_control
+```
+
+依 [kernel 文件](https://docs.kernel.org/networking/ip-sysctl.html)，`tcp_available_congestion_control` 列出**已註冊**的演算法，有些以模組形式存在但尚未載入——清單裡沒有 `bbr` 的話，就是模組沒載入（或核心沒編）。
+
+把設定寫進 `/etc/sysctl.d/99-bbr.conf`：
+
+```ini
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+```
+
+套用並確認：
+
+```bash
+sudo sysctl -p /etc/sysctl.d/99-bbr.conf
+sysctl net.ipv4.tcp_congestion_control
+sysctl net.core.default_qdisc
+```
+
+`net.ipv4.tcp_congestion_control` 顯示 `bbr` 就生效了。
+
+為什麼要一起設 `fq`：照 kernel 原始碼註解的說法，BBR **建議**搭配 fq 佇列管理（`man tc-fq`）——這樣 pacing 的工作交給 qdisc；沒有 fq 時 TCP 會退回每個 socket 一個高解析度計時器的內建 pacing，比較耗資源。所以 fq 不是硬性必要，而是讓 BBR 跑得省力的標準搭配。
+
+兩個小提醒：
+
+- 擁塞控制是**新連線**套用：已建立的連線不受影響，而且既有服務的 listener 是在舊設定下建立的，繼續收連線會沿用舊演算法——長跑的服務（nginx、sshd 等）要重啟才會真正用上 bbr。
+- 只想給特定服務用的話，也可以不動全系統預設，用 `setsockopt(TCP_CONGESTION)` 在應用程式層指定（iperf3 就有 `-C bbr` 這個參數），對照測試時很方便。
+
+## 用 iperf3 驗證
+
+以下提供兩個測法，實際數據請自行量測——效能結論跟硬體、路徑、對端有關，本文不附任何特定數字。
+
+**測法一：轉送的流量（預期沒有差異）**
+
+1. 在節點 A 上啟用 BBR 之前，從 tailnet 裝置 B 啟用 A 當 exit node，對外部的 iperf3 伺服器量一次：`iperf3 -c <server> -t 30`
+2. 在 A 上啟用 BBR，B 重複測量幾輪
+
+這條 TCP 連線的擁塞控制在 B 和外部伺服器上，A 只是轉送——前後數字應該在同一個區間內浮動。想在這個測試裡看到 BBR 的效果，要開 BBR 的是**發起連線的那台**（B），不是 exit node。
+
+**測法二：節點自己的服務（預期有差異）**
+
+1. 在節點 A 上跑 `iperf3 -s`
+2. 從 tailnet 裝置 B 直連 A 的 Tailscale IP：`iperf3 -c <A 的 Tailscale IP> -t 30`——這條連線由 A 的 kernel 終止
+3. 給路徑加一點丟包，讓擁塞控制的差異顯現：在 A 或 B 的實體網卡上 `sudo tc qdisc add dev "$NETDEV" root netem loss 1%`，再量一輪；A 上切換 `sysctl net.ipv4.tcp_congestion_control` 在 cubic 與 bbr 之間前後對比
+4. 測完記得清掉：`sudo tc qdisc del dev "$NETDEV" root`
+
+順帶一提，轉送 UDP 的效能（exit node、subnet router 的大宗流量）要靠 [UDP GRO forwarding](/performance/udp-gro-forwarding/) 那篇的調校，跟 BBR 是兩件獨立的事。
+
+## 常見問題
+
+- **開了 BBR，經過 exit node 的速度變快了？** 先確認是不是同時做了別的變動——最常見的是一起設了 [UDP GRO forwarding](/performance/udp-gro-forwarding/)（真的會加速轉送的 UDP），或是量測誤差。照本文的表逐項對照，經過轉送的 TCP 不受本機擁塞控制影響。
+- **`tcp_available_congestion_control` 裡沒有 bbr？** `modprobe tcp_bbr` 後再看；模組載入後就會出現。還是沒有就是核心沒編進 BBR（少見）。
+- **不用 fq 可以嗎？** 可以，不是硬性必要；BBR 會退回內建 pacing，只是每個 socket 一個高解析度計時器、比較耗 CPU。
+- **Serve 的流量開 BBR 有幫助嗎？** 沒有——Serve（和 Funnel、Tailscale SSH）的 TCP 連線由 tailscaled 的 netstack 終止，擁塞控制固定是 reno，kernel 的 sysctl 影響不到。
+
+## 參考資料
+
+- [tcp_bbr.c（kernel 原始碼與演算法說明）](https://github.com/torvalds/linux/blob/master/net/ipv4/tcp_bbr.c)
+- [ip-sysctl 文件（`tcp_congestion_control` 等）](https://docs.kernel.org/networking/ip-sysctl.html)
+- [admin-guide sysctl：`default_qdisc`](https://docs.kernel.org/admin-guide/sysctl/net.html)
+- [tailscaled netstack 的擁塞控制設定（固定 reno）](https://github.com/tailscale/tailscale/blob/main/wgengine/netstack/netstack.go)
+- [gvisor#11632：cubic 的擁塞視窗溢位問題](https://github.com/google/gvisor/issues/11632)
+- [Userspace networking 模式（官方文件）](https://tailscale.com/kb/1112/userspace-networking)
+- [iperf3](https://github.com/esnet/iperf)

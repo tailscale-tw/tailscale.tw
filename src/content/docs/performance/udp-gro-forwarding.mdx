@@ -1,0 +1,179 @@
+---
+title: UDP GRO forwarding：加速 Subnet Router 與 Exit Node 的 UDP 轉送
+description: 用 ethtool 開啟 rx-udp-gro-forwarding、關閉 rx-gro-list，加速 Linux 上 Subnet Router 與 Exit Node 的 UDP 轉送，並讓設定重開機後保留
+sidebar:
+  order: 1
+  label: UDP GRO forwarding
+---
+
+在 Linux 上把機器設成 [Exit Node](/features/exit-node/)（`tailscale set --advertise-exit-node`）或 [Subnet Router](/features/subnet-router/)，有時會看到這行警告：
+
+```text
+Warning: UDP GRO forwarding is suboptimally configured on eth0, UDP forwarding throughput capability will increase with a configuration change.
+See https://tailscale.com/s/ethtool-config-udp-gro
+```
+
+服務照樣能用，只是 Tailscale 認為這台機器轉送 UDP 的效率還有改善空間。這篇解釋警告的意思、官方建議的設定、兩個網卡選項的作用、為什麼需要 kernel 6.2，以及怎麼讓設定重開機後保留。
+
+> 本文以 Tailscale v1.102（2026 年 10 月）與 Linux kernel 6.2 以上為準，改寫自作者的部落格文章〈[Tailscale exit node 調校：為什麼要開 UDP GRO forwarding、關 rx-gro-list](https://blog.chrisyuan.me/posts/tailscale-exit-node-udp-gro-forwarding/)〉，並補上 Subnet Router 的情境。
+
+## 警告是什麼意思
+
+Linux 上廣告路由時（`--advertise-routes`、`--advertise-exit-node`），`tailscale up` 會順手檢查這台機器的 UDP 轉送配置（[原始碼](https://github.com/tailscale/tailscale/blob/main/net/netkernelconf/netkernelconf_linux.go)）：檢查通過就安靜地繼續；不符合最佳配置就印出上面那段警告。它只是效率建議，不影響功能。
+
+檢查的順序值得知道：
+
+1. 先看 TUN 介面有沒有 `tx-udp-segmentation`（UDP segmentation offload）。沒有的話直接略過、不會警告——這時開不開 GRO forwarding 都用不上。
+2. TUN 支援時，再檢查**預設路由那張網卡**：`rx-udp-gro-forwarding` 要開、`rx-gro-list` 要關。兩個條件任一不符，就發警告。
+
+也就是說：看到警告，代表 kernel 夠新、TUN 支援 USO，只差網卡那兩個開關；沒看到警告不代表已最佳化，也可能是 kernel 太舊、根本用不上。
+
+## 官方建議的設定
+
+依[官方效能文件](https://tailscale.com/kb/1320/performance-best-practices#linux-optimizations-for-subnet-routers-and-exit-nodes)，Tailscale 1.54 以上搭配 Linux kernel 6.2 以上，就能用 transport layer offload 提升 UDP 吞吐量。機器若擔任 exit node 或 subnet router，要對**預設路由那張網卡**做以下設定：
+
+```bash
+NETDEV=$(ip -o route get 8.8.8.8 | cut -f 5 -d " ")
+sudo ethtool -K "$NETDEV" rx-udp-gro-forwarding on rx-gro-list off
+```
+
+第一行找出往外連線走的是哪張網卡，第二行開啟 `rx-udp-gro-forwarding`、關閉 `rx-gro-list`。
+
+套用前後可以用 `ethtool -k` 確認（小寫 `k` 是查詢、大寫 `K` 是修改）：
+
+```console
+$ ethtool -k "$NETDEV" | grep -E "rx-udp-gro-forwarding|rx-gro-list"
+rx-gro-list: off
+rx-udp-gro-forwarding: off
+```
+
+`rx-udp-gro-forwarding` 的預設值通常是 off。執行設定後應該變成：
+
+```console
+rx-gro-list: off
+rx-udp-gro-forwarding: on
+```
+
+`generic-receive-offload`（一般的 GRO）通常本來就是 on，不用動。
+
+## 兩個選項在做什麼
+
+### GRO 與 UDP 轉送
+
+GRO（Generic Receive Offload）讓 kernel 在收封包時，把同一條連線連續到來的小封包合併成一個大封包，再往上層送。後續的路由、防火牆、NAT 都只處理一次，不必對每個小封包各跑一遍。
+
+TCP 很早就有 GRO。UDP 的 GRO 則分兩種情況：封包是給本機 socket 收的，或是要轉送到別的介面去的。exit node 屬於後者：網路上回來的 UDP 封包（例如 QUIC、視訊通話）進了實體網卡，要經過 NAT 轉送到 `tailscale0` 這張 TUN 介面，再由 tailscaled 加密送回 tailnet 裡的裝置。Subnet Router 同樣有轉送路徑：tailnet 裝置存取區網設備的流量，從網卡進出、經過 NAT 在 TUN 之間轉送——UDP 流量（例如 DNS 查詢、QUIC）在同樣的位置受惠。
+
+針對轉送路徑的 UDP GRO，kernel 有兩套做法：
+
+- `rx-gro-list`（`NETIF_F_GRO_FRAGLIST`）把封包串成 skb list，合併後的封包內部仍保留原本每個封包的邊界
+- `rx-udp-gro-forwarding`（`NETIF_F_GRO_UDP_FWD`）把封包合併成一般的 UDP GSO 封包：一個大 payload 加上「每段多大」的資訊，送出時再依這個大小切開
+
+第二種是 Alexander Lobakin 在 2021 年送進 kernel 的[patch](https://lkml.iu.edu/hypermail/linux/kernel/2101.2/07782.html)加入的。patch 說明裡寫到，兩個旗標同時開啟時由 fraglist 優先。所以只開 `rx-udp-gro-forwarding` 不夠，`rx-gro-list` 還開著的話，走的仍是 fraglist 那條路徑——這就是為什麼要「一開一關」。
+
+### 為什麼需要 kernel 6.2
+
+合併成 UDP GSO 封包後，下一站是 TUN 介面。TUN 必須能接收這種大封包，否則 kernel 還是得在送進 TUN 前先切回一個個小封包，前面的合併就白做了。
+
+TUN 支援 UDP segmentation offload（USO）是 Andrew Melnychenko 的 [TUN/VirtioNet USO patch 系列](https://lkml.iu.edu/hypermail/linux/kernel/2212.0/06933.html)，在 Linux 6.2 合併。有了它，tailscaled 一次 read 就能從 TUN 拿到一批 UDP 資料，加密、送出也能整批處理。Tailscale 這邊的批次處理與 UDP GSO/GRO 支援，背景可以參考官方部落格的 [Surpassing 10Gb/s with Tailscale](https://tailscale.com/blog/more-throughput) 與更早的 [throughput improvements](https://tailscale.com/blog/throughput-improvements)；kernel 端的總覽見 [segmentation offloads 文件](https://docs.kernel.org/networking/segmentation-offloads.html)。
+
+Tailscale 自己的檢查程式也是照這個順序判斷：先看 TUN 有沒有 `tx-udp-segmentation`，沒有就直接略過不檢查，因為這時 UDP GRO forwarding 開不開都用不上；TUN 支援時，才去檢查預設路由網卡是否符合「開 `rx-udp-gro-forwarding`、關 `rx-gro-list`」，不符合就發出開頭那段警告。
+
+## 讓設定重開機後還在
+
+`ethtool -K` 改的是執行中的網卡狀態，重開機就會恢復預設。
+
+### 官方做法：networkd-dispatcher
+
+Tailscale 文件給的是 [networkd-dispatcher](https://gitlab.com/craftyguy/networkd-dispatcher) 的寫法，在網路進入 routable 狀態時執行：
+
+```bash
+printf '#!/bin/sh\n\nethtool -K %s rx-udp-gro-forwarding on rx-gro-list off \n' \
+  "$(ip -o route get 8.8.8.8 | cut -f 5 -d " ")" \
+  | sudo tee /etc/networkd-dispatcher/routable.d/50-tailscale
+sudo chmod 755 /etc/networkd-dispatcher/routable.d/50-tailscale
+```
+
+照[官方文件](https://tailscale.com/kb/1320/performance-best-practices#linux-optimizations-for-subnet-routers-and-exit-nodes)的建議，先手動跑一次確認沒有錯誤：
+
+```bash
+sudo /etc/networkd-dispatcher/routable.d/50-tailscale
+test $? -eq 0 || echo 'An error occurred.'
+```
+
+這個做法的好處是網卡每次重新變成 routable（例如 networkd 重新設定介面）都會再套用一次。前提是系統有在用 systemd-networkd，而且裝了 networkd-dispatcher（`systemctl is-enabled networkd-dispatcher` 可以確認）。
+
+### 沒有 networkd-dispatcher 時：systemd oneshot
+
+用 ifupdown 管網路，或系統沒裝 networkd-dispatcher，可以改寫成開機時跑一次的 systemd service。
+
+先寫一支腳本 `/usr/local/sbin/udp-gro-forwarding`：
+
+```sh
+#!/bin/sh
+NETDEV=$(ip -o route get 8.8.8.8 | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
+exec /usr/sbin/ethtool -K "$NETDEV" rx-udp-gro-forwarding on rx-gro-list off
+```
+
+這裡把 `cut -f 5` 換成 awk 找 `dev` 後面的欄位。`cut` 的寫法假設輸出是 `8.8.8.8 via <gateway> dev <iface> ...`，第 5 欄剛好是網卡名稱；如果預設路由沒有 `via`，欄位位置就會跑掉。
+
+再建立 `/etc/systemd/system/udp-gro-forwarding.service`：
+
+```ini
+[Unit]
+Description=Enable UDP GRO forwarding for Tailscale subnet routers and exit nodes
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/udp-gro-forwarding
+
+[Install]
+WantedBy=multi-user.target
+```
+
+啟用並立即執行：
+
+```bash
+sudo chmod 755 /usr/local/sbin/udp-gro-forwarding
+sudo systemctl enable --now udp-gro-forwarding.service
+```
+
+`Type=oneshot` 又沒設 `RemainAfterExit=yes`，所以執行完 `systemctl is-active` 會顯示 `inactive`，這是正常的。要確認有沒有成功，看執行結果：
+
+```console
+$ systemctl show -p Result -p ExecMainStatus udp-gro-forwarding.service
+Result=success
+ExecMainStatus=0
+```
+
+最後再用 `ethtool -k` 看一次，`rx-udp-gro-forwarding: on` 就完成了。
+
+這個做法只在開機時執行一次。如果網卡之後被重新設定或熱插拔，設定可能會被重設，到時要手動再跑一次 service，或改用 networkd-dispatcher、udev rule 這類跟著介面事件觸發的機制。
+
+## Subnet Router 與 Exit Node 都適用
+
+這個調校的作用位置是「**接收 UDP、要轉送進 TUN 的那張網卡**」，所以兩種情境都適用：
+
+- **Exit Node**：tailnet 裝置的所有上網流量經由它出去，QUIC、視訊通話這類大宗 UDP 都在受惠範圍，效果最明顯。
+- **Subnet Router**：tailnet 裝置存取區網設備的 UDP 流量（DNS 查詢、QUIC、串流）同樣經過這條轉送路徑。
+
+官方檢查與指令針對的是**預設路由的網卡**。如果 Subnet Router 往區網走的是另一張網卡，把同一行 `ethtool` 指令用在接收該流量的網卡上也是同樣的機制——效果在「收 UDP 的那張」。
+
+## 常見問題
+
+- **設定了，警告還在？** 確認改的是「預設路由」那張網卡（`ip -o route get 8.8.8.8` 查），再用 `ethtool -k` 確認兩個選項的狀態。改完後重跑一次 `tailscale up`（帶原本的旗標）會再做一次檢查。
+- **雲端 VM 上從來沒看過警告？** 虛擬網卡或 TUN 不支援這些 offload 時，檢查會直接略過、不會有警告——這時也沒有可設的東西，不用理會。
+- **需要重啟 tailscaled 嗎？** 不用，`ethtool` 的修改即時生效；重跑 `tailscale up` 只是為了讓它再檢查一次。
+- **和 BBR 有關係嗎？** 沒有。UDP GRO forwarding 加速的是**轉送**的 UDP；BBR 是 TCP 擁塞控制，只影響本機發起或終止的連線，見[下一篇](/performance/bbr/)。
+
+## 參考資料
+
+- [Linux optimizations for subnet routers and exit nodes（官方效能文件）](https://tailscale.com/kb/1320/performance-best-practices#linux-optimizations-for-subnet-routers-and-exit-nodes)
+- [部落格原文：Tailscale exit node 調校：為什麼要開 UDP GRO forwarding、關 rx-gro-list](https://blog.chrisyuan.me/posts/tailscale-exit-node-udp-gro-forwarding/)
+- [Tailscale 的檢查程式 `netkernelconf_linux.go`](https://github.com/tailscale/tailscale/blob/main/net/netkernelconf/netkernelconf_linux.go)
+- [Alexander Lobakin 的 UDP GRO forwarding patch（LKML）](https://lkml.iu.edu/hypermail/linux/kernel/2101.2/07782.html)
+- [Andrew Melnychenko 的 TUN USO patch 系列（LKML）](https://lkml.iu.edu/hypermail/linux/kernel/2212.0/06933.html)
+- [Surpassing 10Gb/s with Tailscale（官方部落格）](https://tailscale.com/blog/more-throughput)
+- [Kernel 的 segmentation offloads 文件](https://docs.kernel.org/networking/segmentation-offloads.html)
