@@ -12,13 +12,19 @@ const columns = [
     heading: "友站連結",
     links: [
       { label: "Tailscale Community", href: "https://tailscale.dev/" },
-      { label: "Tailscale YouTube", href: "https://www.youtube.com/@Tailscale" },
+      {
+        label: "Tailscale YouTube",
+        href: "https://www.youtube.com/@Tailscale",
+      },
     ],
   },
   {
     heading: "專案",
     links: [
-      { label: "GitHub：tailscale-tw/tailscale.tw", href: "https://github.com/tailscale-tw/tailscale.tw" },
+      {
+        label: "GitHub：tailscale-tw/tailscale.tw",
+        href: "https://github.com/tailscale-tw/tailscale.tw",
+      },
     ],
   },
 ];
@@ -27,24 +33,24 @@ const columns = [
 <footer class="nb-footer">
   <hr class="dot-fill" />
   <div class="grid">
-    {
-      columns.map((col) => (
-        <div>
-          <h2 class="col-heading">{col.heading}</h2>
-          <ul>
-            {col.links.map((link) => (
-              <li>
-                <a href={link.href} target="_blank" rel="noopener">
-                  {link.label}
-                </a>
-              </li>
-            ))}
-          </ul>
-        </div>
-      ))
-    }
+    {columns.map(col => (
+      <div>
+        <h2 class="col-heading">{col.heading}</h2>
+        <ul>
+          {col.links.map(link => (
+            <li>
+              <a href={link.href} target="_blank" rel="noopener">
+                {link.label}
+              </a>
+            </li>
+          ))}
+        </ul>
+      </div>
+    ))}
   </div>
-  <p class="copy">© {year} {config.title}. 字型：Sarasa Mono TC（SIL OFL 1.1）。</p>
+  <p class="copy">
+    © {year} {config.title}. 字型：Sarasa Mono TC（SIL OFL 1.1）。
+  </p>
 </footer>
 
 <style>

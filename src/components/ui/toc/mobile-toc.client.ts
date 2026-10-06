@@ -30,16 +30,16 @@ function prefersReducedMotion(): boolean {
 
 function initMobileToc(root: HTMLElement): () => void {
   const select = root.querySelector<HTMLSelectElement>(
-    "[data-nb-mobile-toc-select]",
+    "[data-nb-mobile-toc-select]"
   );
   if (!select) return () => {};
 
   // Paired so slug/element indices stay aligned; `inBand` indexes into this.
   type Heading = { slug: string; el: HTMLElement };
   const headings: Heading[] = Array.from(select.options)
-    .map((o) => o.value)
-    .filter((v) => v !== "_top")
-    .map((slug) => ({ slug, el: document.getElementById(slug) }))
+    .map(o => o.value)
+    .filter(v => v !== "_top")
+    .map(slug => ({ slug, el: document.getElementById(slug) }))
     .filter((h): h is Heading => h.el !== null);
 
   const controller = new AbortController();
@@ -73,7 +73,7 @@ function initMobileToc(root: HTMLElement): () => void {
       }
       document.getElementById(slug)?.scrollIntoView({ behavior });
     },
-    { signal: controller.signal },
+    { signal: controller.signal }
   );
 
   if (headings.length === 0) {
@@ -111,16 +111,16 @@ function initMobileToc(root: HTMLElement): () => void {
   }
 
   const observer = new IntersectionObserver(
-    (entries) => {
+    entries => {
       for (const entry of entries) {
-        const i = headings.findIndex((h) => h.el === entry.target);
+        const i = headings.findIndex(h => h.el === entry.target);
         if (i === -1) continue;
         if (entry.isIntersecting) inBand.add(i);
         else inBand.delete(i);
       }
       resolve();
     },
-    { rootMargin: ROOT_MARGIN, threshold: 0 },
+    { rootMargin: ROOT_MARGIN, threshold: 0 }
   );
 
   for (const { el } of headings) observer.observe(el);

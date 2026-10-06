@@ -9,7 +9,10 @@
  * partial frontmatter (`params: [runtime, version?]`); required params
  * fail at build time, optional use a `?` suffix.
  */
-import { getVisibleEntries, getVisibleEntry } from "@cloudflare/nimbus-docs/runtime";
+import {
+  getVisibleEntries,
+  getVisibleEntry,
+} from "@cloudflare/nimbus-docs/runtime";
 import { render } from "astro:content";
 import { components } from "../components";
 
@@ -26,7 +29,7 @@ const partial = await getVisibleEntry("partials", file);
 
 if (!partial) {
   const allPartials = await getVisibleEntries(["partials"]);
-  const partialIds = allPartials.map((p) => p.id);
+  const partialIds = allPartials.map(p => p.id);
   const hint = closest(file, partialIds);
   const shortList = partialIds.sort().slice(0, 10).join(", ");
   const tail =
@@ -38,36 +41,43 @@ if (!partial) {
   throw new Error(
     `[Render] Partial "${file}" not found, included on "${page}".` +
       (hint ? ` Did you mean "${hint}"?` : "") +
-      ` Available: ${shortList}${tail}`,
+      ` Available: ${shortList}${tail}`
   );
 }
 
 const declaredParams = partial.data.params;
 if (declaredParams) {
-  const required = declaredParams.filter((param: string) => !param.endsWith("?"));
-  const optional = declaredParams.filter((param: string) => param.endsWith("?"));
-  const allNames = [...required, ...optional.map((param: string) => param.slice(0, -1))];
+  const required = declaredParams.filter(
+    (param: string) => !param.endsWith("?")
+  );
+  const optional = declaredParams.filter((param: string) =>
+    param.endsWith("?")
+  );
+  const allNames = [
+    ...required,
+    ...optional.map((param: string) => param.slice(0, -1)),
+  ];
   const received = Object.keys(params ?? {});
 
   const missing = required.filter((param: string) => !received.includes(param));
   if (missing.length > 0) {
     throw new Error(
       `[Render] Missing required params ${JSON.stringify(missing)} for "${file}" on "${page}". ` +
-        `Expected: ${JSON.stringify(declaredParams)}, received: ${JSON.stringify(received)}`,
+        `Expected: ${JSON.stringify(declaredParams)}, received: ${JSON.stringify(received)}`
     );
   }
 
-  const unexpected = received.filter((param) => !allNames.includes(param));
+  const unexpected = received.filter(param => !allNames.includes(param));
   if (unexpected.length > 0) {
     const unexpectedHints = unexpected
-      .map((u) => {
+      .map(u => {
         const h = closest(u, allNames);
         return h ? `"${u}" (did you mean "${h}"?)` : `"${u}"`;
       })
       .join(", ");
     throw new Error(
       `[Render] Unexpected params ${unexpectedHints} for "${file}" on "${page}". ` +
-        `Declared: ${JSON.stringify(declaredParams)}`,
+        `Declared: ${JSON.stringify(declaredParams)}`
     );
   }
 }
@@ -93,7 +103,11 @@ function distance(a: string, b: string): number {
   return v1[b.length];
 }
 
-function closest(target: string, candidates: string[], maxDist = 3): string | null {
+function closest(
+  target: string,
+  candidates: string[],
+  maxDist = 3
+): string | null {
   const t = target.toLowerCase();
   let best: { name: string; dist: number } | null = null;
   for (const c of candidates) {

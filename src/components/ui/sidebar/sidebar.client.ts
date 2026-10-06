@@ -22,7 +22,7 @@ function initSidebar(root: HTMLElement): () => void {
     if (persistTeardown) teardowns.push(persistTeardown);
   }
 
-  return () => teardowns.forEach((t) => t());
+  return () => teardowns.forEach(t => t());
 }
 
 // ---------------------------------------------------------------------------
@@ -30,11 +30,17 @@ function initSidebar(root: HTMLElement): () => void {
 // ---------------------------------------------------------------------------
 
 function initFilter(root: HTMLElement): (() => void) | null {
-  const input = root.querySelector<HTMLInputElement>("[data-nb-sidebar-filter-input]");
+  const input = root.querySelector<HTMLInputElement>(
+    "[data-nb-sidebar-filter-input]"
+  );
   // SidebarFilter is rendered *next to* Sidebar (sibling), so also look in
   // the parent — preserves the existing layout where filter sits above.
   const inputElement =
-    input ?? root.parentElement?.querySelector<HTMLInputElement>("[data-nb-sidebar-filter-input]") ?? null;
+    input ??
+    root.parentElement?.querySelector<HTMLInputElement>(
+      "[data-nb-sidebar-filter-input]"
+    ) ??
+    null;
   if (!inputElement) return null;
 
   function handleInput() {
@@ -65,14 +71,18 @@ function initFilter(root: HTMLElement): (() => void) | null {
 }
 
 function resetFilter(root: HTMLElement): void {
-  root.querySelectorAll<HTMLElement>("[data-nb-sidebar-hidden]").forEach((el) => {
+  root.querySelectorAll<HTMLElement>("[data-nb-sidebar-hidden]").forEach(el => {
     el.removeAttribute("data-nb-sidebar-hidden");
   });
   // Reset groups opened by the filter back to their saved state.
   root
-    .querySelectorAll<HTMLElement>("[data-nb-sidebar-group][data-nb-opened-by-filter]")
-    .forEach((group) => {
-      const trigger = group.querySelector<HTMLElement>("[data-nb-collapsible-trigger]");
+    .querySelectorAll<HTMLElement>(
+      "[data-nb-sidebar-group][data-nb-opened-by-filter]"
+    )
+    .forEach(group => {
+      const trigger = group.querySelector<HTMLElement>(
+        "[data-nb-collapsible-trigger]"
+      );
       trigger?.click();
       group.removeAttribute("data-nb-opened-by-filter");
     });
@@ -82,24 +92,27 @@ function applyFilter(root: HTMLElement, query: string): void {
   const links = root.querySelectorAll<HTMLElement>("[data-nb-sidebar-link]");
   const groups = root.querySelectorAll<HTMLElement>("[data-nb-sidebar-group]");
 
-  links.forEach((link) => link.setAttribute("data-nb-sidebar-hidden", ""));
-  groups.forEach((group) => group.setAttribute("data-nb-sidebar-hidden", ""));
+  links.forEach(link => link.setAttribute("data-nb-sidebar-hidden", ""));
+  groups.forEach(group => group.setAttribute("data-nb-sidebar-hidden", ""));
 
-  links.forEach((link) => {
+  links.forEach(link => {
     const text = link.textContent?.toLowerCase() ?? "";
     if (!text.includes(query)) return;
     link.removeAttribute("data-nb-sidebar-hidden");
     revealAncestors(link, root);
   });
 
-  groups.forEach((group) => {
+  groups.forEach(group => {
     const label = group.querySelector("[data-nb-sidebar-group-label]");
     const text = label?.textContent?.toLowerCase() ?? "";
     if (!text.includes(query)) return;
     group.removeAttribute("data-nb-sidebar-hidden");
     openGroup(group);
-    group.querySelectorAll<HTMLElement>("[data-nb-sidebar-link], [data-nb-sidebar-group]")
-      .forEach((child) => child.removeAttribute("data-nb-sidebar-hidden"));
+    group
+      .querySelectorAll<HTMLElement>(
+        "[data-nb-sidebar-link], [data-nb-sidebar-group]"
+      )
+      .forEach(child => child.removeAttribute("data-nb-sidebar-hidden"));
   });
 }
 
@@ -115,7 +128,9 @@ function revealAncestors(el: HTMLElement, scope: Element): void {
 }
 
 function openGroup(group: HTMLElement): void {
-  const trigger = group.querySelector<HTMLElement>("[data-nb-collapsible-trigger]");
+  const trigger = group.querySelector<HTMLElement>(
+    "[data-nb-collapsible-trigger]"
+  );
   if (!trigger) return;
   if (trigger.getAttribute("data-nb-state") === "open") return;
   group.setAttribute("data-nb-opened-by-filter", "");
@@ -132,10 +147,14 @@ function initPersistence(root: HTMLElement): (() => void) | null {
   const hash = root.dataset.nbSidebarHash ?? "";
 
   function readState(): SidebarState {
-    const groups = root.querySelectorAll<HTMLElement>("[data-nb-sidebar-group]");
+    const groups = root.querySelectorAll<HTMLElement>(
+      "[data-nb-sidebar-group]"
+    );
     const open: boolean[] = [];
-    groups.forEach((group) => {
-      const trigger = group.querySelector<HTMLElement>("[data-nb-collapsible-trigger]");
+    groups.forEach(group => {
+      const trigger = group.querySelector<HTMLElement>(
+        "[data-nb-collapsible-trigger]"
+      );
       open.push(trigger?.getAttribute("data-nb-state") === "open");
     });
     return { hash, open, scroll: scrollHost.scrollTop };
@@ -149,12 +168,14 @@ function initPersistence(root: HTMLElement): (() => void) | null {
 
   // Observe state changes on each group's trigger.
   const observer = new MutationObserver(save);
-  root.querySelectorAll<HTMLElement>("[data-nb-collapsible-trigger]").forEach((trigger) => {
-    observer.observe(trigger, {
-      attributes: true,
-      attributeFilter: ["data-nb-state"],
+  root
+    .querySelectorAll<HTMLElement>("[data-nb-collapsible-trigger]")
+    .forEach(trigger => {
+      observer.observe(trigger, {
+        attributes: true,
+        attributeFilter: ["data-nb-state"],
+      });
     });
-  });
 
   function handleVisibility() {
     if (document.visibilityState === "hidden") save();
@@ -183,10 +204,11 @@ function initPersistence(root: HTMLElement): (() => void) | null {
 // ---------------------------------------------------------------------------
 
 (function bindFilterShortcut() {
-  if (document.documentElement.hasAttribute("data-nb-sidebar-shortcut-bound")) return;
+  if (document.documentElement.hasAttribute("data-nb-sidebar-shortcut-bound"))
+    return;
   document.documentElement.setAttribute("data-nb-sidebar-shortcut-bound", "");
 
-  document.addEventListener("keydown", (e) => {
+  document.addEventListener("keydown", e => {
     if (e.key !== "/") return;
     const active = document.activeElement as HTMLElement | null;
     if (
@@ -198,7 +220,7 @@ function initPersistence(root: HTMLElement): (() => void) | null {
       return;
     }
     const desktopInput = document.querySelector<HTMLInputElement>(
-      "[data-nb-sidebar-persist] ~ * [data-nb-sidebar-filter-input], [data-nb-desktop-sidebar] [data-nb-sidebar-filter-input]",
+      "[data-nb-sidebar-persist] ~ * [data-nb-sidebar-filter-input], [data-nb-desktop-sidebar] [data-nb-sidebar-filter-input]"
     );
     if (!desktopInput) return;
     e.preventDefault();

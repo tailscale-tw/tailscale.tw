@@ -77,6 +77,10 @@ export function buttonVariants({
   const dims =
     shape === "base"
       ? buttonSizeText[size]
-      : cn(buttonSizeCompact[size], "p-0", shape === "circle" && "rounded-full");
+      : cn(
+          buttonSizeCompact[size],
+          "p-0",
+          shape === "circle" && "rounded-full"
+        );
   return cn(buttonBase, buttonVariantClasses[variant], dims);
 }

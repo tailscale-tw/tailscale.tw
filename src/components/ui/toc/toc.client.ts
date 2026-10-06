@@ -12,12 +12,15 @@ const REVEAL_PADDING = 12;
 
 function initToc(root: HTMLElement): () => void {
   const nav = root.querySelector<HTMLElement>("nav");
-  const activePath = root.querySelector<SVGPathElement>("[data-nb-toc-rail-active]");
+  const activePath = root.querySelector<SVGPathElement>(
+    "[data-nb-toc-rail-active]"
+  );
   const links = root.querySelectorAll<HTMLElement>("[data-nb-toc-link]");
   if (!nav || !activePath || links.length === 0) return () => {};
 
-  const scrollHost = root.closest<HTMLElement>("[data-nb-toc-scroll-host]") ?? root;
-  const slugs = Array.from(links).map((l) => l.dataset.nbSlug!);
+  const scrollHost =
+    root.closest<HTMLElement>("[data-nb-toc-scroll-host]") ?? root;
+  const slugs = Array.from(links).map(l => l.dataset.nbSlug!);
   // Observe only resolvable headings, each carrying its original index, so
   // scroll-spy stays aligned with the full-length links/segments even when a
   // heading slugs to "" (e.g. emoji-only `## 🎉`) and has no DOM target.
@@ -26,7 +29,7 @@ function initToc(root: HTMLElement): () => void {
     .filter((o): o is { el: HTMLElement; index: number } => o.el !== null);
   if (observed.length === 0) return () => {};
   const indexOfEl = new Map<HTMLElement, number>(
-    observed.map((o) => [o.el, o.index]),
+    observed.map(o => [o.el, o.index])
   );
 
   let segments: { start: number; length: number }[] = [];
@@ -40,7 +43,7 @@ function initToc(root: HTMLElement): () => void {
   function buildRail() {
     const navRect = nav!.getBoundingClientRect();
 
-    const m = Array.from(links).map((link) => {
+    const m = Array.from(links).map(link => {
       const r = link.getBoundingClientRect();
       return {
         x: r.left - navRect.left + 1,
@@ -137,7 +140,8 @@ function initToc(root: HTMLElement): () => void {
     }
 
     if (linkRect.bottom > hostRect.bottom - REVEAL_PADDING) {
-      scrollHost.scrollTop += linkRect.bottom - hostRect.bottom + REVEAL_PADDING;
+      scrollHost.scrollTop +=
+        linkRect.bottom - hostRect.bottom + REVEAL_PADDING;
     }
   }
 
@@ -171,7 +175,7 @@ function initToc(root: HTMLElement): () => void {
 
   // rootMargin collapses the root to the top band; deepest in-band heading wins.
   const spy = new IntersectionObserver(
-    (entries) => {
+    entries => {
       for (const entry of entries) {
         const i = indexOfEl.get(entry.target as HTMLElement);
         if (i === undefined) continue;
@@ -181,9 +185,9 @@ function initToc(root: HTMLElement): () => void {
       if (inBand.size > 0) observedIndex = Math.max(...inBand);
       resolve();
     },
-    { rootMargin: `0px 0px -${(1 - READING_BAND) * 100}% 0px`, threshold: 0 },
+    { rootMargin: `0px 0px -${(1 - READING_BAND) * 100}% 0px`, threshold: 0 }
   );
-  observed.forEach((o) => spy.observe(o.el));
+  observed.forEach(o => spy.observe(o.el));
 
   function updateBottom() {
     const scrollEl = document.scrollingElement ?? document.documentElement;
@@ -259,19 +263,30 @@ function initToc(root: HTMLElement): () => void {
 
   nav.addEventListener(
     "click",
-    (e) => {
-      if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-      const link = (e.target as Element).closest<HTMLElement>("[data-nb-toc-link]");
+    e => {
+      if (
+        e.defaultPrevented ||
+        e.button !== 0 ||
+        e.metaKey ||
+        e.ctrlKey ||
+        e.shiftKey ||
+        e.altKey
+      )
+        return;
+      const link = (e.target as Element).closest<HTMLElement>(
+        "[data-nb-toc-link]"
+      );
       if (!link) return;
       const i = slugs.indexOf(link.dataset.nbSlug!);
       if (i === -1) return;
       pinnedIndex = i;
       const heading = document.getElementById(slugs[i]);
       const rect = heading?.getBoundingClientRect();
-      pinnedEnteredViewport = !!rect && rect.bottom >= 0 && rect.top <= window.innerHeight;
+      pinnedEnteredViewport =
+        !!rect && rect.bottom >= 0 && rect.top <= window.innerHeight;
       resolve();
     },
-    { signal: controller.signal },
+    { signal: controller.signal }
   );
 
   // Hand-driven scrolling releases the pin and resumes auto-tracking.
@@ -301,10 +316,10 @@ function initToc(root: HTMLElement): () => void {
   });
   window.addEventListener(
     "keydown",
-    (e) => {
+    e => {
       if (NAV_KEYS.has(e.key)) releasePin();
     },
-    { signal: controller.signal },
+    { signal: controller.signal }
   );
 
   window.addEventListener("scroll", onScroll, {

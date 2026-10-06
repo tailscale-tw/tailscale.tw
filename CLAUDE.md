@@ -9,15 +9,18 @@ Source for https://tailscale.tw — a 台灣正體中文 documentation site of T
 ## Commands
 
 ```sh
-pnpm install
-pnpm dev          # dev server
-pnpm build        # static build into dist/ (also builds Pagefind search + OG images)
-pnpm typecheck    # astro check
-pnpm lint:docs    # nimbus-docs lint (frontmatter shape, internal links); --fix to autofix
-pnpm preview:cf   # build + wrangler dev
+bun install
+bun run dev          # dev server
+bun run build        # static build into dist/ (also builds Pagefind search + OG images)
+bun run typecheck    # astro check
+bun run lint         # eslint
+bun run format       # prettier --write (format:check in CI)
+bun run lint:docs    # nimbus-docs lint (frontmatter shape, internal links); lint:docs:fix to autofix
+bun run lint:text    # autocorrect: CJK/Latin spacing in src/content/; fix:text to autofix
+bun run preview:cf   # build + wrangler dev
 ```
 
-There are no unit tests; `pnpm build && pnpm typecheck && pnpm lint:docs` is the validation set.
+Bun is the package manager (version pinned by `packageManager` in `package.json`); Astro and wrangler still run on Node 22. There are no unit tests. CI (`.github/workflows/ci.yml`, on PRs) runs `lint:text`, `lint`, `format:check`, then `typecheck`, `build` and `lint:docs` (it needs the routes written by the build) — run these before pushing.
 
 ## Architecture
 
@@ -37,4 +40,4 @@ There are no unit tests; `pnpm build && pnpm typecheck && pnpm lint:docs` is the
 
 ## Deployment
 
-Push to `main` → `.github/workflows/main.yml` builds with pnpm and runs `wrangler deploy` (Workers static assets, config in `wrangler.jsonc`, worker name `tailscale-tw`). Requires repo secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`.
+Push to `main` → `.github/workflows/deploy.yml` runs the same checks, builds with bun, then `wrangler deploy` (Workers static assets, config in `wrangler.jsonc`, worker name `tailscale-tw`). Requires repo secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`; the token is scoped to the `tailscale-tw` Worker plus Workers Routes / Zone Read on the `tailscale.tw` zone (custom domain is set in `wrangler.jsonc`).

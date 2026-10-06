@@ -1,0 +1,14 @@
+rules:
+  # CJK 與半形英數之間加空格（主要目標）
+  space-word: 1
+  # 以下規則關閉，避免過度修正
+  space-punctuation: 0
+  space-bracket: 0
+  space-backticks: 0
+  space-dash: 0
+  space-dollar: 0
+  fullwidth: 0
+  no-space-fullwidth: 0
+  halfwidth-word: 0
+  halfwidth-punctuation: 0
+  spellcheck: 0

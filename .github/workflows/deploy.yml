@@ -1,0 +1,79 @@
+name: Deploy to Cloudflare Workers
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  lint:
+    name: Code standards
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: "☁️ Checkout repository"
+        uses: actions/checkout@v6
+
+      - name: "📦 Setup bun"
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: "📦 Install dependencies"
+        run: bun install --frozen-lockfile
+
+      - name: "📝 AutoCorrect (CJK spacing)"
+        run: bun run lint:text
+
+      - name: "🔎 Lint code"
+        run: bun run lint
+
+      - name: "📝 Checking code format"
+        run: bun run format:check
+
+  deploy:
+    name: Build & Deploy
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: "☁️ Checkout repository"
+        uses: actions/checkout@v6
+
+      - name: "⬢ Setup Node.js"
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: "📦 Setup bun"
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: "📦 Install dependencies"
+        run: bun install --frozen-lockfile
+
+      - name: "🧐 Type check"
+        run: bun run typecheck
+
+      - name: "🚀 Build the project"
+        run: bun run build
+
+      # 內部連結檢查需要建置產生的 .nimbus/routes.json，所以放在 build 之後
+      - name: "📚 Lint docs"
+        run: bun run lint:docs
+
+      - name: "☁️ Deploy to Cloudflare Workers"
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          packageManager: bun
+          # 設定讀自 wrangler.jsonc；--message 用 SHA（Cloudflare API 拒絕非 ASCII 字串）
+          command: deploy --message="${{ github.sha }}"

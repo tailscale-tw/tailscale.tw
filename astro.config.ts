@@ -10,7 +10,8 @@ const nimbusConfig = defineNimbusConfig({
   // robots.txt, sitemap, and the links in /llms.txt.
   site: "https://tailscale.tw",
   title: "Tailscale 台灣",
-  description: "分享 Tailscale 在 PVE 與 Synology 上的使用心得、小祕技與安裝教學。",
+  description:
+    "分享 Tailscale 在 PVE 與 Synology 上的使用心得、小祕技與安裝教學。",
   locale: "zh-TW",
   github: "https://github.com/tailscale-tw/tailscale.tw",
   editPattern: "https://github.com/tailscale-tw/tailscale.tw/edit/main/{path}",

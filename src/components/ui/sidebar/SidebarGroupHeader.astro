@@ -35,7 +35,17 @@ interface Props {
   deprecated?: boolean;
 }
 
-const { label, isOpen, hasActive, badge, indexHref, indexIsCurrent, indexIsExternal, icon, deprecated } = Astro.props;
+const {
+  label,
+  isOpen,
+  hasActive,
+  badge,
+  indexHref,
+  indexIsCurrent,
+  indexIsExternal,
+  icon,
+  deprecated,
+} = Astro.props;
 const resolvedIndexHref = indexHref
   ? withBase(indexHref, import.meta.env.BASE_URL)
   : undefined;
@@ -43,64 +53,74 @@ const resolvedIndexHref = indexHref
 const rowClass = cn(
   "group/expander flex min-h-[2rem] items-center rounded-lg px-3 py-1 text-[0.8125rem] font-bold no-underline focus-visible:outline-offset-[-2px]",
   "hover:bg-accent hover:text-heading",
-  hasActive ? "text-heading" : "text-muted-foreground",
+  hasActive ? "text-heading" : "text-muted-foreground"
 );
 const caretClass =
   "ml-auto -mr-px shrink-0 size-4 opacity-40 transition-[rotate,opacity] duration-[250ms] ease-[cubic-bezier(0.87,0,0.13,1)] group-hover/expander:opacity-100";
 const labelClass = cn("break-words", deprecated && "line-through");
 ---
 
-{
-  indexHref ? (
-    <div
-      class={cn(rowClass, "p-0", indexIsCurrent ? "bg-accent text-heading" : "")}
-      data-nb-state={isOpen ? "open" : "closed"}
-      data-nb-sidebar-group-label
-    >
-      <a
-        href={resolvedIndexHref}
-        aria-current={indexIsCurrent ? "page" : undefined}
-        target={indexIsExternal ? "_blank" : undefined}
-        rel={indexIsExternal ? "noopener" : undefined}
-        class="flex flex-1 min-w-0 items-center min-h-[2rem] px-3 py-1 rounded-l-lg focus-visible:outline-offset-[-2px]"
-      >
-        <span class="flex items-center gap-2 flex-1 min-w-0">
-          {icon && <Icon name={icon} class="shrink-0 h-4 w-4 text-muted-foreground" />}
-          <span class={labelClass}>{label}</span>
-          {badge &&
-            (typeof badge === "string" ? <Badge text={badge} /> : <Badge text={badge.text} variant={badge.variant} />)}
-        </span>
-      </a>
-      <CollapsibleTrigger
-        class={cn(
-          "w-auto flex items-center shrink-0 min-h-[2rem] px-3 py-1 rounded-r-lg",
-          "hover:bg-accent hover:text-heading focus-visible:outline-offset-[-2px]",
-          "group/expander",
-        )}
-        data-nb-state={isOpen ? "open" : "closed"}
-        aria-expanded={isOpen ? "true" : "false"}
-        aria-label={`Toggle ${label} section`}
-      >
-        <Icon name="ph:caret-right" class={caretClass} data-nb-caret />
-      </CollapsibleTrigger>
-    </div>
-  ) : (
-    <CollapsibleTrigger
-      class={cn(rowClass, "justify-between w-full")}
-      data-nb-sidebar-group-label
-      data-nb-state={isOpen ? "open" : "closed"}
-      aria-expanded={isOpen ? "true" : "false"}
+{indexHref ? (
+  <div
+    class={cn(rowClass, "p-0", indexIsCurrent ? "bg-accent text-heading" : "")}
+    data-nb-state={isOpen ? "open" : "closed"}
+    data-nb-sidebar-group-label
+  >
+    <a
+      href={resolvedIndexHref}
+      aria-current={indexIsCurrent ? "page" : undefined}
+      target={indexIsExternal ? "_blank" : undefined}
+      rel={indexIsExternal ? "noopener" : undefined}
+      class="flex flex-1 min-w-0 items-center min-h-[2rem] px-3 py-1 rounded-l-lg focus-visible:outline-offset-[-2px]"
     >
       <span class="flex items-center gap-2 flex-1 min-w-0">
-        {icon && <Icon name={icon} class="shrink-0 h-4 w-4 text-muted-foreground" />}
+        {icon && (
+          <Icon name={icon} class="shrink-0 h-4 w-4 text-muted-foreground" />
+        )}
         <span class={labelClass}>{label}</span>
         {badge &&
-          (typeof badge === "string" ? <Badge text={badge} /> : <Badge text={badge.text} variant={badge.variant} />)}
+          (typeof badge === "string" ? (
+            <Badge text={badge} />
+          ) : (
+            <Badge text={badge.text} variant={badge.variant} />
+          ))}
       </span>
+    </a>
+    <CollapsibleTrigger
+      class={cn(
+        "w-auto flex items-center shrink-0 min-h-[2rem] px-3 py-1 rounded-r-lg",
+        "hover:bg-accent hover:text-heading focus-visible:outline-offset-[-2px]",
+        "group/expander"
+      )}
+      data-nb-state={isOpen ? "open" : "closed"}
+      aria-expanded={isOpen ? "true" : "false"}
+      aria-label={`Toggle ${label} section`}
+    >
       <Icon name="ph:caret-right" class={caretClass} data-nb-caret />
     </CollapsibleTrigger>
-  )
-}
+  </div>
+) : (
+  <CollapsibleTrigger
+    class={cn(rowClass, "justify-between w-full")}
+    data-nb-sidebar-group-label
+    data-nb-state={isOpen ? "open" : "closed"}
+    aria-expanded={isOpen ? "true" : "false"}
+  >
+    <span class="flex items-center gap-2 flex-1 min-w-0">
+      {icon && (
+        <Icon name={icon} class="shrink-0 h-4 w-4 text-muted-foreground" />
+      )}
+      <span class={labelClass}>{label}</span>
+      {badge &&
+        (typeof badge === "string" ? (
+          <Badge text={badge} />
+        ) : (
+          <Badge text={badge.text} variant={badge.variant} />
+        ))}
+    </span>
+    <Icon name="ph:caret-right" class={caretClass} data-nb-caret />
+  </CollapsibleTrigger>
+)}
 
 <style is:global>
   /*

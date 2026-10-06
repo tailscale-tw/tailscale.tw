@@ -9,15 +9,16 @@ sidebar:
 自動更新 [PVE](https://pve.proxmox.com/wiki/Main_Page) 上的 [Tailscale](https://tailscale.com/) 憑證
 
 ## Prerequisite
+
 1. 安裝並設定完成 Tailscale
 2. 安裝 [jq](https://jqlang.org/)
-
 
 # 準備相關檔案
 
 ## 建立憑證更新 script
 
 建立 script 檔案 `/usr/local/bin/update-tailscale-cert.sh`：
+
 ```bash
 #!/bin/bash
 
@@ -68,6 +69,7 @@ chmod +x /usr/local/bin/update-tailscale-cert.sh
 ## 建立 systemd service
 
 建立檔案 `/etc/systemd/system/update-tailscale-cert.service`：
+
 ```ini
 [Unit]
 Description=Update Proxmox SSL certificate from Tailscale
@@ -84,6 +86,7 @@ WantedBy=multi-user.target
 ## 建立 systemd timer
 
 建立檔案 `/etc/systemd/system/update-tailscale-cert.timer`：
+
 ```ini
 [Unit]
 Description=Update Proxmox SSL certificate daily
@@ -141,13 +144,15 @@ journalctl -u update-tailscale-cert.service -f
 # 結語
 
 ## 功能說明
-* 每天自動檢查並更新憑證
-* 確保憑證至少有 30 天的有效期
-* 自動使用正確的 Tailscale machine name
-* 安全地處理憑證檔案
-* 在更新後自動重啟相關服務
+
+- 每天自動檢查並更新憑證
+- 確保憑證至少有 30 天的有效期
+- 自動使用正確的 Tailscale machine name
+- 安全地處理憑證檔案
+- 在更新後自動重啟相關服務
 
 ## 注意事項
+
 1. 確保系統已安裝 [jq](https://jqlang.org/) 工具（用於解析 JSON）
 2. 確保 Tailscale 正常運行且已連接
 3. 確保有足夠的權限執行這些操作（需要 root 權限）

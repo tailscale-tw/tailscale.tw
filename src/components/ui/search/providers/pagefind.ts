@@ -1,4 +1,7 @@
-import type { SearchProvider, SearchResult } from "@cloudflare/nimbus-docs/types";
+import type {
+  SearchProvider,
+  SearchResult,
+} from "@cloudflare/nimbus-docs/types";
 import { config } from "virtual:nimbus/config";
 
 interface PagefindSubResult {
@@ -18,12 +21,16 @@ interface PagefindSearchResponse {
 }
 
 interface PagefindFilters {
-  [key: string]: string | string[] | { none?: string | string[]; any?: string | string[] };
+  [key: string]:
+    string | string[] | { none?: string | string[]; any?: string | string[] };
 }
 
 interface PagefindApi {
   init(): Promise<void>;
-  search(query: string, options?: { filters?: PagefindFilters }): Promise<PagefindSearchResponse>;
+  search(
+    query: string,
+    options?: { filters?: PagefindFilters }
+  ): Promise<PagefindSearchResponse>;
 }
 
 let pagefind: PagefindApi | undefined;
@@ -51,7 +58,9 @@ function withBase(url: string): string {
  * every keystroke.
  */
 const defaultFilters: PagefindFilters | undefined =
-  config.versions && config.versions.deprecated && config.versions.deprecated.length > 0
+  config.versions &&
+  config.versions.deprecated &&
+  config.versions.deprecated.length > 0
     ? { status: { none: "deprecated" } }
     : undefined;
 
@@ -60,8 +69,13 @@ export const provider: SearchProvider = {
     if (pagefind) return;
     // Not `new URL("pagefind/pagefind.js", BASE_URL)`: with `base: "/docs"`
     // (no trailing slash) that resolves to `/pagefind/pagefind.js`.
-    const pagefindUrl = new URL(withBase("/pagefind/pagefind.js"), window.location.origin);
-    pagefind = (await import(/* @vite-ignore */ pagefindUrl.href)) as PagefindApi;
+    const pagefindUrl = new URL(
+      withBase("/pagefind/pagefind.js"),
+      window.location.origin
+    );
+    pagefind = (await import(
+      /* @vite-ignore */ pagefindUrl.href
+    )) as PagefindApi;
     await pagefind.init();
   },
 
@@ -71,16 +85,20 @@ export const provider: SearchProvider = {
 
     const search = await pagefind.search(
       query,
-      defaultFilters ? { filters: defaultFilters } : undefined,
+      defaultFilters ? { filters: defaultFilters } : undefined
     );
-    const results = await Promise.all(search.results.slice(0, 10).map((result) => result.data()));
+    const results = await Promise.all(
+      search.results.slice(0, 10).map(result => result.data())
+    );
     return results.map((result): SearchResult => ({
       title: result.meta?.title ?? "Untitled",
       url: withBase(result.url),
       snippet: result.excerpt,
       subResults: result.sub_results
-        ?.filter((sub): sub is Required<PagefindSubResult> => Boolean(sub.title && sub.url))
-        .map((sub) => ({ title: sub.title, url: withBase(sub.url) })),
+        ?.filter((sub): sub is Required<PagefindSubResult> =>
+          Boolean(sub.title && sub.url)
+        )
+        .map(sub => ({ title: sub.title, url: withBase(sub.url) })),
     }));
   },
 };

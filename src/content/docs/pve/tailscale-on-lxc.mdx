@@ -19,6 +19,7 @@ Tailscale 是一個基於 WireGuard 技術的網路連接工具，可幫助您�
 ### LXC 容器簡介
 
 LXC (Linux Containers) 是一種輕量級的虛擬化技術，可讓您在單一主機上運行多個獨立的 Linux 系統，比傳統的虛擬機消耗更少的資源。LXC 容器分為:
+
 - **特權容器**: 容器內的 root 用戶擁有主機系統上的 root 權限
 - **無特權容器**: 容器內的 root 用戶在主機系統上被映射為非特權用戶，安全性更高
 
@@ -113,4 +114,5 @@ sudo tailscale up --netfilter-mode=off
 Tailscale 與 PVE LXC 容器的結合為網絡管理提供了靈活、安全且易於管理的解決方案，無論您是管理個人的家庭服務器還是企業級的虛擬化環境，都能受益於這種配置。
 
 ## 參考文件
-* [Tailscale in LXC containers](https://tailscale.com/kb/1130/lxc-unprivileged)
+
+- [Tailscale in LXC containers](https://tailscale.com/kb/1130/lxc-unprivileged)

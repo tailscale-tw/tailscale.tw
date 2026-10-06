@@ -41,20 +41,27 @@ const {
 } = Astro.props;
 
 function hasActiveDescendant(items: SidebarItem[]): boolean {
-  return items.some((item) =>
+  return items.some(item =>
     item.type === "link"
       ? Boolean(item.isCurrent)
       : item.type === "group"
         ? Boolean(item.indexIsCurrent) || hasActiveDescendant(item.children)
-        : false,
+        : false
   );
 }
 
 const hasActive = Boolean(indexIsCurrent) || hasActiveDescendant(items);
-const isOpen = Boolean(hasActive || collapsed === false || collapsed === undefined);
+const isOpen = Boolean(
+  hasActive || collapsed === false || collapsed === undefined
+);
 ---
 
-<Collapsible class={cn("group/accordion", className)} open={isOpen} data-nb-sidebar-group {...attrs}>
+<Collapsible
+  class={cn("group/accordion", className)}
+  open={isOpen}
+  data-nb-sidebar-group
+  {...attrs}
+>
   <SidebarGroupHeader
     label={label}
     isOpen={isOpen}
@@ -68,7 +75,7 @@ const isOpen = Boolean(hasActive || collapsed === false || collapsed === undefin
 
   <CollapsibleContent data-nb-state={isOpen ? "open" : "closed"}>
     <ul class="mt-0.5 ml-3 list-none border-l border-border p-0 pl-2 flex flex-col gap-px">
-      {items.map((item) => (
+      {items.map(item => (
         <li class="break-words">
           {item.type === "group" ? (
             <Astro.self
@@ -82,9 +89,20 @@ const isOpen = Boolean(hasActive || collapsed === false || collapsed === undefin
               indexIsExternal={item.indexIsExternal}
             />
           ) : item.type === "external" ? (
-            <SidebarLink label={item.label} href={item.href} badge={item.badge} target="_blank" rel="noopener" />
+            <SidebarLink
+              label={item.label}
+              href={item.href}
+              badge={item.badge}
+              target="_blank"
+              rel="noopener"
+            />
           ) : (
-            <SidebarLink label={item.label} href={item.href} isCurrent={item.isCurrent} badge={item.badge} />
+            <SidebarLink
+              label={item.label}
+              href={item.href}
+              isCurrent={item.isCurrent}
+              badge={item.badge}
+            />
           )}
         </li>
       ))}
