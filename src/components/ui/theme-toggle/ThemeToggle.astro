@@ -17,14 +17,20 @@ const { class: className, ...attrs } = Astro.props;
   data-nb-theme-toggle
   class={cn(
     "group flex items-center justify-center w-8 h-8 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors",
-    className,
+    className
   )}
   {...attrs}
   aria-label="Toggle dark mode"
   data-nb-state="light"
 >
-  <Icon name="ph:sun" class="w-[1.125rem] h-[1.125rem] hidden group-data-[nb-state=dark]:block" />
-  <Icon name="ph:moon" class="w-[1.125rem] h-[1.125rem] group-data-[nb-state=dark]:hidden" />
+  <Icon
+    name="ph:sun"
+    class="w-[1.125rem] h-[1.125rem] hidden group-data-[nb-state=dark]:block"
+  />
+  <Icon
+    name="ph:moon"
+    class="w-[1.125rem] h-[1.125rem] group-data-[nb-state=dark]:hidden"
+  />
 </button>
 
 <script>

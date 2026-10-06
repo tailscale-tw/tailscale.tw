@@ -29,7 +29,7 @@ const hash = sidebarHash(items);
   {...attrs}
 >
   <ul class="top-level flex list-none flex-col gap-0.5 p-0">
-    {items.map((item) =>
+    {items.map(item =>
       item.type === "group" ? (
         <li>
           <SidebarGroup
@@ -45,13 +45,24 @@ const hash = sidebarHash(items);
         </li>
       ) : item.type === "external" ? (
         <li>
-          <SidebarLink label={item.label} href={item.href} badge={item.badge} target="_blank" rel="noopener" />
+          <SidebarLink
+            label={item.label}
+            href={item.href}
+            badge={item.badge}
+            target="_blank"
+            rel="noopener"
+          />
         </li>
       ) : (
         <li>
-          <SidebarLink label={item.label} href={item.href} isCurrent={item.isCurrent} badge={item.badge} />
+          <SidebarLink
+            label={item.label}
+            href={item.href}
+            isCurrent={item.isCurrent}
+            badge={item.badge}
+          />
         </li>
-      ),
+      )
     )}
   </ul>
 </div>
@@ -61,5 +72,7 @@ const hash = sidebarHash(items);
 </script>
 
 <style is:global>
-  [data-nb-sidebar-hidden] { display: none; }
+  [data-nb-sidebar-hidden] {
+    display: none;
+  }
 </style>

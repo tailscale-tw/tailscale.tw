@@ -7,7 +7,10 @@
 import { createHash } from "node:crypto";
 import Icon from "@cloudflare/nimbus-docs/components/Icon.astro";
 import { getTabs } from "@cloudflare/nimbus-docs/lib/pkgm";
-import type { CommandType, CommandOptions } from "@cloudflare/nimbus-docs/lib/pkgm";
+import type {
+  CommandType,
+  CommandOptions,
+} from "@cloudflare/nimbus-docs/lib/pkgm";
 import { LayerCard, LayerCardHeader } from "@/components/ui/layer-card";
 
 interface Props extends CommandOptions {
@@ -61,11 +64,15 @@ const uid =
           tabs.forEach(function (t, i) {
             t.setAttribute("aria-selected", String(i === idx));
           });
-          (card.querySelectorAll("[data-nb-pm-panel]") as NodeListOf<HTMLElement>).forEach(function (p, i) {
+          (
+            card.querySelectorAll(
+              "[data-nb-pm-panel]"
+            ) as NodeListOf<HTMLElement>
+          ).forEach(function (p, i) {
             p.hidden = i !== idx;
           });
         }
-      },
+      }
     );
   }
 </script>
@@ -90,10 +97,12 @@ const uid =
 
     {tabs.map((tab, i) => {
       const cmdLines = tab.cmd.split("\n");
-      const commentPrefix = cmdLines.length > 1 ? cmdLines.slice(0, -1).join("\n") + "\n" : "";
+      const commentPrefix =
+        cmdLines.length > 1 ? cmdLines.slice(0, -1).join("\n") + "\n" : "";
       const codeLine = cmdLines[cmdLines.length - 1];
       const spaceIdx = codeLine.indexOf(" ");
-      const codeFirst = spaceIdx === -1 ? codeLine : codeLine.slice(0, spaceIdx);
+      const codeFirst =
+        spaceIdx === -1 ? codeLine : codeLine.slice(0, spaceIdx);
       const codeRest = spaceIdx === -1 ? "" : codeLine.slice(spaceIdx);
       return (
         <div
@@ -121,8 +130,12 @@ const uid =
     })}
     <nb-pm-restore style="display:contents"></nb-pm-restore>
   </LayerCard>
-  <template data-nb-pm-icon-copy><Icon name="ph:copy" class="w-[18px] h-[18px]" /></template>
-  <template data-nb-pm-icon-check><Icon name="ph:check" class="w-[18px] h-[18px]" /></template>
+  <template data-nb-pm-icon-copy>
+    <Icon name="ph:copy" class="w-[18px] h-[18px]" />
+  </template>
+  <template data-nb-pm-icon-check>
+    <Icon name="ph:check" class="w-[18px] h-[18px]" />
+  </template>
 </div>
 
 <script>

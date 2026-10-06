@@ -6,7 +6,11 @@ import { LinkButton } from "./ui/link-button";
 import { ThemeToggle } from "./ui/theme-toggle";
 import SearchTrigger from "./ui/search/SearchTrigger.astro";
 import { config } from "virtual:nimbus/config";
-import { getSidebarSections, stripBase, withBase } from "@cloudflare/nimbus-docs/runtime";
+import {
+  getSidebarSections,
+  stripBase,
+  withBase,
+} from "@cloudflare/nimbus-docs/runtime";
 
 interface Props {
   /** Astro collection id for the current page, forwarded from DocsLayout. */
@@ -28,7 +32,9 @@ interface Props {
 const { collection, showSidebar = true, sections: sectionsProp } = Astro.props;
 
 // Normalize trailing slash so isActive matches sidebar hrefs.
-const currentSlug = stripBase(Astro.url.pathname, import.meta.env.BASE_URL).replace(/\/$/, "") || "/";
+const currentSlug =
+  stripBase(Astro.url.pathname, import.meta.env.BASE_URL).replace(/\/$/, "") ||
+  "/";
 const sections =
   sectionsProp ?? (await getSidebarSections(currentSlug, { collection }));
 const showSections = sections.length >= 2;
@@ -41,12 +47,40 @@ const resolveSectionHref = (href: string): string =>
   <div class="mx-auto flex items-center justify-between gap-3 h-14 px-4 lg:px-6">
     <div class="flex items-center gap-3 min-w-0">
       <slot name="brand">
-        <a href={homeHref} class="group shrink-0 flex items-center gap-2" aria-label={`${config.title} 首頁`}>
+        <a
+          href={homeHref}
+          class="group shrink-0 flex items-center gap-2"
+          aria-label={`${config.title} 首頁`}
+        >
           <!-- TUI 標記：方框 + 游標，顏色跟隨 token -->
-          <svg width="20" height="20" viewBox="0 0 32 32" fill="none" aria-hidden="true" class="shrink-0">
-            <rect x="2" y="2" width="28" height="28" stroke="currentColor" stroke-width="3"></rect>
-            <path d="M9 10l6 6-6 6" stroke="currentColor" stroke-width="3"></path>
-            <rect x="17" y="20" width="8" height="3" style="fill: var(--nb-primary);"></rect>
+          <svg
+            width="20"
+            height="20"
+            viewBox="0 0 32 32"
+            fill="none"
+            aria-hidden="true"
+            class="shrink-0"
+          >
+            <rect
+              x="2"
+              y="2"
+              width="28"
+              height="28"
+              stroke="currentColor"
+              stroke-width="3"
+            ></rect>
+            <path
+              d="M9 10l6 6-6 6"
+              stroke="currentColor"
+              stroke-width="3"
+            ></path>
+            <rect
+              x="17"
+              y="20"
+              width="8"
+              height="3"
+              style="fill: var(--nb-primary);"
+            ></rect>
           </svg>
           <span class="font-bold text-sm text-heading group-hover:text-heading transition-colors">
             {config.title}
@@ -55,8 +89,11 @@ const resolveSectionHref = (href: string): string =>
       </slot>
 
       {showSections && (
-        <nav aria-label="Sections" class="hidden md:flex items-center gap-1 ml-4 pl-4 border-l border-border h-6 min-w-0 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-          {sections.map((section) => (
+        <nav
+          aria-label="Sections"
+          class="hidden md:flex items-center gap-1 ml-4 pl-4 border-l border-border h-6 min-w-0 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        >
+          {sections.map(section => (
             <a
               href={resolveSectionHref(section.href)}
               aria-current={section.isActive ? "page" : undefined}

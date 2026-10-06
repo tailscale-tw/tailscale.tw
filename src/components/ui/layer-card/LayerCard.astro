@@ -26,7 +26,7 @@ const { orientation = "vertical", class: className, ...attrs } = Astro.props;
   class={cn(
     "group/layer flex w-full overflow-hidden rounded-lg bg-muted text-sm ring ring-border",
     orientation === "horizontal" ? "flex-row items-stretch" : "flex-col",
-    className,
+    className
   )}
   {...attrs}
 >

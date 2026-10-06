@@ -1,0 +1,66 @@
+name: CI
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+
+jobs:
+  lint:
+    name: Code standards
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: "☁️ Checkout repository"
+        uses: actions/checkout@v6
+
+      - name: "📦 Setup bun"
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: "📦 Install dependencies"
+        run: bun install --frozen-lockfile
+
+      - name: "📝 AutoCorrect (CJK spacing)"
+        run: bun run lint:text
+
+      - name: "🔎 Lint code"
+        run: bun run lint
+
+      - name: "📝 Checking code format"
+        run: bun run format:check
+
+      - name: "📚 Lint docs"
+        run: bun run lint:docs
+
+  build:
+    name: Build
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: "☁️ Checkout repository"
+        uses: actions/checkout@v6
+
+      - name: "⬢ Setup Node.js"
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: "📦 Setup bun"
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: "📦 Install dependencies"
+        run: bun install --frozen-lockfile
+
+      - name: "🧐 Type check"
+        run: bun run typecheck
+
+      - name: "🚀 Build the project"
+        run: bun run build

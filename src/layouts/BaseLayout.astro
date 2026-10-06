@@ -51,7 +51,9 @@ const basedLlmsUrl = withBase(llmsIndexPath, baseUrl);
 const llmsUrl = Astro.site
   ? new URL(basedLlmsUrl, Astro.site).href
   : basedLlmsUrl;
-const basedMarkdownUrl = markdownUrl ? withBase(markdownUrl, baseUrl) : undefined;
+const basedMarkdownUrl = markdownUrl
+  ? withBase(markdownUrl, baseUrl)
+  : undefined;
 const resolvedMarkdownUrl =
   basedMarkdownUrl && Astro.site
     ? new URL(basedMarkdownUrl, Astro.site).href
@@ -82,7 +84,8 @@ const resolvedMarkdownUrl =
           }
         };
 
-        const resolveMode = () => readPref() ?? (media.matches ? "dark" : "light");
+        const resolveMode = () =>
+          readPref() ?? (media.matches ? "dark" : "light");
 
         const applyTheme = () => {
           const root = document.documentElement;
@@ -90,7 +93,7 @@ const resolvedMarkdownUrl =
           if (mode === "dark") root.setAttribute("data-mode", "dark");
           else root.removeAttribute("data-mode");
           root.style.colorScheme = mode;
-          document.querySelectorAll("[data-nb-theme-toggle]").forEach((b) => {
+          document.querySelectorAll("[data-nb-theme-toggle]").forEach(b => {
             b.setAttribute("data-nb-state", mode);
           });
         };
@@ -100,14 +103,13 @@ const resolvedMarkdownUrl =
         media.addEventListener("change", () => {
           if (!readPref()) applyTheme();
         });
-        window.addEventListener("storage", (e) => {
+        window.addEventListener("storage", e => {
           if (e.key === KEY) applyTheme();
         });
 
         window.__nbApplyTheme = applyTheme;
       })();
     </script>
-
     <NimbusHead
       title={title}
       description={description}
@@ -126,10 +128,16 @@ const resolvedMarkdownUrl =
     <!-- Google Analytics (gtag). The site uses view transitions (ClientRouter),
          so config sends no automatic page_view; one page_view is sent on every
          astro:page-load (initial load included). -->
-    <script is:inline async src="https://www.googletagmanager.com/gtag/js?id=G-BD19CZ9G36"></script>
+    <script
+      is:inline
+      async
+      src="https://www.googletagmanager.com/gtag/js?id=G-BD19CZ9G36"
+    ></script>
     <script is:inline>
       window.dataLayer = window.dataLayer || [];
       function gtag() {
+        // gtag.js 需要原生 arguments 物件，不能改成 rest 參數
+        // eslint-disable-next-line prefer-rest-params
         dataLayer.push(arguments);
       }
       gtag("js", new Date());
