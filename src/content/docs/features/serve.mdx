@@ -2,8 +2,8 @@
 title: Tailscale Serve：在 tailnet 內分享本機服務
 description: 使用 Tailscale Serve 在 tailnet 內以 HTTPS 分享本機 HTTP、TCP 服務與靜態檔案
 sidebar:
-  order: 7
-  label: Tailscale Serve：在 tailnet 內分享本機服務
+  order: 1
+  label: Tailscale Serve
 ---
 
 本機跑了一個開發中的網站、後台或靜態檔案，想讓同一 tailnet 裡的其他裝置連進來，又不想開防火牆連接埠或上傳到公開主機，就用 [Tailscale Serve](https://tailscale.com/kb/1312/serve)。
@@ -16,7 +16,7 @@ Tailscale Serve 會在你的裝置上啟一個 HTTPS（或 HTTP、TCP）服務�
 
 一個 Serve 目標（target）可以是以下四種：
 
-- **本機服務**：連接埠號碼（如 `3000`）、`localhost:3000`，或完整 URL。最常用來分享開發中的網站。
+- **本機服務**：連接埠號碼（如 `3000`）、`localhost:3000`，或完整 URL。最常用來分享開發中的網站。注意反向代理永遠轉給 `http://127.0.0.1`，本機服務必須聽在 IPv4 迴路位址，只聽 `[::1]` 的會被拒絕（見範例一）。
 - **檔案或資料夾**：絕對路徑（如 `/home/alice/demo`）。分享資料夾時會自動產生目錄列表。
 - **靜態文字**：`text:"..."`，適合放維護公告或快速測試。
 - **TCP 轉發**：`--tcp` 或 `--tls-terminated-tcp`，轉發 SSH、RDP 這類非 HTTP 的 TCP 服務。
@@ -28,13 +28,14 @@ https://my-dev-machine.tailxxxxx.ts.net
 https://my-dev-machine.tailxxxxx.ts.net:8443
 ```
 
-Serve 收到 tailnet 來的請求時，會在轉給本機服務前加上身份標頭（`Tailscale-User-Login`、`Tailscale-User-Name` 等），後端可以用它識別是誰連進來的。基於安全，後端服務建議只聽 `127.0.0.1`，避免有人繞過 Serve 直接偽造這些標頭。
+Serve 收到 tailnet 來的請求時，會在轉給本機服務前加上身份標頭（`Tailscale-User-Login`、`Tailscale-User-Name` 等），後端可以用它識別是誰連進來的。例外：來自 tagged 裝置的請求不會帶這些標頭，只靠標頭做授權時要記得處理這個缺口。基於安全，後端服務建議只聽 `127.0.0.1`，避免有人繞過 Serve 直接偽造這些標頭。
 
 ## 前置條件
 
 1. 裝置已加入 tailnet，且 MagicDNS 可以解析裝置名稱。
 2. 在管理後台啟用 HTTPS 憑證（Admin console → DNS → 啟用 HTTPS）。Serve 依賴 tailnet 自動配發的 TLS 憑證。
-3. 同一 tailnet 的存取控制（ACL）規則同樣適用於 Serve：對方本來連不到你的裝置，就一樣連不到你的 Serve 網址。
+3. 同一 tailnet 的存取控制（ACL）規則同樣適用於 Serve，而且是精確到連接埠的：對方能連你的裝置，不代表能連你的 Serve 網址。Serve 預設走 `443`，若 policy 只放行了特定連接埠（例如只開 `22`），對方能 SSH 但打不開你的 Serve 網址，需要額外放行 Serve 用的連接埠。
+4. Linux 上 `tailscaled` 預設只接受 root 管理：一般使用者執行 `tailscale serve` 若看到 `Access denied`，改用 `sudo` 執行，或先跑一次 `sudo tailscale set --operator=$USER`，之後即可免 `sudo` 操作 Tailscale。
 
 如果你還沒啟用 HTTPS，直接跑 `tailscale serve` 即可，CLI 會給你一個 consent 網址，照著點開同意，Tailscale 會幫你把缺少的設定補上。
 
@@ -84,9 +85,9 @@ tailscale serve --bg --https=8443 3000
 # tailnet 內用純 HTTP（不需要憑證）
 tailscale serve --bg --http=80 3000
 
-# 同一台主機用路徑區分多個服務
+# 同一台主機用路徑區分多個服務（前綴會被去掉，見範例一）
 tailscale serve --bg 3000
-tailscale serve --bg --set-path=/api 8080
+tailscale serve --bg --set-path=/api http://127.0.0.1:8080/api
 
 # 轉發本機 TCP 服務（例如 SSH）
 tailscale serve --bg --tcp=2222 tcp://localhost:22
@@ -94,12 +95,28 @@ tailscale serve --bg --tcp=2222 tcp://localhost:22
 
 ## 範例一：分享本機開發中的網站
 
-以 Vite（預設 `5173`）為例：
+以 Vite（預設 `5173`）為例。有兩個坑要先避開：Serve 永遠轉給 `http://127.0.0.1`，而 Vite 預設聽的 `localhost` 在 Node 17+ 常只綁到 IPv6 的 `[::1]`，轉發會被拒絕；而且 Vite 6.0.9 / 5.4.12 之後預設擋掉非 localhost 的 Host（DNS rebinding 防護），Serve 轉發帶的是 `*.ts.net` 的 Host，不處理會看到「Blocked request」。所以開發伺服器要這樣起：
 
 ```bash
-# 開發伺服器先跑起來（只聽 localhost 即可）
-npm run dev
+# 明確聽在 127.0.0.1（仍是本機迴路，不會暴露到區網）
+npm run dev -- --host 127.0.0.1
+```
 
+```js
+// vite.config.js：允許 tailnet 網域的 Host
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  server: {
+    host: "127.0.0.1",
+    allowedHosts: [".ts.net"],
+  },
+});
+```
+
+> 若 tailnet 使用自訂網域，把 `.ts.net` 換成該網域後綴。開頭的 `.` 表示包含該網域本身及所有子網域。
+
+```bash
 # 另開一個終端機分享出去
 tailscale serve --bg 5173
 ```
@@ -110,10 +127,10 @@ tailscale serve --bg 5173
 
 ```bash
 tailscale serve --bg 5173
-tailscale serve --bg --set-path=/api 8080
+tailscale serve --bg --set-path=/api http://127.0.0.1:8080/api
 ```
 
-這樣前端走 `/`，後端走 `/api`，共用同一個 HTTPS 網址。
+這樣前端走 `/`，後端走 `/api`，共用同一個 HTTPS 網址。注意 `--set-path` 的前綴**不會**原樣轉給後端：請求 `/api/users` 時，Tailscale 會先去掉 `/api` 再轉發。上面把目標寫成含 `/api` 的完整 URL，就是為了把前綴補回去，讓路由註冊在 `/api/*` 的後端能正常運作。
 
 ## 範例二：分享一個資料夾
 
@@ -137,12 +154,12 @@ tailscale serve --bg text:"網站維護中，09:00 UTC 回來"
 
 ## 與 Funnel 的差異
 
-|            | Serve                           | Funnel                            |
-| ---------- | ------------------------------- | --------------------------------- |
-| 看得到的人 | 只有同一 tailnet 內的裝置       | 整個網際網路都能連                |
-| 典型用途   | 內部分享開發站、後台、檔案      | 公開 demo、webhook 接收、對外服務 |
-| 連接埠限制 | 任意連接埠皆可                  | 只能用 `443`、`8443`、`10000`     |
-| 身份標頭   | 有（可識別是哪位 tailnet 成員） | 沒有（公開流量不帶身份）          |
+|            | Serve                       | Funnel                            |
+| ---------- | --------------------------- | --------------------------------- |
+| 看得到的人 | 只有同一 tailnet 內的裝置   | 整個網際網路都能連                |
+| 典型用途   | 內部分享開發站、後台、檔案  | 公開 demo、webhook 接收、對外服務 |
+| 連接埠限制 | 任意連接埠皆可              | 只能用 `443`、`8443`、`10000`     |
+| 身份標頭   | 有（tagged 裝置的請求不帶） | 沒有（公開流量不帶身份）          |
 
 同一個連接埠不能同時是 Serve 又是 Funnel，以最後下的那道指令為準。如果你下了 Funnel 指令，該連接埠就變成公開的；要收回來就重下一次 `serve`。本站後續會有 Funnel 專文，介紹如何把服務公開到網際網路；等不及的話可先看 [Tailscale Funnel 官方文件](https://tailscale.com/kb/1311/funnel)。
 
@@ -150,7 +167,8 @@ tailscale serve --bg text:"網站維護中，09:00 UTC 回來"
 
 - **跑 `tailscale serve` 被導去開網頁？** 表示 HTTPS 或相關設定還沒啟用，照著 CLI 給的 consent 網址點開同意即可。
 - **`status` 顯示 `No serve config`？** 表示本機目前沒有任何分享，或剛跑完 `reset`。重下一道 `serve` 指令即可。
-- **確定在分享，對方卻連不上？** 先檢查對方裝置是否在同一 tailnet，再檢查 ACL 是否擋掉，最後用 `tailscale serve status` 確認網址、連接埠與路徑有沒有打錯。
+- **確定在分享，對方卻連不上？** 先檢查對方裝置是否在同一 tailnet，再檢查 ACL 是否放行了 Serve 用的連接埠（預設 `443`），最後用 `tailscale serve status` 確認網址、連接埠與路徑有沒有打錯。
+- **Linux 上看到 `Access denied`？** `tailscaled` 預設只接受 root 管理，改用 `sudo tailscale serve ...`，或先跑一次 `sudo tailscale set --operator=$USER` 之後免 `sudo` 操作。
 - **重開機後分享消失？** 前景執行的分享不會自動回來，改用 `tailscale serve --bg ...` 即可持久化。
 
 ## 參考資料
@@ -158,3 +176,4 @@ tailscale serve --bg text:"網站維護中，09:00 UTC 回來"
 - [Tailscale Serve 官方文件](https://tailscale.com/kb/1312/serve)
 - [`tailscale serve` 指令參考](https://tailscale.com/kb/1242/tailscale-serve)
 - [Tailscale Funnel 官方文件](https://tailscale.com/kb/1311/funnel)
+- [Vite Server Options（`server.host`、`server.allowedHosts`）](https://vite.dev/config/server-options.html)
