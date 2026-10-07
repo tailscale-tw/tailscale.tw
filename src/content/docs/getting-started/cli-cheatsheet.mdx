@@ -1,0 +1,140 @@
+---
+title: 常用 tailscale CLI 指令速查
+description: 整理最常用的 tailscale CLI 指令與旗標，包括連線狀態、up 與 set 的差別、Serve／Funnel／Taildrop 等功能指令與除錯工具
+sidebar:
+  order: 4
+  label: CLI 指令速查
+---
+
+`tailscale` 指令是操作本機 Tailscale 的主要工具：Linux 伺服器、NAS、LXC 這類沒有圖形介面的環境幾乎都靠它，macOS 與 Windows 的圖形介面背後也有同一套指令可用。本文按用途整理最常用的指令，每個附上用途與常用旗標，並連到本站的詳細文章。
+
+> 本文以 Tailscale v1.102（2026 年 10 月）為準，指令與旗標依 v1.102.4 的 `tailscale --help` 與官方 CLI 參考整理。官方說明 CLI 仍在持續調整，指令與旗標可能隨版本變動，遇到不一致時以你手上版本的 `tailscale <指令> --help` 為準。
+
+## 使用前須知
+
+- **Linux 要 root**：`tailscaled` 預設只接受 root 操作，看到 `Access denied` 就加 `sudo`。不想每次都打 `sudo`，可以執行一次 `sudo tailscale set --operator=$USER`，讓目前的使用者也能操作。
+- **每個指令都有說明**：`tailscale <指令> --help` 會列出所有旗標與預設值，例如 `tailscale up --help`。
+- **布林旗標的寫法**：`--ssh` 等同 `--ssh=true`，要關掉就寫 `--ssh=false`；字串旗標給空字串代表清除，例如 `--exit-node=`。
+- **macOS**：三種版本都有 CLI，但功能不完全相同，例如 App Store 版沒有 `tailscale ssh` 指令，差異見 [macOS 上安裝 Tailscale 的三種方法](/platforms/macos-install/)。
+
+## 連線與狀態
+
+| 指令                    | 用途                                                     |
+| ----------------------- | -------------------------------------------------------- |
+| `tailscale up`          | 連上 tailnet，還沒登入時會印出登入網址                   |
+| `tailscale down`        | 中斷連線，但保留登入狀態，之後 `tailscale up` 就能連回   |
+| `tailscale login`       | 登入（或加入另一個帳號）                                 |
+| `tailscale logout`      | 中斷連線並讓本機的 node key 失效，下次要重新驗證         |
+| `tailscale status`      | 列出本機與 tailnet 內其他裝置的 IP、名稱、OS 與連線狀態  |
+| `tailscale ip`          | 顯示 Tailscale IP，加上裝置名稱可查其他裝置              |
+| `tailscale ping <主機>` | 在 Tailscale 層 ping 對方，並顯示走直連還是 DERP 中繼    |
+| `tailscale netcheck`    | 分析本機網路：UDP 是否可用、IPv4／IPv6、各 DERP 區域延遲 |
+
+常用旗標與用法：
+
+- **`tailscale up --auth-key=<key>`**：用 auth key 登入，不用開瀏覽器，適合腳本或沒有螢幕的機器。`--auth-key=file:/path/to/key` 可以從檔案讀取，避免金鑰留在 shell 歷史紀錄。
+- **`tailscale up --qr`**：把登入網址印成 QR code，用手機掃描登入，適合只有序列埠或 console 的機器。
+- **`down` 和 `logout` 的差別**：`down` 只是暫時離線，裝置還留在 tailnet；`logout` 會讓 node key 失效，下次 `up` 要重新登入。只是想暫停連線就用 `down`。
+- **`tailscale status --active`**：只列出目前有連線往來的裝置。`--json` 輸出完整資料，但官方提醒格式可能隨版本改變，寫腳本時要留意。
+- **`tailscale ip -4`**：只印 IPv4，`-6` 只印 IPv6；`tailscale ip -4 nas` 查名為 `nas` 的裝置。
+- **`tailscale ping`**：預設最多送 10 次，一旦建立直連就停（`--until-direct`）。回應裡的 `via DERP(tok)` 表示經由東京的 DERP 中繼，`via peer-relay(...)` 表示經由 Peer Relay，`via 203.0.113.5:41641` 這種 IP 加連接埠則是直連。`--c 0` 會一直 ping 下去。
+
+`tailscale ping` 通、一般的 `ping` 不通，表示是某一端作業系統的防火牆擋掉了封包，因為 `tailscale ping` 不經過兩端的 TUN 介面。直連與 DERP 的觀念見 [Tailscale 是什麼](/getting-started/what-is-tailscale/)。
+
+## 設定：`set` 與 `up` 的差別
+
+這是 CLI 最常踩的坑。兩個指令都能改設定，但行為不同：
+
+- **`tailscale set`**：**只改你寫出來的設定**，沒寫到的維持原狀。
+- **`tailscale up`**：帶了任何設定旗標時，那組旗標要是**完整的設定**。只要有一個沒寫到的設定會因此回到預設值，`up` 就會拒絕執行。
+
+舉例來說，一台裝置原本以 `tailscale up --advertise-exit-node --accept-routes` 啟動，現在想加開 Tailscale SSH：
+
+```bash
+# 會失敗：沒寫到 --advertise-exit-node 與 --accept-routes
+sudo tailscale up --ssh
+
+# 可以：只開 SSH，其他設定不動
+sudo tailscale set --ssh
+```
+
+`up` 失敗時會印出類似這段錯誤，下方附上一行把目前所有非預設設定都寫齊的指令，複製那一行再加上新旗標即可：
+
+```text
+Error: changing settings via 'tailscale up' requires mentioning all
+non-default flags. To proceed, either re-run your command with --reset or
+use the command below to explicitly mention the current value of
+all non-default settings:
+```
+
+幾個細節：
+
+- **沒有旗標的 `tailscale up`** 不會改任何設定，只是把網路連上，等同 `down` 的反向操作。
+- **`up --reset`** 會把沒寫到的設定**全部改回預設值**，要確定這是你要的才用，不要拿它來繞過錯誤訊息。
+- **第一次登入前**沒有既有設定可比較，`up` 不做這項檢查，帶任何旗標都可以。
+- `--auth-key`、`--force-reauth`、`--qr` 不算設定，改設定時不用重複寫。
+- **`set` 沒有的旗標**：`--advertise-tags`、`--login-server`、`--auth-key`、`--reset` 只有 `up`（或 `login`）有。要改 tag 就得用 `up`，並把其他設定寫齊。
+- **查目前的設定**：`tailscale get` 列出所有設定值；`tailscale get --set-flags` 直接印成 `tailscale set` 的旗標格式，方便記錄或搬到另一台機器。
+
+`set` 常用的旗標：
+
+| 旗標                                | 用途                                                                       |
+| ----------------------------------- | -------------------------------------------------------------------------- |
+| `--ssh`                             | 開啟 Tailscale SSH 伺服器，誰能連依 tailnet 的 policy 決定                 |
+| `--accept-routes`                   | 接受其他裝置廣播的子網路由（見 [Subnet Router](/features/subnet-router/)） |
+| `--advertise-routes=192.168.1.0/24` | 把本機當 Subnet Router，廣播指定網段                                       |
+| `--advertise-exit-node`             | 把本機當 Exit Node（見 [Exit Node](/features/exit-node/)）                 |
+| `--exit-node=<名稱或 IP>`           | 使用指定的 Exit Node；`--exit-node=` 清除，`--exit-node=auto:any` 自動挑選 |
+| `--exit-node-allow-lan-access`      | 使用 Exit Node 時仍可直接存取本地區網                                      |
+| `--accept-dns=false`                | 不套用 Admin console 的 DNS 設定（例如本機已有自己的 DNS 伺服器時）        |
+| `--hostname=<名稱>`                 | 改用指定的裝置名稱，而不是作業系統的主機名稱                               |
+| `--shields-up`                      | 拒絕所有連入連線，本機仍可連出去                                           |
+| `--operator=$USER`                  | 讓指定的 Unix 使用者不用 `sudo` 就能操作                                   |
+| `--auto-update`                     | 自動更新到最新版本                                                         |
+
+## 功能指令
+
+| 指令                               | 用途                                                   | 詳細文章                                                                                                               |
+| ---------------------------------- | ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------- |
+| `tailscale serve --bg 3000`        | 把本機 `3000` 連接埠以 HTTPS 分享給 tailnet 內的裝置   | [Tailscale Serve](/features/serve/)                                                                                    |
+| `tailscale funnel --bg 3000`       | 把本機服務公開到網際網路                               | [Tailscale Funnel](/features/funnel/)                                                                                  |
+| `tailscale cert <裝置網域>`        | 取得 `*.ts.net` 網域的 TLS 憑證，存成 `.crt` 與 `.key` | [PVE](/pve/auto-renew-tailscale-certificate-on-pve/)、[Synology](/synology/install-tailscale-certificate-on-synology/) |
+| `tailscale ssh [user@]<主機>`      | 透過 MagicDNS 連到其他裝置的 SSH                       | —                                                                                                                      |
+| `tailscale file cp <檔案> <裝置>:` | 用 Taildrop 傳檔案給自己的其他裝置                     | —                                                                                                                      |
+| `tailscale exit-node list`         | 列出 tailnet 內可用的 Exit Node                        | [Exit Node](/features/exit-node/)                                                                                      |
+
+常用旗標與用法：
+
+- **Serve／Funnel**：`--bg` 背景執行，重開機後自動恢復；`status` 看目前的分享，`reset` 清除全部設定。要移除單一分享，用原本的旗標加上 `off`，例如 `tailscale serve --https=443 off`。
+- **`tailscale cert`**：網域就是裝置的完整名稱，例如 `tailscale cert nas.tailxxxxx.ts.net`。預設在目前目錄存成 `<網域>.crt` 與 `<網域>.key`，可用 `--cert-file`、`--key-file` 指定輸出路徑（給 `-` 代表輸出到 stdout）。tailnet 要先在 Admin console 啟用 HTTPS。
+- **`tailscale ssh`**：連線的是對方用 `tailscale set --ssh` 開啟的 Tailscale SSH 伺服器，或對方本來就有的 SSH 伺服器。它只是系統 `ssh` 的包裝，會用 MagicDNS 解析名稱（即使本機 `--accept-dns=false`），並自動核對對方的 host key。平常直接用 `ssh` 也可以。
+- **Taildrop**：`tailscale file cp photo.jpg my-laptop:`，目標裝置名稱後面**要加冒號**。`tailscale file cp --targets` 列出可傳送的裝置。Linux 上收到的檔案會先放在收件匣，要用 `tailscale file get ~/Downloads` 取出；`--wait` 等檔案進來，`--loop` 持續接收。
+- **Exit Node**：`tailscale exit-node list --filter=Japan` 依國家篩選；`tailscale exit-node suggest` 建議目前最適合的 Exit Node。選好後用 `tailscale set --exit-node=<名稱>` 套用，清除則是 `tailscale set --exit-node=`。
+
+## 除錯
+
+| 指令                           | 用途                                                            |
+| ------------------------------ | --------------------------------------------------------------- |
+| `tailscale version`            | 印出 CLI 版本                                                   |
+| `tailscale version --daemon`   | 一併印出 `tailscaled` 的版本，兩者不一致時常是更新沒完成        |
+| `tailscale version --upstream` | 查詢官方最新的穩定版號                                          |
+| `tailscale update`             | 更新到最新版本；`--dry-run` 只顯示會做什麼                      |
+| `tailscale bugreport`          | 印出一組識別碼，回報問題時提供給 Tailscale 支援人員             |
+| `tailscale dns status`         | 查看 MagicDNS 與 DNS 轉發的設定                                 |
+| `tailscale dns query <名稱>`   | 用 Tailscale 內建的 DNS（`100.100.100.100`）查詢名稱            |
+| `tailscale whois <IP>`         | 查某個 Tailscale IP 屬於哪台裝置與哪個使用者                    |
+| `tailscale debug <子指令>`     | 底層除錯工具，例如 `derp-map`（DERP 地圖）、`prefs`（目前設定） |
+
+幾個重點：
+
+- **`bugreport`** 印出的識別碼本身不含日誌內容，而是讓 Tailscale 支援人員找到本機對應時間點的日誌。加上 `--diagnose` 會多跑一些深入檢查。開 GitHub issue 或聯絡支援時附上這組識別碼，能省下很多來回。
+- **`debug` 不是穩定介面**：官方說明它的子指令與輸出隨時可能改變，適合臨時查問題，不要寫進腳本。
+- **連不上時的排查順序**：先 `tailscale status` 看對方是否在線，再 `tailscale ping <主機>` 看是否走 DERP，最後用 `tailscale netcheck` 檢查本機的 UDP 與 NAT 狀況。
+
+## 參考資料
+
+- [Tailscale CLI 參考（官方）](https://tailscale.com/kb/1080/cli)
+- [Tailscale 原始碼：`tailscale up` 的設定檢查（`cmd/tailscale/cli/up.go`）](https://github.com/tailscale/tailscale/blob/main/cmd/tailscale/cli/up.go)
+- [Tailscale 原始碼：`tailscale set`（`cmd/tailscale/cli/set.go`）](https://github.com/tailscale/tailscale/blob/main/cmd/tailscale/cli/set.go)
+- [Taildrop（官方）](https://tailscale.com/kb/1106/taildrop)
+- [Tailscale SSH（官方）](https://tailscale.com/kb/1193/tailscale-ssh)
