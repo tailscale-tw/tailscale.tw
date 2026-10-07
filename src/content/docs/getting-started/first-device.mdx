@@ -28,7 +28,7 @@ Tailscale 不提供傳統的 email／password 註冊，也沒有 Tailscale 自�
 
 在 Tailscale 第一次啟用網域或建立 tailnet 時，會要求你選擇身分提供者。第一個建立 tailnet 的使用者通常就是 **Owner**；之後同一個組織的成員會依 tailnet 的身分與網域設定加入。選擇身分提供者不只是選一個登入按鈕，也會影響這個 tailnet 的使用者如何驗證與歸屬。
 
-官方目前提供 **Switch identity provider** beta，但不是所有 IdP 都能直接切換：Google Workspace、使用 custom domain 的 Microsoft、Okta、OneLogin 與 custom OIDC 有相應的切換流程；GitHub 與 Apple 目前不能互相遷移，使用 Gmail 等 shared domain 的 tailnet 也不能自行切換。公司 tailnet 請用組織管理的身分提供者，不要先用個人帳號建立後才假設可以無痛搬家。
+官方目前提供 **Switch identity provider** beta，但不是所有 IdP 都能直接切換：Google Workspace、使用 custom domain 的 Microsoft、Okta、OneLogin 與 custom OIDC 有相應的切換流程；GitHub 與 Apple 的 tailnet 不能從該 IdP 遷出，也不能遷入該 IdP（from/to 皆不可）。其他不在 beta 清單的 IdP 如需切換，請聯絡 Tailscale Support；使用 Gmail 等 shared domain 的 tailnet 也不能自行切換，需聯絡 Support。公司 tailnet 請用組織管理的身分提供者，不要先用個人帳號建立後才假設可以無痛搬家。
 
 ## 建立 tailnet
 
@@ -110,7 +110,7 @@ Fedora、RHEL、Amazon Linux 與 openSUSE 等系統要使用各自的 `dnf`、`y
 
 要測試兩台裝置互連，第二台也要安裝 Tailscale。自己的筆電、手機或伺服器可以用同一個 Tailscale 使用者與同一個身分提供者登入；如果是其他人，應先從 Admin console 邀請對方加入，而不是共用你的帳號。
 
-也可以從 Admin console 的 **Machines** 頁面選 **Add device**，選 **Client device**、作業系統與 **Download Tailscale**，再把安裝連結交給第二台裝置。安裝完成後，在第二台裝置的 Tailscale 用戶端選 **Log in**，用正確的身分提供者完成驗證。
+也可以從 Admin console 的 **Machines** 頁面選 **Add device**，選作業系統與 **Download Tailscale**，再把安裝連結交給第二台裝置。安裝完成後，在第二台裝置的 Tailscale 用戶端選 **Log in**，用正確的身分提供者完成驗證。
 
 新裝置登入後通常會自動加入 tailnet；如果管理員啟用了 device approval，它會先出現在 **Machines** 頁面，狀態為 **Needs approval**。這時要由 Owner、Admin 或 IT admin 在該頁核准，裝置才會正式可用。
 
@@ -162,7 +162,7 @@ tailscale ping my-laptop
 
 ### 用 MagicDNS 名稱連線
 
-MagicDNS 會把裝置的 machine name 對應到 tailnet IP。先用作業系統的 DNS／ICMP 工具測試名稱解析：
+MagicDNS 會把裝置的 machine name 對應到 tailnet IP；新建 tailnet 的 MagicDNS 預設啟用，官方建議保持開啟。先用作業系統的 DNS／ICMP 工具測試名稱解析：
 
 ```bash
 ping <machine-name>
