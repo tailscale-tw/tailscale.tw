@@ -1,0 +1,125 @@
+---
+title: 方案與限制比較（Personal、Personal Plus、Premium 等）
+description: 比較 Tailscale Personal、Standard、Premium 與 Enterprise 的價格、使用者、裝置與功能限制，並說明如何查看方案與用量
+sidebar:
+  order: 3
+  label: 方案與限制比較
+---
+
+Tailscale 的方案名稱、價格與功能會調整，尤其是從舊方案轉到 seat-based pricing 之後，不能拿幾年前的比較表直接套用。本文記錄目前新註冊會看到的方案、本站常用功能在 Personal 免費方案的狀態，以及如何在 Admin console 確認自己的方案與用量。
+
+> 本文以 Tailscale v1.102、官方 [Pricing](https://tailscale.com/pricing) 頁面於 2026 年 10 月 7 日的內容為準。價格以美元（USD）與定價頁目前顯示的月繳單價整理；方案與功能可能隨時變動，購買或升級前請重新查看官方定價頁。
+
+## 先講結論
+
+- 新註冊的現行方案是 **Personal、Standard、Premium、Enterprise**。
+- **Personal** 免費且最多 6 位使用者；user devices 無限，不是「最多 6 台裝置」。個人自架服務、家用 NAS、跨裝置連線通常先從這個方案開始。
+- **Standard** 是 US$8／每位使用者／月，**Premium** 是 US$18／每位使用者／月；兩者的使用者數沒有方案上限，但付費是以使用者 seat 計價。
+- **Enterprise** 沒有公開固定價格，使用者數與其他數量依合約客製。
+- **Personal Plus** 不是目前可供新註冊選擇的方案，而是 legacy plan。現有帳號若仍在 Personal Plus、Personal Pro、Starter、Team、Business、Solo、Connectivity 或 Security 等舊方案，應以 Admin console 的 Billing 頁面與官方 legacy plan 文件為準，不要把它和現在的 Personal 混為一談。
+
+## 現行方案、價格與數量
+
+以下是定價頁在查證日顯示的 self-service 方案。Standard 與 Premium 的價格單位都是「每位使用者每月」；這裡沒有自行推算年繳折扣，也不把 Enterprise 的客製價格猜成固定數字。
+
+| 方案              | 新註冊狀態           | 價格（USD）           | 使用者數           |
+| ----------------- | -------------------- | --------------------- | ------------------ |
+| **Personal**      | 現行，可免費使用     | US$0，免費永久        | 最多 6 位          |
+| **Standard**      | 現行                 | US$8／每位使用者／月  | 無上限             |
+| **Premium**       | 現行                 | US$18／每位使用者／月 | 無上限             |
+| **Enterprise**    | 現行，聯絡 Sales     | 客製                  | 客製               |
+| **Personal Plus** | legacy，非新註冊方案 | 不列現行價格          | 依既有 legacy 帳號 |
+
+「無上限」只代表 Standard／Premium 沒有方案設定的使用者數上限，不代表付費方案免費；每一位佔用的 seat 仍按方案價格計費。Personal 不能直接增加 seats，超過 6 位使用者要升級方案。Personal 也只適合個人、非商業使用；商業或組織用途應選擇適合的付費方案或 Enterprise。
+
+### 裝置不是使用者
+
+定價頁把裝置分成不同種類，這是最容易誤讀的地方：
+
+| 資源種類                                               | Personal        | Standard        | Premium          | Enterprise  |
+| ------------------------------------------------------ | --------------- | --------------- | ---------------- | ----------- |
+| **User devices**（電腦、手機等）                       | 無限            | 無限            | 無限             | 無限        |
+| **Tagged resources**（伺服器、Exit Node 等服務型資源） | 50 個含在內     | 50 個含在內     | 50 個含在內      | 50 個含在內 |
+| **Ephemeral resources**（短生命週期資源）              | 每月 1,000 分鐘 | 每月 1,000 分鐘 | 每月 10,000 分鐘 | 客製        |
+| **ACL groups**                                         | 3 個            | 10 個           | 300 個           | 客製        |
+
+這表示你可以在 Personal 裡安裝很多台自己的筆電、手機與伺服器型 user device；6 位是使用者上限，不是裝置上限。若裝置使用 tag 作為身分，就會算作 tagged resource；定價頁目前列出每方案含 50 個，超過後的 add-on 價格是 US$1／每個 tagged resource／月。
+
+Ephemeral resource 是短期存在的 tagged resource，例如短暫的 CI/CD runner 或 Kubernetes pod，以分鐘池計算。官方另說明，ephemeral device 在 tailnet 中存在達 4 小時以上時，不再扣 ephemeral 分鐘，而會算成一般 tagged resource。
+
+> **注意：** 定價頁目前說明，ACL groups、multiple tailnets、tagged resources 與 ephemeral resources 的硬限制／超額計費尚未全面強制，之後會增加用量可見度與通知。上表是目前定價頁列出的方案額度，不是對未來行為的保證；實際狀態請以官方頁面與你的 Billing 頁面為準。
+
+## 功能差異
+
+定價頁的 Compare plans 表格以勾選表示功能是否包含在方案中。下表只挑與本站文章和個人使用最相關的項目：
+
+| 功能                                         | Personal | Standard | Premium | Enterprise |
+| -------------------------------------------- | -------- | -------- | ------- | ---------- |
+| Secure peer-to-peer connections              | 可       | 可       | 可      | 可         |
+| Split tunneling、MagicDNS                    | 可       | 可       | 可      | 可         |
+| ACL／grants 基本存取控制                     | 可       | 可       | 可      | 可         |
+| Peer Relay                                   | 可       | 可       | 可      | 可         |
+| Funnel（beta）                               | 可       | 可       | 可      | 可         |
+| SCIM 使用者與群組佈建                        | —        | 可       | 可      | 可         |
+| Advanced user roles                          | —        | 可       | 可      | 可         |
+| Device posture integrations（MDM、EDR、XDR） | —        | 可       | 可      | 可         |
+| Network flow logs                            | —        | —        | 可      | 可         |
+| Log streaming                                | —        | —        | 可      | 可         |
+| Configuration audit logs                     | 可       | 可       | 可      | 可         |
+
+幾個需要單獨理解的地方：
+
+- **ACL 不是付費牆功能**：[官方 ACL 文件](https://tailscale.com/kb/1018/acls) 說明 ACL 在所有方案可用，但部分進階能力受方案限制。Personal、Standard、Premium 的 ACL groups 上限分別是 3、10、300；Premium／Enterprise 才有使用自訂與第三方 device posture attributes 的進階 ACL 能力。
+- **SCIM 與 advanced user roles**：Personal 有基本的 Owner、Admin、Member 角色；SCIM 使用者／群組佈建與進階角色從 Standard 起。這些是組織管理功能，個人只用幾台裝置時通常不需要。
+- **稽核和流量記錄不同**：configuration audit logs 在所有方案都有，官方文件說明預設開啟並保留最近 90 天；network flow logs 與 log streaming 則是 Premium／Enterprise 功能。
+- **Serve** 沒有在定價比較表單獨列一列，但官方 CLI 文件標示 CLI 支援所有方案，而 `serve` 是 CLI 的功能；本文將它視為 Personal 可用。實際啟用仍要符合 Serve 的 HTTPS 與存取控制前置條件。
+
+## Personal 免費方案能做什麼
+
+本站目前已有的文章，大多是在 Personal 就能完成。對照如下：
+
+| 本站文章／用途                                                                 | Personal       | 方案依據與限制                                                                                                         |
+| ------------------------------------------------------------------------------ | -------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| [Tailscale Serve：在 tailnet 內分享本機服務](/features/serve/)                 | 可             | 走 tailnet 內連線；需依官方文件啟用 HTTPS，ACL 仍會生效。                                                              |
+| [Tailscale Funnel：把服務公開到網際網路](/features/funnel/)                    | 可             | 官方標示 Funnel beta 且所有方案可用；仍受 Funnel 的 node attribute、連接埠與頻寬限制。                                 |
+| [Subnet Router：存取整個區網內沒裝 Tailscale 的設備](/features/subnet-router/) | 可             | 官方標示 Subnet routers available for all plans；區網內的設備不必各自安裝 Tailscale。                                  |
+| [Exit Node：讓所有流量經由指定裝置出去](/features/exit-node/)                  | 可             | 官方標示 Exit nodes available for all plans；每台裝置仍須依序完成廣告、核准與使用設定。                                |
+| [效能調校](/performance/)                                                      | 不屬於方案限制 | UDP GRO forwarding、BBR 等是 Linux、kernel、硬體與連線路徑的調校；它們針對的 Subnet Router／Exit Node 本身全方案可用。 |
+| ACL／grants                                                                    | 基本功能可用   | ACL groups 上限為 3；進階 posture 條件等能力另受方案限制。                                                             |
+
+因此，若只是要讓自己的電腦、手機、NAS、家中伺服器互連，或在家裡架一台 Subnet Router／Exit Node，Personal 通常已足夠。需要更多使用者、SCIM、進階角色、flow logs 或 log streaming 時，才比較可能需要 Standard 或 Premium。
+
+## 在 Admin console 看方案與用量
+
+方案與用量不要靠 Tailscale client 的 `status` 猜，請看 Admin console：
+
+1. **看目前方案與 seats**：打開 [Billing](https://console.tailscale.com/admin/settings/billing) 頁面。這裡是方案與訂閱的來源；付費方案可看到目前購買的 seats，修改時會使用 **Edit amount** 與 **New total seats**。Personal 不能增加 seats，只能升級。
+2. **看使用者**：打開 [Users](https://console.tailscale.com/admin/users) 頁面，查看目前加入 tailnet 的使用者與角色。邀請或 SCIM 佈建使用者時不會立即佔用 seat；使用者第一次登入 Admin console 或第一次驗證裝置時，才會佔用一個可用的 seat。使用者離開 tailnet、帳號被刪除、停權或被 IdP 取消佈建時，會 vacate seat；只刪除自己所有裝置不會釋放 seat。詳見[定價頁的 seat-based pricing FAQ](https://tailscale.com/pricing#what-counts-as-an-occupied-seat-what-counts-as-a-vacant-seat)。
+3. **看裝置與 tagged resources**：打開 [Machines](https://console.tailscale.com/admin/machines) 頁面。User devices 可直接看裝置清單；用 **Filters → Managed by** 找 tag 管理的裝置，用 **Filters → Property → Ephemeral node** 找 ephemeral resources。裝置列下方的 **Ephemeral** badge 也能協助辨認短期資源。
+4. **看稽核記錄**：打開 [Logs](https://console.tailscale.com/admin/logs) 頁面。configuration audit logs 所有方案都有；Premium／Enterprise 才能使用 pricing page 列出的 network flow logs 與 log streaming。不要把 configuration audit logs 當成 network flow logs，兩者記錄的事情不同。
+
+修改方案需要 Owner、Admin 或 Billing admin 權限；如果 Billing 頁面沒有顯示方案控制項，先確認自己登入的是正確 tailnet 與具有相應角色的帳號。Legacy plan 的遷移則從 Billing 的 **Edit current plan → Select plan** 開始，而且官方提醒不是所有方案都對每個帳號開放。
+
+## 怎麼選
+
+- **個人、非商業、最多 6 位使用者**：先用 Personal。user devices 無限，本站的 Serve、Funnel、Subnet Router、Exit Node 與效能調校情境都能開始。
+- **小團隊或需要組織管理**：Standard 是 US$8／每位使用者／月，使用者數無上限，並加入 SCIM、advanced user roles 與 10 個 ACL groups。
+- **需要較多 ACL groups、較大的 ephemeral 分鐘池、network flow logs 或 log streaming**：Premium 是 US$18／每位使用者／月，ACL groups 為 300 個，ephemeral resources 為每月 10,000 分鐘。
+- **需要客製數量、合約、SLA 或企業導入服務**：Enterprise 需聯絡 Sales，價格與限制依合約確認。
+
+## 參考資料
+
+- [Tailscale Pricing（官方定價頁）](https://tailscale.com/pricing)
+- [Free pricing plans and discounts（Tailscale 官方文件）](https://tailscale.com/docs/account/manage-plans/free-plans-discounts)
+- [Downgrade your plan（Tailscale 官方文件）](https://tailscale.com/docs/account/manage-plans/downgrade-plan)
+- [Change your legacy plan（Tailscale 官方文件）](https://tailscale.com/docs/account/manage-plans/legacy-plans)
+- [Modify an existing plan（Tailscale 官方文件）](https://tailscale.com/docs/account/manage-plans/modify-existing-plan)
+- [Tailscale CLI（官方文件）](https://tailscale.com/kb/1080/cli/)
+- [Tailscale Serve（官方文件）](https://tailscale.com/kb/1312/serve)
+- [Tailscale Funnel（官方文件）](https://tailscale.com/kb/1223/funnel)
+- [Subnet routers（官方文件）](https://tailscale.com/kb/1019/subnets)
+- [Exit nodes（官方文件）](https://tailscale.com/kb/1103/exit-nodes)
+- [Group devices with tags（官方文件）](https://tailscale.com/docs/features/tags)
+- [Ephemeral nodes（官方文件）](https://tailscale.com/docs/features/ephemeral-nodes)
+- [Configuration audit logging（官方文件）](https://tailscale.com/docs/features/logging/audit-logging)
+- [ACLs（官方文件）](https://tailscale.com/kb/1018/acls)
