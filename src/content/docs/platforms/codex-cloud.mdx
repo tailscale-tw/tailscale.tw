@@ -61,7 +61,7 @@ reusable key 被偷走的話，任何人都能用它把裝置加進你的 tailne
 
 Codex Cloud 的 VM 不是一般的 Tailscale 裝置，限制不少：
 
-- **只能連 HTTP／HTTPS 服務**：OpenAI 文件把用途定位在內部 API、套件庫等 HTTP／HTTPS 服務。程式要透過環境設定的 HTTP／HTTPS proxy 連線，用 `curl` 測試時不要加 `--noproxy`。Tailscale 部落格另外提到，任意 TCP 連線可以透過 `proxy:8088` 的 HTTP CONNECT 建立。
+- **只能連 HTTP／HTTPS 服務**：OpenAI 文件把用途定位在內部 API、套件庫等 HTTP／HTTPS 服務。OpenAI 文件也提醒，程式要透過環境設定的 HTTP／HTTPS proxy 連線，用 `curl` 測試時不要加 `--noproxy`。Tailscale 部落格另外提到，任意 TCP 連線可以透過 `proxy:8088` 的 HTTP CONNECT 建立。
 - **只支援 IPv4**：可以連到私有 IPv4 的 subnet route（見 [Subnet Router](/features/subnet-router/)），主機名稱必須解析成 IPv4 位址。
 - **沒有 UDP、ICMP**：`ping` 不能用來測試連線，改用 `curl`。
 - **不能連進 VM**：Codex Cloud 節點明確不支援連入連線。
