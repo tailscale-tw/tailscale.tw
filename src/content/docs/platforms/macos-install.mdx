@@ -80,7 +80,7 @@ sudo tailscale up
 | 開放原始碼               | 否                  | 否               | 是                               |
 | MagicDNS                 | 支援                | 支援             | 支援                             |
 | Taildrop                 | 支援                | 支援             | 不完整                           |
-| Funnel                   | 不支援              | 不支援           | 支援                             |
+| Funnel                   | 僅連接埠            | 僅連接埠         | 支援                             |
 | Exit node                | 支援                | 支援             | 部分：可當 exit node，不能用別的 |
 | MDM 支援                 | 有                  | 有               | 沒有                             |
 | 當 Tailscale SSH server  | 不能                | 不能             | 能                               |
@@ -92,8 +92,8 @@ sudo tailscale up
 
 幾個值得注意的地方：
 
-- 兩個 GUI 版**都不能跑 Funnel、不能當 Tailscale SSH server**——在 macOS 上這兩個功能只有開源版支援。想用 Funnel 的話見 [Tailscale Funnel：把服務公開到網際網路](/features/funnel/)。
-- Serve 在 GUI 版上受沙盒限制：只能分享連接埠，不能分享檔案或資料夾，詳見本站 [Tailscale Serve](/features/serve/) 一文。
+- 兩個 GUI 版**不能當 Tailscale SSH server**，這只有開源版支援。
+- Serve 與 Funnel 在 GUI 版上都受沙盒限制：只能分享連接埠，不能分享檔案或資料夾，詳見本站 [Tailscale Serve](/features/serve/) 與 [Tailscale Funnel](/features/funnel/)。官方的版本比較表把 Funnel 標成 GUI 版不支援，但 [`tailscale funnel` 指令參考](https://tailscale.com/kb/1311/funnel)與原始碼都只擋檔案與資料夾，本站以後者為準。
 - App Store 版的金鑰與狀態存在使用者 Keychain、跟著登入的使用者走，也因為沙盒的關係沒辦法在使用者登入前執行；開源版能辦到這點，斷電重開後不用登入就能連回這台機器（例如遠端 VNC）。
 
 ## 怎麼判斷自己裝的是哪一版
@@ -130,7 +130,7 @@ brew uninstall --formula tailscale
 ## 該怎麼選
 
 - **一般使用者**：選 Standalone 版。這是 Tailscale 官方的建議：更新更快、功能限制更少，更新也不用等 App Store 審核。App Store 版只有在沒辦法安裝 `.pkg`，或管理上必須仰賴 App Store（例如公司政策）的環境才考慮——它最省事，但要知道螢幕使用時間過濾器衝突這個坑。
-- **開發者**：選 Standalone 版。比起 App Store 版多了 `tailscale ssh` 指令、完整的支援用設定報告，也和螢幕使用時間相容。如果需要 Funnel 或把這台機器當 Tailscale SSH server，就改用開源版（代價是沒有 GUI）。
+- **開發者**：選 Standalone 版。比起 App Store 版多了 `tailscale ssh` 指令、完整的支援用設定報告，也和螢幕使用時間相容。如果需要用 Serve／Funnel 分享檔案或資料夾，或把這台機器當 Tailscale SSH server，就改用開源版（代價是沒有 GUI）。
 - **伺服器 / headless（例如 Mac mini 當 home server）**：選開源 tailscaled 版。它能在使用者登入前就執行、能當 SSH server，斷電重開後不用登入就能連回，是無人值守情境的正解。
 
 ## 常見問題

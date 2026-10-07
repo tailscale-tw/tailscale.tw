@@ -37,7 +37,7 @@ sidebar:
    想收緊的話，把 `target` 換成特定使用者、群組或 tag（例如 `["tag:public-web"]`），只讓指定的裝置能對外公開。
 
 4. Linux 上 `tailscaled` 預設只接受 root 管理：看到 `Access denied` 就用 `sudo`，或先跑一次 `sudo tailscale set --operator=$USER`。
-5. macOS 只有**開源 `tailscaled` 版**支援 Funnel，App Store 版與 Standalone 版都不行（見 [macOS 上安裝 Tailscale 的三種方法](/platforms/macos-install/#功能差異比較表)）。
+5. macOS 三個版本都能用 Funnel **分享連接埠**；要分享**檔案或資料夾**，跟 Serve 一樣只有開源 `tailscaled` 版可以（App Store 版與 Standalone 版受沙盒限制，見 [macOS 上安裝 Tailscale 的三種方法](/platforms/macos-install/#功能差異比較表)）。
 
 如果還沒啟用 HTTPS 或沒有 `funnel` 屬性，直接跑 `tailscale funnel` 時 CLI 會給一個網址，照著點開同意即可把缺少的設定補上；如果你的帳號沒有權限修改 policy，CLI 會回報 `"funnel" node attribute not set`，要請 tailnet 管理員加上。
 
@@ -82,7 +82,7 @@ Press Ctrl+C to exit.
 
 - **只能用三個連接埠**：`443`、`8443`、`10000`，例如 `tailscale funnel --bg --https=8443 3000`。Serve 沒有這個限制。
 - **只能用 tailnet 網域**：網址固定是 `<裝置名稱>.<tailnet 名稱>.ts.net`，不能換成自己的網域。想用自訂網域，得在前面另外架反向代理或用其他服務。
-- **只走 TLS**：對外一律是 HTTPS（或 `--tls-terminated-tcp` 的 TLS 包 TCP），不提供純 HTTP。
+- **沒有純 HTTP**：funnel 沒有 `--http` 旗標。對外可用的是 HTTPS、`--tcp`（raw TCP 轉發）與 `--tls-terminated-tcp`（由 Tailscale 終止 TLS 再轉 TCP），連接埠同樣限 `443`／`8443`／`10000`；SSH、RDP 這類非 HTTP 服務要加密，就用 `--tls-terminated-tcp`。
 - **頻寬有上限**：Funnel 流量受到無法調整的頻寬限制，官方沒有公布數字。適合 demo、webhook、小型個人服務，不適合拿來發大檔或架影音串流。
 - **同一連接埠不能同時是 Serve 又是 Funnel**：以最後下的指令為準。
 
@@ -91,7 +91,7 @@ Press Ctrl+C to exit.
 Funnel 等於把服務**直接放上網際網路**，任何知道網址的人都連得到——而 `*.ts.net` 的網域會出現在公開的憑證透明度（Certificate Transparency）紀錄裡，網址實際上不是祕密，掃描器很快就會找上門。
 
 - **驗證要自己做**：Funnel 不幫你擋人。後台、管理介面、沒有登入機制的開發伺服器都不要直接公開。
-- **沒有身份標頭**：Serve 會帶 `Tailscale-User-Login` 等標頭告訴後端是誰連進來，Funnel 的請求**不帶**這些標頭（公開流量本來就沒有 Tailscale 身份），改帶 `Tailscale-Funnel-Request: ?1`。後端可以用它分辨請求是從網際網路來的，例如對 Funnel 流量要求登入、對 tailnet 流量放行。Tailscale 轉發前會先清掉請求裡偽造的同名標頭。
+- **沒有身份標頭**：Serve 會帶 `Tailscale-User-Login` 等標頭告訴後端是誰連進來，Funnel 的請求**不帶**這些標頭（公開流量本來就沒有 Tailscale 身份），改帶 `Tailscale-Funnel-Request: ?1`。後端可以用它識別請求是從網際網路來的，例如對 Funnel 流量要求登入、對 tailnet 流量放行。Tailscale 轉發前會先清掉請求裡偽造的同名標頭。
 - **用完就關**：臨時 demo 用前景執行，結束時 `Ctrl+C`；用 `--bg` 開的記得用 `tailscale funnel status` 檢查還有哪些公開中。
 - **用 policy 管住誰能開**：`funnel` 屬性只給需要的裝置或 tag，不要整個 `autogroup:member` 都開。
 
@@ -123,7 +123,7 @@ Funnel 和 Serve 的指令、目標寫法幾乎相同，主要差在誰看得到
 - **出現 `HTTPS must be enabled`？** 到 Admin console → DNS 啟用 HTTPS 憑證，或照 CLI 給的網址點開同意。
 - **剛開好，外部連不到？** 公開 DNS 記錄最多要 10 分鐘生效，先等一下；之後用 `tailscale funnel status` 確認有標示 `Funnel on`、連接埠是 `443`／`8443`／`10000` 之一。
 - **tailnet 內連得到，外部連不到？** 多半是那個連接埠其實是 Serve，不是 Funnel。用 `status` 看是否標示 `Funnel on`，沒有的話重下一次 `tailscale funnel`。
-- **Mac 上找不到 Funnel？** App Store 版與 Standalone 版不支援，要改裝開源 `tailscaled` 版。
+- **Mac 上用 Funnel 分享資料夾出現 `Path serving is not supported on macOS`？** App Store 版與 Standalone 版受沙盒限制只能分享連接埠，要分享檔案或資料夾就改裝開源 `tailscaled` 版。
 
 ## 參考資料
 
