@@ -1,0 +1,132 @@
+---
+title: Codex Cloud 連上 tailnet：讓雲端 AI 代理存取內部服務
+description: 在 OpenAI Codex Cloud 的環境設定中加入 Tailscale，讓雲端任務存取 tailnet 內的 API 與測試服務，並用 tag、grants 與 auth key 設定限制它能碰到的範圍
+sidebar:
+  order: 2
+  label: Codex Cloud
+---
+
+OpenAI 的 [Codex Cloud](https://learn.chatgpt.com/docs/cloud) 會在雲端 VM 裡執行 Codex 任務，不綁定你的電腦，電腦睡著了任務也能繼續跑。它的環境設定內建 VPN 功能，而 Tailscale 是目前唯一支援的 VPN 供應商。設定好之後，雲端任務就能連到 tailnet 內的內部 API、測試用服務或私有套件庫。
+
+這項整合不是雙方合作的成果。根據 [Tailscale 官方部落格](https://tailscale.com/blog/codex-cloud-tailscale)，Tailscale 在 Codex Cloud 發表後才發現這件事；OpenAI 用的是每個人都能用的 auth key 與 ephemeral 節點機制。
+
+> 本文依 2026 年 10 月的 OpenAI Codex Cloud 文件與 Tailscale 官方部落格整理，未在 Codex Cloud 上實際驗證。Codex Cloud 正逐步開放給 ChatGPT 付費帳號（Plus 以上），功能與限制仍可能變動，請以兩邊的官方文件為準。
+
+## 運作方式
+
+每個 Codex Cloud 任務都在一台新的 VM 上執行。你在環境設定裡填入 Tailscale 的 auth key，每台任務 VM 啟動時就會用這把 key 加入你的 tailnet，任務結束、VM 離線後再由 Tailscale 自動移除。
+
+所以這把 auth key 有三個設定很重要：
+
+| 設定                         | 為什麼需要                                                                                                       |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| **Reusable**                 | 每個任務都是新的 VM，一把 key 要能讓很多台 VM 加入。OpenAI 文件要求開啟。                                        |
+| **Ephemeral**                | VM 離線後 Tailscale 會自動移除它，Machines 頁面才不會堆滿用過即丟的裝置。OpenAI 文件要求開啟。                   |
+| **Tags**（例如 `tag:codex`） | VM 以 tag 的身分加入，套用你為這個 tag 寫的規則，而不是繼承產生 key 那個人的存取權限。Tailscale 部落格建議開啟。 |
+
+Tags 這一項特別重要：沒有加 tag 的 auth key，加入的裝置會以產生 key 的使用者身分出現，等於 Codex 拿到和你一樣的存取範圍。
+
+## 設定步驟
+
+### 1. 定義 tag 的擁有者
+
+在 Admin console 的 [Access controls](https://console.tailscale.com/admin/acls) 頁面，先在 policy 的 `tagOwners` 定義 `tag:codex`，否則產生 auth key 時選不到這個 tag：
+
+```json
+"tagOwners": {
+  "tag:codex": ["autogroup:admin"],
+},
+```
+
+### 2. 產生 auth key
+
+到 Admin console 的 [Keys](https://console.tailscale.com/admin/settings/keys) 頁面，選 **Generate auth key**：
+
+1. 開啟 **Reusable**。
+2. 開啟 **Ephemeral**。
+3. 開啟 **Tags**，選 `tag:codex`。
+4. **Expiration** 設定天數。auth key 的效期是 1 到 90 天，沒有指定就是 90 天，到期後要產生新的 key 再填回 Codex Cloud。
+5. 如果 tailnet 有啟用 [device approval](https://tailscale.com/docs/features/access-control/device-management/device-approval)，要一併開啟 **Pre-approved**，否則每台任務 VM 加入時都要等管理員手動核准。
+
+reusable key 被偷走的話，任何人都能用它把裝置加進你的 tailnet。官方建議存放在專門的密鑰管理工具裡，不要貼進聊天訊息或 repository。
+
+### 3. 在 Codex Cloud 填入 auth key
+
+1. 在網頁版或 ChatGPT 桌面 App 開新任務，選 **Work in** → **Cloud**，選好要 checkout 的 GitHub repository，建立 cloud environment。
+2. 打開環境設定的 **Advanced** → **VPN**，選 **Add**，供應商選 Tailscale，貼上剛才的 auth key。
+3. 在環境的 **Internet access** 設定允許要連的目的地。VPN 只負責把 VM 接上 tailnet，目的地還是要同時被環境的網路設定和 Tailscale 的存取規則允許才連得到。
+4. 儲存後 **Publish**（已發布過的環境則是 **Republish**），開一個新任務測試連線。
+
+## 能做與不能做的事
+
+Codex Cloud 的 VM 不是一般的 Tailscale 裝置，限制不少：
+
+- **只能連 HTTP／HTTPS 服務**：OpenAI 文件把用途定位在內部 API、套件庫等 HTTP／HTTPS 服務。程式要透過環境設定的 HTTP／HTTPS proxy 連線，用 `curl` 測試時不要加 `--noproxy`。Tailscale 部落格另外提到，任意 TCP 連線可以透過 `proxy:8088` 的 HTTP CONNECT 建立。
+- **只支援 IPv4**：可以連到私有 IPv4 的 subnet route（見 [Subnet Router](/features/subnet-router/)），主機名稱必須解析成 IPv4 位址。
+- **沒有 UDP、ICMP**：`ping` 不能用來測試連線，改用 `curl`。
+- **不能連進 VM**：Codex Cloud 節點明確不支援連入連線。
+- **不能用 SSH**：一般 SSH 與 [Tailscale SSH](https://tailscale.com/docs/features/tailscale-ssh) 都不行。
+
+### MagicDNS 與 split DNS：兩份文件說法不同
+
+這一點兩邊的說法互相矛盾：
+
+- **Tailscale 部落格**（2026 年 10 月 6 日）寫的是 MagicDNS 與 split DNS **都不能用**。
+- **OpenAI 的 Codex Cloud 文件**則寫任務**可以**用 MagicDNS 與 split DNS 以主機名稱連到私有服務；公司內部網域要在 Admin console 設定 split DNS，指向內部 DNS 伺服器，並使用完整網域名稱（例如 `api.corp.example.com`）。
+
+功能可能在部落格發布後有更新，以 OpenAI 文件為準比較合理。保險的做法是先用 IP 位址確認連得通，再換成主機名稱；IP 通、主機名稱不通，就是 DNS 的問題。
+
+## 限制 Codex 能碰到的範圍
+
+如果你的 policy 還是預設的「所有裝置都能互連」，Codex 的 VM 加入後就能連到 tailnet 內幾乎所有東西。這未必是你想要的，對 AI 代理更要小心。
+
+### 用 grants 只開放需要的服務
+
+替要讓 Codex 存取的服務也加上 tag（例如 `tag:internal-api`），再用 [grants](https://tailscale.com/docs/features/access-control/grants) 只開放需要的連接埠：
+
+```json
+"tagOwners": {
+  "tag:codex": ["autogroup:admin"],
+  "tag:internal-api": ["autogroup:admin"],
+},
+"grants": [
+  {
+    // Codex 只能連內部 API 的 HTTPS
+    "src": ["tag:codex"],
+    "dst": ["tag:internal-api"],
+    "ip": ["tcp:443"],
+  },
+  {
+    // 透過 Subnet Router 連區網內的特定主機
+    "src": ["tag:codex"],
+    "dst": ["192.168.1.20/32"],
+    "ip": ["tcp:443"],
+  },
+],
+```
+
+要注意：policy 裡如果還留著預設的全開規則（`"src": ["*"]`、`"dst": ["*"]`），上面的限制等於沒有作用，因為 Tailscale 的規則只會放行、不會阻擋。要先把全開規則換成針對人或群組的規則，`tag:codex` 才會只剩 grants 給它的權限。
+
+### 其他建議
+
+Tailscale 部落格建議的做法：
+
+- **AI 代理和它要連的資源都加上 tag**，規則才寫得精準。
+- **保留 auth key 的效期**，不要為了方便設成最長再忘記，到期就換新的。
+- **開啟 [network flow logs](https://tailscale.com/docs/features/logging/network-flow-logs)**，查看代理實際連到了哪些地方。這項功能只有 Premium 與 Enterprise 方案有（見 [方案與限制比較](/getting-started/plans/)）。
+- **開啟 device approval**，新裝置要經過管理員核准才能加入 tailnet。Codex 用的 auth key 開了 Pre-approved 就不受影響，其他人或其他工具加入的裝置則仍要核准。
+
+## 疑難排解
+
+- **VPN 有連上，但服務連不到？** 照 OpenAI 文件的建議逐項檢查：程式有沒有走環境設定的 HTTP／HTTPS proxy；目的地有沒有同時被環境的 Internet access 設定和 Tailscale 的存取規則允許；用 IP 連得到、用主機名稱連不到的話，檢查 split DNS 設定與主機名稱是否解析成 IPv4。
+- **Machines 頁面出現一堆 Codex 裝置？** auth key 沒開 Ephemeral。ephemeral 裝置離線後才會被自動移除，產生新的 key 時記得開啟。
+- **任務 VM 加入後卡在等待核准？** tailnet 開了 device approval，但 auth key 沒開 Pre-approved。
+
+## 參考資料
+
+- [Codex Cloud shipped with Tailscale support. Nobody told us.（Tailscale 官方部落格）](https://tailscale.com/blog/codex-cloud-tailscale)
+- [Codex Cloud environments：Private networking (VPN)（OpenAI）](https://learn.chatgpt.com/docs/environments/cloud-environments#private-networking-vpn)
+- [Auth keys（官方）](https://tailscale.com/docs/features/access-control/auth-keys)
+- [Grants（官方）](https://tailscale.com/docs/features/access-control/grants)
+- [Device approval（官方）](https://tailscale.com/docs/features/access-control/device-management/device-approval)
+- [Tags（官方）](https://tailscale.com/docs/features/tags)
