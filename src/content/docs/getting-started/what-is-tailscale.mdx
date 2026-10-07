@@ -1,0 +1,129 @@
+---
+title: Tailscale 是什麼：tailnet、WireGuard 與控制平面的基本觀念
+description: 從 tailnet、節點、MagicDNS、WireGuard、控制平面與 DERP 認識 Tailscale 如何連接裝置
+sidebar:
+  order: 1
+  label: Tailscale 是什麼
+---
+
+Tailscale 是建立在 WireGuard 之上的加密連線平台：在每台裝置安裝 Tailscale 用戶端並登入後，這些裝置就能加入同一個 tailnet，透過穩定的 Tailscale IP 或 MagicDNS 名稱彼此連線。它通常不需要你自己架設 VPN 伺服器、在路由器設定 port forwarding，或把服務直接暴露到網際網路。
+
+> 本文以 Tailscale v1.102（2026 年 10 月）為準，並依官方文件與公開原始碼的目前實作整理。
+
+## Tailscale 先解決什麼問題
+
+傳統的遠端連線常見做法，是在家裡或雲端架一台 VPN gateway，讓外部裝置先連到這個固定入口，再由 gateway 把流量轉送到內部服務。這種 hub-and-spoke（中心與分支）架構可以運作，但通常需要處理公共 IP、port forwarding、防火牆規則、憑證與 VPN 伺服器維護；所有流量也可能繞過同一個 gateway，增加延遲或形成瓶頸。
+
+Tailscale 把「每台裝置怎麼找到其他裝置、怎麼穿過 NAT」和「實際封包怎麼傳送」拆開處理：
+
+- 你只要在端點裝置上執行 Tailscale 並登入，不必先準備一台自己維護的 VPN gateway。
+- Tailscale 會嘗試讓兩台裝置直接建立加密連線，即使兩邊位於不同網路、路由器後面或沒有可直接連入的公共 IP。
+- 如果網路條件不允許直連，仍可退回加密的中繼連線；這時不代表流量變成未加密，也不代表所有流量平常都會經過 Tailscale 的伺服器。
+
+這種設計的重點不是「完全沒有伺服器」，而是把伺服器的角色分清楚：控制平面負責協調與分發設定，資料平面才負責傳送應用程式封包。
+
+## 先記住四個基本名詞
+
+### tailnet
+
+**tailnet** 是一個 Tailscale network：由使用者、裝置與資源組成的邏輯網路，也是 Tailscale 的私有空間。第一次在裝置上登入 Tailscale 時，就會建立或加入一個 tailnet；之後每台通過驗證的裝置都會成為其中的節點。
+
+tailnet 橫跨現實中的家用網路、公司網路、雲端 VPC 與行動網路，但它不是某一個實體 LAN。裝置是否能互相連線，還要看 tailnet 的存取控制政策；加入同一個 tailnet 不等於每台裝置可以任意存取其他裝置的所有服務。
+
+### 節點（node）
+
+**節點（node）** 是執行 Tailscale 用戶端的裝置或執行個體，例如筆電、伺服器、VM、容器或手機。一個使用者可以有很多個節點；節點也可以用 tag 代表服務或無人值守的裝置，而不一定綁定某位使用者。
+
+每個節點會在本機產生自己的公開／私密金鑰組。私密金鑰不會離開節點，公開金鑰則交給控制平面，用來讓其他獲准的節點建立 WireGuard 連線。這也是為什麼控制平面可以協助節點找到彼此，卻不需要拿到能解密資料的私密金鑰。
+
+### Tailscale IP
+
+每個節點都會取得一個 Tailscale IP，最常見的 IPv4 格式是 `100.x.y.z`；Tailscale 的 IPv6 位址則從 `fd7a:115c:a1e0::/48` 配發。這些 IPv4 位址來自 RFC 6598 定義的 Carrier-Grade NAT（CGNAT）範圍 `100.64.0.0/10`，不是直接暴露在公共網際網路上的 IP。
+
+Tailscale IP 的用途是提供一個和實體位置無關的節點位址：筆電從家裡 Wi-Fi 換到咖啡廳或行動網路時，只要節點仍在 tailnet 中，通常仍可用同一個 Tailscale IP 連線。它不是家裡路由器拿到的公共 IP，也不需要拿來做 port forwarding。
+
+### MagicDNS
+
+[MagicDNS](https://tailscale.com/kb/1081/magicdns) 會替 tailnet 中的節點自動建立 DNS 名稱。假設節點的 machine name 是 `nas`，完整名稱可能是 `nas.example.ts.net`；啟用 MagicDNS 後，具備適當 DNS 設定的裝置通常直接使用 `nas` 就能連線，不必記住 `100.x.y.z` 位址。
+
+因此，Tailscale IP 適合給工具、腳本或設定檔使用，MagicDNS 名稱則比較適合人閱讀。兩者最後都指向同一個 tailnet 節點，差別只是尋找節點的方式。
+
+## 控制平面與資料平面
+
+可以把 Tailscale 想成兩層互相配合的系統：
+
+| 平面                          | 主要工作                                                                                     | 是否傳送應用程式資料                   |
+| ----------------------------- | -------------------------------------------------------------------------------------------- | -------------------------------------- |
+| **控制平面（control plane）** | 管理身份、節點公開金鑰、端點資訊、DNS／路由設定、存取控制政策與 DERP map，並協調節點尋找彼此 | 否；不負責轉送一般應用程式封包         |
+| **資料平面（data plane）**    | 在節點上建立 WireGuard 通道、加密／解密封包、套用路由與封包過濾規則                          | 是；實際資料在節點之間或經加密中繼傳送 |
+
+### 控制平面：協調，不是 VPN gateway
+
+Tailscale 的 coordination server（協調伺服器）是控制平面的核心。節點會向它註冊自己的公開金鑰與目前的端點資訊，取得 tailnet 中自己獲准使用的節點資料、網路設定與政策。協調伺服器也會提供 DERP map，讓節點知道有哪些中繼伺服器可以協助建立連線。
+
+控制平面可以是集中的，資料平面則不必集中。換句話說，Tailscale 可以集中管理「誰是誰、誰可以連誰、要怎麼找到對方」，但不需要把所有使用者資料先送進同一台 VPN gateway。控制平面交換的是金鑰與設定，不是一般服務的明文內容。
+
+### 資料平面：WireGuard 負責加密傳輸
+
+[WireGuard](https://www.wireguard.com/) 是 Tailscale 資料平面的加密隧道協定。Tailscale 在 WireGuard 之上補上身份驗證、金鑰與設定分發、NAT 穿透、DNS、存取控制，以及直連失敗時的中繼等機制；這和手動替每台機器撰寫 WireGuard peer 設定不同。
+
+實際傳送資料時，來源節點用自己的私密金鑰與對方的公開金鑰建立加密通道，目的節點在本機解密。無論封包走直連或中繼，其他中間服務都不持有這兩個節點的私密金鑰，不能把 WireGuard 封包還原成應用程式的明文。
+
+## 連線是怎麼建立的
+
+兩台節點建立連線時，大致會經過以下流程：
+
+1. 兩台節點分別向控制平面註冊，交換在政策允許範圍內的公開金鑰與端點資訊。
+2. 發起連線的節點先透過協調伺服器取得對方的連線資訊；DERP 可能會先協助傳遞探索與協調封包。
+3. 兩台節點執行 NAT traversal，嘗試在兩邊的網路之間建立直接的 UDP 通道。
+4. NAT 穿透成功時，後續的 WireGuard 加密資料直接在兩台節點之間傳送。這通常是延遲最低、吞吐量最高的路徑。
+5. 如果無法直連，Tailscale 會先嘗試已設定且雙方都能使用的 [Peer Relay](https://tailscale.com/docs/features/peer-relay)。Peer Relay 是 tailnet 中預先設定、替其他節點轉送流量的裝置；沒有可用的 Peer Relay 時，才以 DERP 作為加密中繼。
+
+所以「控制平面是中心的」和「資料平面是點對點的」並不矛盾：前者負責把連線需要的資訊送到節點，後者決定封包實際要走哪一條路。網路條件改變時，Tailscale 也會重新檢查是否能從中繼升級成直連，或在直連失效時退回中繼。
+
+### NAT 穿透直連
+
+NAT 讓內部裝置可以主動連出網際網路，卻通常不接受外部未經請求的連入。Tailscale 會利用節點已建立的連線與 NAT traversal 機制交換端點資訊，嘗試讓兩端的路由器接受彼此的 UDP 封包，因此一般使用情境不需要手動做 port forwarding。
+
+這不是保證所有網路都能直連：嚴格的 hard NAT、封鎖 UDP 的防火牆，或其他網路限制，都可能讓直連失敗。遇到這種情況，使用者通常仍可透過 DERP 保持連線，只是效能與延遲可能不如直連。
+
+### DERP：直連失敗時的加密中繼
+
+**DERP** 是 **Designated Encrypted Relay for Packets** 的縮寫。DERP server 有兩個相關角色：協助節點探索與協調連線，以及在無法建立直連、也沒有可用 Peer Relay 時中繼封包。
+
+DERP 中繼的是已經由 WireGuard 加密的封包，不是應用程式的明文。DERP server 看得到自己正在轉送資料，但沒有節點私密金鑰，不能解密資料內容；它比較像一個只負責轉發密文的網路中繼。代價是多了一個網路 hop，所以通常會比直連有更高延遲、較低吞吐量。
+
+所有連線一開始可能先經過 DERP 進行協調，之後再切換到直連。用 `tailscale ping` 判斷單次探測的路徑時，可能看到 `via DERP(...)`，直連時則會顯示 `via <ip>:<port>`；`tailscale status` 是另一種摘要格式，會在 peer 的狀態欄顯示 `direct`、`relay "<region>"` 或 `peer-relay`。兩個指令的輸出格式不同，判讀方式也不同。
+
+## 和傳統 hub-and-spoke VPN 的差異
+
+| 比較項目 | 傳統 hub-and-spoke VPN                                | Tailscale 的 mesh 方式                                        |
+| -------- | ----------------------------------------------------- | ------------------------------------------------------------- |
+| 資料路徑 | 用戶端先到中央 VPN gateway，再由 gateway 轉送         | 節點優先嘗試彼此直連；必要時才經 Peer Relay 或 DERP           |
+| 中央角色 | gateway 同時負責控制與大量資料轉送                    | 控制平面集中管理；資料平面分散在各節點                        |
+| 網路設定 | 常要準備公共入口、port forwarding、防火牆與 peer 設定 | 用戶端登入後由控制平面分發設定，通常不需手動開入站連接埠      |
+| 效能特性 | 所有流量都受 gateway 的位置、頻寬與負載影響           | 直連通常有較低延遲與較高吞吐量；中繼則是連通性優先的 fallback |
+
+這不表示 Tailscale 永遠不會使用自己的伺服器：控制平面一定會參與協調，DERP 也可能在直連失敗時承載**已加密**的 WireGuard 封包。真正要避免的誤解是把「控制平面」和「承載所有資料的中央 VPN gateway」當成同一件事。
+
+## 接下來讀什麼
+
+知道 tailnet 和連線架構後，可以依使用情境繼續閱讀：
+
+- **核心功能**：[Tailscale Serve：在 tailnet 內分享本機服務](/features/serve/) 只讓 tailnet 內的裝置存取；[Tailscale Funnel：把服務公開到網際網路](/features/funnel/) 則把服務提供給 tailnet 外的使用者。
+- **網路路由**：[Subnet Router：存取整個區網內沒裝 Tailscale 的設備](/features/subnet-router/) 讓不能安裝 Tailscale 的設備透過閘道加入可存取範圍；[Exit Node：讓所有流量經由指定裝置出去](/features/exit-node/) 則把上網流量導向指定節點。
+- **效能調校**：[效能調校](/performance/) 整理 Subnet Router 與 Exit Node 的轉送效能，以及 UDP GRO forwarding、BBR 的適用範圍。
+- **各平台**：[macOS 上安裝 Tailscale 的三種方法](/platforms/macos-install/) 比較 Mac App Store、Standalone 與開源 `tailscaled` 版本。
+- **存取控制**：本站尚未整理專文；之後會再說明如何用 tailnet policy 決定使用者與節點可以連到哪些服務。
+
+## 參考資料
+
+- [What is Tailscale?（Tailscale 官方文件）](https://tailscale.com/kb/1151/what-is-tailscale)
+- [How Tailscale works（Tailscale 官方部落格）](https://tailscale.com/blog/how-tailscale-works)
+- [Control and data planes（Tailscale 官方文件）](https://tailscale.com/docs/concepts/control-data-planes)
+- [Connection types（Tailscale 官方文件）](https://tailscale.com/kb/1257/connection-types)
+- [DERP servers（Tailscale 官方文件）](https://tailscale.com/kb/1232/derp-servers)
+- [Tailscale Peer Relays（Tailscale 官方文件）](https://tailscale.com/docs/features/peer-relay)
+- [What are these 100.x.y.z addresses?（Tailscale 官方文件）](https://tailscale.com/kb/1033/ip-and-dns-addresses)
+- [MagicDNS（Tailscale 官方文件）](https://tailscale.com/kb/1081/magicdns)
+- [About WireGuard（Tailscale 官方文件）](https://tailscale.com/docs/concepts/wireguard)
