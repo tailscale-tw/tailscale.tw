@@ -92,7 +92,7 @@ sudo tailscale up
 
 幾個值得注意的地方：
 
-- 兩個 GUI 版**都不能跑 Funnel、不能當 Tailscale SSH server**——在 macOS 上這兩個功能只有開源版支援。想試 Funnel 的話可先看 [Tailscale Funnel 官方文件](https://tailscale.com/kb/1311/funnel)。
+- 兩個 GUI 版**都不能跑 Funnel、不能當 Tailscale SSH server**——在 macOS 上這兩個功能只有開源版支援。想用 Funnel 的話見 [Tailscale Funnel：把服務公開到網際網路](/features/funnel/)。
 - Serve 在 GUI 版上受沙盒限制：只能分享連接埠，不能分享檔案或資料夾，詳見本站 [Tailscale Serve](/features/serve/) 一文。
 - App Store 版的金鑰與狀態存在使用者 Keychain、跟著登入的使用者走，也因為沙盒的關係沒辦法在使用者登入前執行；開源版能辦到這點，斷電重開後不用登入就能連回這台機器（例如遠端 VNC）。
 

@@ -159,7 +159,7 @@ tailscale serve --bg text:"網站維護中，09:00 UTC 回來"
 | 連接埠限制 | 任意連接埠皆可              | 只能用 `443`、`8443`、`10000`     |
 | 身份標頭   | 有（tagged 裝置的請求不帶） | 沒有（公開流量不帶身份）          |
 
-同一個連接埠不能同時是 Serve 又是 Funnel，以最後下的那道指令為準。如果你下了 Funnel 指令，該連接埠就變成公開的；要收回來就重下一次 `serve`。本站後續會有 Funnel 專文，介紹如何把服務公開到網際網路；等不及的話可先看 [Tailscale Funnel 官方文件](https://tailscale.com/kb/1311/funnel)。
+同一個連接埠不能同時是 Serve 又是 Funnel，以最後下的那道指令為準。如果你下了 Funnel 指令，該連接埠就變成公開的；要收回來就重下一次 `serve`。怎麼把服務公開到網際網路、要注意哪些限制與安全問題，見 [Tailscale Funnel：把服務公開到網際網路](/features/funnel/)。
 
 ## 常見問題
 
@@ -173,5 +173,5 @@ tailscale serve --bg text:"網站維護中，09:00 UTC 回來"
 
 - [Tailscale Serve 官方文件](https://tailscale.com/kb/1312/serve)
 - [`tailscale serve` 指令參考](https://tailscale.com/kb/1242/tailscale-serve)
-- [Tailscale Funnel 官方文件](https://tailscale.com/kb/1311/funnel)
+- [Tailscale Funnel 官方文件](https://tailscale.com/kb/1223/funnel)
 - [Vite Server Options（`server.host`、`server.allowedHosts`）](https://vite.dev/config/server-options.html)
