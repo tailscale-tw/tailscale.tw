@@ -73,7 +73,7 @@ all non-default settings:
 - **`up --reset`** 會把沒寫到的設定**全部改回預設值**，要確定這是你要的才用，不要拿它來繞過錯誤訊息。
 - **第一次登入前**沒有既有設定可比較，`up` 不做這項檢查，帶任何旗標都可以。
 - `--auth-key`、`--force-reauth`、`--qr` 不算設定，改設定時不用重複寫。
-- **`set` 沒有的旗標**：`--advertise-tags`、`--login-server`、`--auth-key`、`--reset` 只有 `up`（或 `login`）有。要改 tag 就得用 `up`，並把其他設定寫齊。
+- **`set` 沒有的旗標**：`--advertise-tags`、`--login-server`、`--auth-key` 只有 `up` 與 `login` 有，`--reset` 則只有 `up` 有。要改 tag 就得用 `up`，並把其他設定寫齊。
 - **查目前的設定**：`tailscale get` 列出所有設定值；`tailscale get --set-flags` 直接印成 `tailscale set` 的旗標格式，方便記錄或搬到另一台機器。
 
 `set` 常用的旗標：
