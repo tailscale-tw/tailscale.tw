@@ -53,9 +53,9 @@ The home page is `src/content/docs/index.mdx` (no `src/pages/index.astro`).
 
 - The file path is the URL: `pve/tailscale-on-lxc.mdx` → `/pve/tailscale-on-lxc/`. These URLs match the old MkDocs site — don't rename or move files without adding redirects.
 - Frontmatter: `title` (required; it renders as the H1, so don't repeat it in the body), `description`, `sidebar.order`, `sidebar.label` (shorter sidebar text). There is no central nav file.
-- A section is a directory with an `index.mdx` that sets `sidebar.order: 0` and `sidebar.group.label`, and links its child pages manually. When adding a page, add it to that list too.
+- A section is a directory with an `index.mdx` that sets `sidebar.group.label` and a `sidebar.order` that positions the section among the others (currently features `0`, performance `0.5`, pve `1`, synology `4`, platforms `5`; pick an unused value for a new section). The section `index.mdx` links its child pages manually; when adding a page, add it to that list too.
 - Write in 台灣正體中文 with Taiwan terminology. Put a space between CJK and Latin/digits (`bun run fix:text` applies it).
-- Articles start with a version note blockquote, e.g. `> 本文以 Tailscale v1.102（2026 年 10 月）為準…`, stating the Tailscale version and date the content was verified against.
+- New articles start with a version note blockquote, e.g. `> 本文以 Tailscale v1.102（2026 年 10 月）為準…`, stating the Tailscale version and date the content was verified against. Older articles under `pve/` and `synology/` don't have one; don't add it when editing them unless the content is re-verified.
 - Internal links are root-relative with a trailing slash: `[Tailscale Serve](/features/serve/)`. `lint:docs` fails on broken ones.
 - MDX components are PascalCase. Register a component in `src/components.ts` to use it without an import. Partials go through `<Render file="<slug>" />`; never import `.mdx` directly.
 - Icons: `<Icon name="ph:<glyph>" class="w-4 h-4" />` from `@cloudflare/nimbus-docs/components/Icon.astro` (Phosphor glyphs).
@@ -76,10 +76,13 @@ The home page is `src/content/docs/index.mdx` (no `src/pages/index.astro`).
 - **Keep `<AgentDirective />`** in `BaseLayout.astro`; it points agents at `/llms.txt` and the page's Markdown version.
 - **Upgrading `@cloudflare/nimbus-docs`**:
   1. `bun update @cloudflare/nimbus-docs`.
-  2. `bunx @cloudflare/nimbus-docs migrate --dry-run --diff`; review every entry and resolve manual items.
-  3. Apply with `migrate --yes` only with the user's consent, review the diff, and rerun until nothing remains (the final run records the review in `nimbus.json`; never edit it by hand or skip versions).
-  4. `bunx @cloudflare/nimbus-docs outdated`, then `diff <file>` for each starter file that changed upstream. Most of `src/` has been restyled, so merge by hand instead of `diff --apply`.
-  5. Run `typecheck`, `build`, and `check`.
+  2. Preview: `bunx @cloudflare/nimbus-docs migrate --dry-run --diff`; review every entry and resolve manual items. The preview never writes anything, even when no migration remains.
+  3. Apply: only with the user's consent, run `migrate --yes` (it can't be combined with `--dry-run`/`--diff`), review the resulting diff, and preview again.
+  4. Record: once no plan remains, run `migrate --yes` once more. Only this run writes `lastReviewedNimbusVersion` to `nimbus.json`; stopping at a clean preview leaves the old baseline and replays the same reviews next upgrade. Never edit `nimbus.json` by hand or skip versions.
+  5. `bunx @cloudflare/nimbus-docs outdated`, then `diff <file>` for each starter file that changed upstream. Most of `src/` has been restyled, so merge by hand instead of `diff --apply`.
+  6. Run `typecheck`, `build`, and `check`.
+
+  `migrate` (except `--print`) exits 1 while review work or the baseline record is pending; that signals an unfinished upgrade, not a command failure.
 - Upstream starter root files `AGENT.md` and `CLAUDE.md` were replaced by this `AGENTS.md` (with `CLAUDE.md` importing it). `outdated`/`diff` will report them as changed; don't restore the upstream versions.
 
 ## Deployment
