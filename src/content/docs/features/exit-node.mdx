@@ -148,11 +148,11 @@ sudo tailscale set --exit-node=100.x.y.z --exit-node-allow-lan-access=true
 
 - **Mullvad Exit Node**：加購 Mullvad VPN 後可以直接把 Mullvad 的伺服器當 Exit Node 用（換國家 IP、公共 IP 隱藏），見[官方文件](https://tailscale.com/docs/features/exit-nodes/mullvad-exit-nodes)。本站之後也會有專文。
 - **Apple TV 當 Exit Node**：接電源、掛在電視旁的 Apple TV 是現成的家庭出口，見[官方文件](https://tailscale.com/docs/install/appletv)。
-- **效能調校**：Linux 上的 Exit Node 可以用 UDP GRO forwarding、BBR 等手法大幅提升轉發效能，本站之後會有專文（尚未上線），等不及可先看[官方效能調校文件](https://tailscale.com/kb/1320/performance-tuning)。
+- **效能調校**：轉送 UDP 的效能（QUIC、視訊通話這類大宗流量）可以用 [UDP GRO forwarding](/performance/udp-gro-forwarding/) 提升；[BBR](/performance/bbr/) 則要注意——它只影響節點自己發起或終止的 TCP 連線，不會讓**經過** Exit Node 的流量變快。
 
 ## 參考資料
 
 - [Exit nodes（官方文件）](https://tailscale.com/kb/1103/exit-nodes)
 - [`autoApprovers` 語法參考](https://tailscale.com/docs/reference/syntax/policy-file#autoapprovers)
 - [Mullvad exit nodes（官方文件）](https://tailscale.com/docs/features/exit-nodes/mullvad-exit-nodes)
-- [效能調校（官方文件）](https://tailscale.com/kb/1320/performance-tuning)
+- [效能調校（官方文件）](https://tailscale.com/kb/1320/performance-best-practices)
