@@ -94,7 +94,7 @@ Ephemeral resource 是短期存在的 tagged resource，例如短暫的 CI/CD ru
 方案與用量不要靠 Tailscale client 的 `status` 猜，請看 Admin console：
 
 1. **看目前方案與 seats**：打開 [Billing](https://console.tailscale.com/admin/settings/billing) 頁面。這裡是方案與訂閱的來源；付費方案可看到目前購買的 seats，修改時會使用 **Edit amount** 與 **New total seats**。Personal 不能增加 seats，只能升級。
-2. **看使用者**：打開 [Users](https://console.tailscale.com/admin/users) 頁面，查看目前加入 tailnet 的使用者與角色。邀請或 SCIM 佈建使用者時不會立即佔用 seat；使用者登入 tailnet 後才會佔用 seat。seat 釋放則依官方的「vacate that seat」定義，詳細計算方式見[定價頁的 seat-based pricing FAQ](https://tailscale.com/pricing#seat-based-pricing-devices-and-resources)。
+2. **看使用者**：打開 [Users](https://console.tailscale.com/admin/users) 頁面，查看目前加入 tailnet 的使用者與角色。邀請或 SCIM 佈建使用者時不會立即佔用 seat；使用者第一次登入 Admin console 或第一次驗證裝置時，才會佔用一個可用的 seat。使用者離開 tailnet、帳號被刪除、停權或被 IdP 取消佈建時，會 vacate seat；只刪除自己所有裝置不會釋放 seat。詳見[定價頁的 seat-based pricing FAQ](https://tailscale.com/pricing#what-counts-as-an-occupied-seat-what-counts-as-a-vacant-seat)。
 3. **看裝置與 tagged resources**：打開 [Machines](https://console.tailscale.com/admin/machines) 頁面。User devices 可直接看裝置清單；用 **Filters → Managed by** 找 tag 管理的裝置，用 **Filters → Property → Ephemeral node** 找 ephemeral resources。裝置列下方的 **Ephemeral** badge 也能協助辨認短期資源。
 4. **看稽核記錄**：打開 [Logs](https://console.tailscale.com/admin/logs) 頁面。configuration audit logs 所有方案都有；Premium／Enterprise 才能使用 pricing page 列出的 network flow logs 與 log streaming。不要把 configuration audit logs 當成 network flow logs，兩者記錄的事情不同。
 
