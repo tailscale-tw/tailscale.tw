@@ -1,0 +1,134 @@
+---
+title: Tailscale Funnel：把服務公開到網際網路
+description: 用 Tailscale Funnel 把本機服務公開到網際網路，不用開防火牆或設定 port forwarding，並說明前置條件、限制與安全注意事項
+sidebar:
+  order: 2
+  label: Tailscale Funnel
+---
+
+[Tailscale Funnel](https://tailscale.com/kb/1223/funnel) 讓**網際網路上的任何人**都能用一個 `*.ts.net` 的 HTTPS 網址連到你裝置上的服務，對方不需要安裝 Tailscale，你也不用開防火牆連接埠、設定路由器的 port forwarding 或申請網域與憑證。它和 [Tailscale Serve](/features/serve/) 用的是同一套機制，差別只在於 Serve 只給 tailnet 內的裝置看，Funnel 則是公開的。
+
+> 本文以 Tailscale v1.102（2026 年 10 月）為準，指令為 v1.52 改版後的新語法：旗標在前、目標在後（例如 `tailscale funnel --bg 3000`）。Funnel 目前仍是 beta 功能，所有方案都能使用。
+
+## Funnel 是怎麼運作的
+
+1. 你在裝置上執行 `tailscale funnel`，Tailscale 會替你的 tailnet 網域建立公開的 DNS 記錄。
+2. 外部使用者連 `https://my-server.tailxxxxx.ts.net` 時，DNS 回應的是 **Funnel 中繼伺服器**（Tailscale 營運）的 IP，不是你裝置的 IP，你的裝置位置不會曝光。
+3. 中繼伺服器透過 tailnet 用 TCP 代理把連線轉給你的裝置。**TLS 在你的裝置上終止**，中繼伺服器只看得到加密後的流量，解不開內容。
+4. 你的裝置解密後，把請求轉給本機服務，回應再沿原路加密送回去。
+
+所以 Funnel 能穿過 NAT、CGNAT 這類從外面打不進來的網路環境，前提只是你的裝置能連上 tailnet。
+
+## 前置條件
+
+1. Tailscale **v1.38.3 以上**，而且平台要能跑 Tailscale CLI。
+2. tailnet 已啟用 [MagicDNS](https://tailscale.com/kb/1081/magicdns) 與 HTTPS 憑證（Admin console → DNS → 啟用 HTTPS）。
+3. policy 的 `nodeAttrs` 給裝置 `funnel` 屬性。下面是官方範例，讓所有成員的裝置都能開 Funnel：
+
+   ```json
+   "nodeAttrs": [
+     {
+       "target": ["autogroup:member"],
+       "attr": ["funnel"],
+     },
+   ],
+   ```
+
+   想收緊的話，把 `target` 換成特定使用者、群組或 tag（例如 `["tag:public-web"]`），只讓指定的裝置能對外公開。
+
+4. Linux 上 `tailscaled` 預設只接受 root 管理：看到 `Access denied` 就用 `sudo`，或先跑一次 `sudo tailscale set --operator=$USER`。
+5. macOS 三個版本都能用 Funnel **分享連接埠**；要分享**檔案或資料夾**，跟 Serve 一樣只有開源 `tailscaled` 版可以（App Store 版與 Standalone 版受沙盒限制，見 [macOS 上安裝 Tailscale 的三種方法](/platforms/macos-install/#功能差異比較表)）。
+
+如果還沒啟用 HTTPS 或沒有 `funnel` 屬性，直接跑 `tailscale funnel` 時 CLI 會給一個網址，照著點開同意即可把缺少的設定補上；如果你的帳號沒有權限修改 policy，CLI 會回報 `"funnel" node attribute not set`，要請 tailnet 管理員加上。
+
+## 快速開始
+
+假設本機 `3000` 連接埠跑著一個網站，在該裝置上執行：
+
+```bash
+tailscale funnel 3000
+```
+
+會看到類似輸出：
+
+```text
+Available on the internet:
+https://my-server.tailxxxxx.ts.net
+
+|-- / proxy http://127.0.0.1:3000
+
+Press Ctrl+C to exit.
+```
+
+把網址貼給任何人，對方用手機行動網路也打得開。第一次啟用時，公開 DNS 記錄最多要 **10 分鐘**才會生效，剛開就連不到先等一下。不加旗標是前景執行，按 `Ctrl+C` 就停止公開。
+
+## 常用指令
+
+| 指令                               | 用途                                                         |
+| ---------------------------------- | ------------------------------------------------------------ |
+| `tailscale funnel 3000`            | 前景公開本機 `3000` 連接埠（預設 HTTPS 443）                 |
+| `tailscale funnel --bg 3000`       | 背景執行，重開機、`tailscale down/up` 後自動恢復             |
+| `tailscale funnel status`          | 查看目前的分享，公開的會標示 `Funnel on`                     |
+| `tailscale funnel --https=443 off` | 移除 443 上的分享（`off` 前要帶原本的旗標）                  |
+| `tailscale funnel reset`           | 清空本機所有 Serve／Funnel 設定（和 `serve reset` 效果相同） |
+
+幾個重點：
+
+- Funnel 的目標寫法和 Serve 完全一樣：連接埠、`localhost:3000`、完整 URL、檔案或資料夾的絕對路徑、`text:"..."` 都可以，`--set-path` 也一樣會去掉路徑前綴（見 [Serve 的範例一](/features/serve/#範例一分享本機開發中的網站)）。
+- 本機服務要聽在 `127.0.0.1`。Funnel 轉發時永遠連 `http://127.0.0.1`，只聽 IPv6 `[::1]` 的服務會被拒絕；這也是避免有人繞過 Funnel、直接從區網連你服務的好習慣。
+- `off` 會把那條分享**整個移除**，不是「從公開改回 tailnet 內」。想保留給 tailnet 內使用，改下一次對應的 `tailscale serve` 指令即可，同一個連接埠會以最後下的指令為準。
+
+## 限制
+
+- **只能用三個連接埠**：`443`、`8443`、`10000`，例如 `tailscale funnel --bg --https=8443 3000`。Serve 沒有這個限制。
+- **只能用 tailnet 網域**：網址固定是 `<裝置名稱>.<tailnet 名稱>.ts.net`，不能換成自己的網域。想用自訂網域，得在前面另外架反向代理或用其他服務。
+- **沒有純 HTTP**：funnel 沒有 `--http` 旗標。對外可用的是 HTTPS、`--tcp`（raw TCP 轉發）與 `--tls-terminated-tcp`（由 Tailscale 終止 TLS 再轉 TCP），連接埠同樣限 `443`／`8443`／`10000`；SSH、RDP 這類非 HTTP 服務要加密，就用 `--tls-terminated-tcp`。
+- **頻寬有上限**：Funnel 流量受到無法調整的頻寬限制，官方沒有公布數字。適合 demo、webhook、小型個人服務，不適合拿來發大檔或架影音串流。
+- **同一連接埠不能同時是 Serve 又是 Funnel**：以最後下的指令為準。
+
+## 安全提醒
+
+Funnel 等於把服務**直接放上網際網路**，任何知道網址的人都連得到——而 `*.ts.net` 的網域會出現在公開的憑證透明度（Certificate Transparency）紀錄裡，網址實際上不是祕密，掃描器很快就會找上門。
+
+- **驗證要自己做**：Funnel 不幫你擋人。後台、管理介面、沒有登入機制的開發伺服器都不要直接公開。
+- **沒有身份標頭**：Serve 會帶 `Tailscale-User-Login` 等標頭告訴後端是誰連進來，Funnel 的請求**不帶**這些標頭（公開流量本來就沒有 Tailscale 身份），改帶 `Tailscale-Funnel-Request: ?1`。後端可以用它識別請求是從網際網路來的，例如對 Funnel 流量要求登入、對 tailnet 流量放行。Tailscale 轉發前會先清掉請求裡偽造的同名標頭。
+- **用完就關**：臨時 demo 用前景執行，結束時 `Ctrl+C`；用 `--bg` 開的記得用 `tailscale funnel status` 檢查還有哪些公開中。
+- **用 policy 管住誰能開**：`funnel` 屬性只給需要的裝置或 tag，不要整個 `autogroup:member` 都開。
+
+## 範例：在本機接收 webhook
+
+開發 GitHub、LINE Bot、Stripe 這類 webhook 時，對方的伺服器要能打到你的程式。用 Funnel 就不用先部署到雲端：
+
+```bash
+# 本機的 webhook 伺服器聽在 127.0.0.1:8080
+tailscale funnel --bg 8080
+tailscale funnel status
+```
+
+拿 `status` 印出的 `https://my-laptop.tailxxxxx.ts.net`，加上你程式的路徑（例如 `/webhook`）填進 webhook 設定，對方送出的事件就會直接打到你的本機程式。測完記得關掉：
+
+```bash
+tailscale funnel --https=443 off
+```
+
+webhook 端點一樣是公開的，記得驗證簽章（例如 GitHub 的 `X-Hub-Signature-256`），不要只靠網址不被知道。
+
+## 與 Serve 的差異
+
+Funnel 和 Serve 的指令、目標寫法幾乎相同，主要差在誰看得到、連接埠限制與身份標頭，對照表見 [Serve 文章的「與 Funnel 的差異」](/features/serve/#與-funnel-的差異)。原則很簡單：只有自己人要用就用 Serve，要給 tailnet 外的人用才開 Funnel。
+
+## 常見問題
+
+- **跑 `tailscale funnel` 出現 `"funnel" node attribute not set`？** policy 的 `nodeAttrs` 沒給這台裝置 `funnel` 屬性，照「前置條件」加上，或請 tailnet 管理員處理。
+- **出現 `HTTPS must be enabled`？** 到 Admin console → DNS 啟用 HTTPS 憑證，或照 CLI 給的網址點開同意。
+- **剛開好，外部連不到？** 公開 DNS 記錄最多要 10 分鐘生效，先等一下；之後用 `tailscale funnel status` 確認有標示 `Funnel on`、連接埠是 `443`／`8443`／`10000` 之一。
+- **tailnet 內連得到，外部連不到？** 多半是那個連接埠其實是 Serve，不是 Funnel。用 `status` 看是否標示 `Funnel on`，沒有的話重下一次 `tailscale funnel`。
+- **Mac 上用 Funnel 分享資料夾出現 `Path serving is not supported on macOS`？** App Store 版與 Standalone 版受沙盒限制只能分享連接埠，要分享檔案或資料夾就改裝開源 `tailscaled` 版。
+
+## 參考資料
+
+- [Tailscale Funnel 官方文件](https://tailscale.com/kb/1223/funnel)
+- [`tailscale funnel` 指令參考](https://tailscale.com/kb/1311/funnel)
+- [Funnel 使用範例（官方）](https://tailscale.com/kb/1247/funnel-examples)
+- [macOS 各版本功能比較（官方）](https://tailscale.com/kb/1065/macos-variants)
+- [Tailscale 原始碼：Funnel 請求的標頭處理（`ipn/ipnlocal/serve.go`）](https://github.com/tailscale/tailscale/blob/main/ipn/ipnlocal/serve.go)
