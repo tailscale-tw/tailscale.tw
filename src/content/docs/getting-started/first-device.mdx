@@ -1,0 +1,199 @@
+---
+title: 註冊帳號並安裝第一台裝置
+description: 從選擇身分提供者、建立 tailnet 到安裝並登入第一台 Tailscale 裝置，完成第一次連線測試
+sidebar:
+  order: 2
+  label: 註冊帳號與安裝第一台裝置
+---
+
+第一次使用 Tailscale 的流程很短：選擇身分提供者、建立 tailnet、在裝置上安裝 Tailscale，然後用同一個身分登入。本文以先加入一台、再加入第二台自己的裝置為例，帶你看到 Admin console 裡的裝置，並完成第一次連線測試。
+
+> 本文以 Tailscale v1.102（2026 年 10 月）為準，註冊流程與 Admin console 畫面名稱依同月官方文件整理。
+
+## 先決定身分提供者
+
+Tailscale 不提供傳統的 email／password 註冊，也沒有 Tailscale 自己管理的密碼。登入是交給你原本使用的身分提供者（identity provider，IdP）或單一登入（SSO）服務處理；身分提供者的 MFA 設定也會套用到 Tailscale。
+
+目前官方原生支援的身分提供者包括：
+
+- **Apple**。
+- **Google**，包括 Gmail 與 Google Workspace（G Suite）。
+- **GitHub**。
+- **Microsoft**，包括 Microsoft Account、Office 365、Active Directory 與 Microsoft Entra ID。
+- **Okta** 與 **OneLogin**。
+
+企業也可以使用 custom OIDC provider；另外，passkey 可用來登入有權加入的 tailnet，但目前不能用來新建 tailnet。第一次建立自己的 tailnet 時，仍應先選擇一個你能長期控制的身分提供者與帳號。
+
+### 這個選擇為什麼重要
+
+在 Tailscale 第一次啟用網域或建立 tailnet 時，會要求你選擇身分提供者。第一個建立 tailnet 的使用者通常就是 **Owner**；之後同一個組織的成員會依 tailnet 的身分與網域設定加入。選擇身分提供者不只是選一個登入按鈕，也會影響這個 tailnet 的使用者如何驗證與歸屬。
+
+官方目前提供 **Switch identity provider** beta，但不是所有 IdP 都能直接切換：Google Workspace、使用 custom domain 的 Microsoft、Okta、OneLogin 與 custom OIDC 有相應的切換流程；GitHub 與 Apple 目前不能互相遷移，使用 Gmail 等 shared domain 的 tailnet 也不能自行切換。公司 tailnet 請用組織管理的身分提供者，不要先用個人帳號建立後才假設可以無痛搬家。
+
+## 建立 tailnet
+
+1. 打開 [Tailscale](https://tailscale.com/)，選 **Get Started**；也可以直接開 [註冊頁](https://login.tailscale.com/start)。
+2. 在 **Sign up with your identity provider** 頁面選擇要使用的 IdP，完成該服務的登入與授權。
+3. 在 **Welcome to Tailscale** 頁面選 **Business use** 或 **Personal use**。
+4. 看到 **Let's add your first device** 後，選擇你準備安裝 Tailscale 的作業系統。
+
+完成註冊後，你的 tailnet 已經建立；接下來要把第一台裝置登入這個 tailnet。這個步驟不會要求你另外設定 VPN 伺服器或公開 IP。
+
+## 安裝第一台裝置
+
+先依平台選擇安裝方式。本文只保留註冊後的共同步驟，不重複各平台的完整安裝細節：
+
+| 平台    | 建議從哪裡開始                                                                                                                       |
+| ------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| macOS   | 參考本站的 [macOS 上安裝 Tailscale 的三種方法](/platforms/macos-install/)，選擇 Standalone、Mac App Store 或開源 `tailscaled` 版本。 |
+| Linux   | 使用下方的自動安裝腳本，或依發行版使用官方套件庫。                                                                                   |
+| Windows | 參考 [Tailscale 官方 Windows 安裝文件](https://tailscale.com/kb/1022/install-windows)，下載 `.exe` 安裝程式。                        |
+| iOS     | 參考 [Tailscale 官方 iOS 安裝文件](https://tailscale.com/docs/install/ios)，從 App Store 安裝。                                      |
+| Android | 參考 [Tailscale 官方 Android 安裝文件](https://tailscale.com/docs/install/android)，從 Google Play 安裝。                            |
+
+如果是其他平台或特殊部署方式，先看官方的 [Install Tailscale](https://tailscale.com/docs/install) 清單；本站之後會再補充其他平台的專文。
+
+### Linux：自動安裝腳本
+
+官方文件提供的快速方式是：
+
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+```
+
+這行不是單純下載一個固定的二進位檔，而是把官方 shell script 下載後交給 `sh` 執行：
+
+1. 腳本從 `uname` 與 `/etc/os-release` 判斷作業系統、版本與套件系統，例如 `apt`、`yum`、`dnf` 或 `zypper`。
+2. 它檢查該版本是否受支援，並依發行版加入 Tailscale 官方套件庫與簽章金鑰。
+3. 它呼叫該發行版的套件管理器安裝 `tailscale`，必要時設定 `tailscaled` 服務。
+4. 安裝完成後，腳本會印出登入提示；它**不會替你完成 tailnet 登入**，仍要自己執行 `sudo tailscale up`。
+
+`-f` 會在 HTTP 錯誤時失敗，`-sS` 讓輸出安靜但仍顯示錯誤，`-L` 會跟隨重新導向；最後的 `| sh` 代表收到內容後立即執行。因為這是以 shell 執行遠端內容，若你的環境不接受 `curl | sh`，可以先下載、檢查[官方腳本原始碼](https://github.com/tailscale/tailscale/blob/main/scripts/installer.sh)，再執行：
+
+```bash
+curl -fsSL https://tailscale.com/install.sh -o tailscale-install.sh
+less tailscale-install.sh
+sh tailscale-install.sh
+```
+
+安裝完成後，用瀏覽器完成登入：
+
+```bash
+sudo tailscale up
+```
+
+CLI 會印出一個登入網址；打開它，選用建立 tailnet 時的同一個身分提供者完成驗證。成功後，這台 Linux 裝置就會出現在 Admin console 的 **Machines** 頁面。
+
+### Linux：套件庫安裝替代方式
+
+如果不想執行自動腳本，可以從 [Tailscale Packages 的 stable track](https://pkgs.tailscale.com/stable/#linux) 選自己的發行版，照官方產生的指令加入套件庫。以下是 Debian／Ubuntu 使用 APT keyring 的格式範例；`distribution` 與 `codename` 必須換成套件頁面列出的值：
+
+```bash
+distribution=ubuntu
+codename=noble
+repo="https://pkgs.tailscale.com/stable/${distribution}/${codename}"
+
+# 請以官方套件頁面列出的 distribution、codename 為準
+sudo mkdir -p --mode=0755 /usr/share/keyrings
+curl -fsSL "${repo}.noarmor.gpg" \
+  | sudo tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
+curl -fsSL "${repo}.tailscale-keyring.list" \
+  | sudo tee /etc/apt/sources.list.d/tailscale.list
+sudo apt-get update
+sudo apt-get install tailscale
+sudo tailscale up
+```
+
+Fedora、RHEL、Amazon Linux 與 openSUSE 等系統要使用各自的 `dnf`、`yum` 或 `zypper` 指令，請直接依同一個 stable track 頁面所列的版本指令操作。套件庫安裝和自動腳本最後都要由 `sudo tailscale up` 啟動登入流程。
+
+## 加入第二台裝置
+
+要測試兩台裝置互連，第二台也要安裝 Tailscale。自己的筆電、手機或伺服器可以用同一個 Tailscale 使用者與同一個身分提供者登入；如果是其他人，應先從 Admin console 邀請對方加入，而不是共用你的帳號。
+
+也可以從 Admin console 的 **Machines** 頁面選 **Add device**，選 **Client device**、作業系統與 **Download Tailscale**，再把安裝連結交給第二台裝置。安裝完成後，在第二台裝置的 Tailscale 用戶端選 **Log in**，用正確的身分提供者完成驗證。
+
+新裝置登入後通常會自動加入 tailnet；如果管理員啟用了 device approval，它會先出現在 **Machines** 頁面，狀態為 **Needs approval**。這時要由 Owner、Admin 或 IT admin 在該頁核准，裝置才會正式可用。
+
+## 在 Admin console 確認裝置
+
+打開 [Admin console 的 Machines 頁面](https://console.tailscale.com/admin/machines)，你會看到已登入 tailnet 的裝置清單：
+
+- **裝置名稱**：Tailscale 會以裝置的 OS hostname 產生 machine name；需要時可以在 **Machines** 頁面重新命名。這個名稱也是 MagicDNS 會使用的名稱。
+- **Tailscale IP**：在裝置的 **Addresses** 欄位可以複製 IPv4 或 IPv6 位址。IPv4 通常是 `100.x.y.z`，不是路由器的公共 IP。
+- **狀態**：可以看裝置是否 active、是否需要核准，以及目前的連線資訊。
+
+第一台裝置完成登入後，先確認它出現在這裡；第二台也完成登入後，清單應該會有兩列。若只看到一台，先回到第二台確認瀏覽器授權是否完成，或檢查是否卡在 **Needs approval**。
+
+## 第一次連線測試
+
+以下指令可在 Linux 或其他有 Tailscale CLI 的裝置上執行；GUI 平台的 CLI 使用方式依版本而定，詳見各平台文件。
+
+### 看連線狀態
+
+在其中一台裝置執行：
+
+```bash
+tailscale status
+```
+
+這會列出 peer 的 Tailscale IP、machine name、擁有者、作業系統與連線狀態。當第二台裝置已登入且有連線時，狀態欄可能包含：
+
+- `direct`：兩台裝置直連。
+- `relay "<region>"`：經 DERP 中繼。
+- `peer-relay`：經 tailnet 中另一台 Peer Relay 裝置中繼。
+
+看到 `idle` 或 `-` 不一定表示設定錯誤，可能只是目前沒有傳輸資料；先用下一個 `tailscale ping` 產生流量再觀察。
+
+### 測試 Tailscale 路徑
+
+用第二台裝置的 machine name 或 Tailscale IP 執行：
+
+```bash
+tailscale ping <machine-name>
+```
+
+例如第二台叫 `my-laptop`：
+
+```bash
+tailscale ping my-laptop
+```
+
+看到 `pong` 代表 Tailscale 的測試封包已抵達對方。輸出也會顯示目前路徑；連線剛建立時可能先看到 `via DERP(...)`，之後若 NAT traversal 成功，可能改成 `via <ip>:<port>` 的直連路徑。這是正常的連線升級過程。
+
+### 用 MagicDNS 名稱連線
+
+MagicDNS 會把裝置的 machine name 對應到 tailnet IP。先用作業系統的 DNS／ICMP 工具測試名稱解析：
+
+```bash
+ping <machine-name>
+```
+
+再把同一個名稱交給實際服務的用戶端，例如遠端裝置確實有 SSH 服務時：
+
+```bash
+ssh <user>@<machine-name>
+```
+
+`ping` 只是在測名稱解析與 ICMP，不代表每個 TCP 服務都已開啟；`ssh` 也必須以對方已設定好的本機使用者與 SSH 服務為前提。如果名稱解析失敗，先到 Admin console 的 **DNS** 頁面確認 MagicDNS，再暫時用 `100.x.y.z` 位址測試，區分是 DNS 問題還是連線問題。
+
+## 接下來讀什麼
+
+第一台與第二台都連通後，可以依用途繼續：
+
+- 想在 tailnet 內分享本機服務，讀 [Tailscale Serve：在 tailnet 內分享本機服務](/features/serve/)；想公開給網際網路，讀 [Tailscale Funnel：把服務公開到網際網路](/features/funnel/)。
+- 想從外面存取沒有安裝 Tailscale 的印表機、NAS 或其他區網設備，讀 [Subnet Router：存取整個區網內沒裝 Tailscale 的設備](/features/subnet-router/)。
+- 想讓所有上網流量經過家裡或另一台指定裝置，讀 [Exit Node：讓所有流量經由指定裝置出去](/features/exit-node/)。
+- 想先理解 tailnet、Tailscale IP、WireGuard 與控制平面，回頭讀 [Tailscale 是什麼：tailnet、WireGuard 與控制平面的基本觀念](/getting-started/what-is-tailscale/)。
+- **存取控制（ACL／grants）**：本站尚未整理專文；這會決定哪些使用者與節點可以連到哪些服務，之後再補充。
+
+## 參考資料
+
+- [Tailscale quickstart（Tailscale 官方文件）](https://tailscale.com/kb/1017/install)
+- [Supported SSO identity providers（Tailscale 官方文件）](https://tailscale.com/kb/1013/sso-providers)
+- [Switch identity provider（Tailscale 官方文件）](https://tailscale.com/docs/integrations/identity/switch-identity-provider)
+- [Add a device（Tailscale 官方文件）](https://tailscale.com/kb/1316/device-add)
+- [Install Tailscale on Linux（Tailscale 官方文件）](https://tailscale.com/kb/1031/install-debian-bullseye)
+- [Tailscale Packages：stable track](https://pkgs.tailscale.com/stable/#linux)
+- [Tailscale installer.sh 原始碼](https://github.com/tailscale/tailscale/blob/main/scripts/installer.sh)
+- [Tailscale CLI：`status` 與 `ping`](https://tailscale.com/docs/reference/tailscale-cli#status)
+- [User roles（Tailscale 官方文件）](https://tailscale.com/docs/reference/user-roles)
