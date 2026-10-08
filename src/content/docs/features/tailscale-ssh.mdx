@@ -1,0 +1,223 @@
+---
+title: Tailscale SSH：不用管理 SSH 金鑰
+description: Tailscale SSH 讓 Tailscale 負責 SSH 的身分驗證與授權：啟用方式、policy 的 ssh 規則與 check 模式、用一般 ssh、tailscale ssh 與網頁 SSH console 連線、tag 伺服器、限制與疑難排解
+sidebar:
+  order: 7
+  label: Tailscale SSH
+---
+
+裝了 Tailscale 之後，本來就能透過 tailnet 連到機器上的 `sshd`，但還是得自己發公鑰、維護 `authorized_keys`、有人離開時一台台把金鑰清掉。**Tailscale SSH** 把這件事交給 Tailscale：誰能以哪個帳號 SSH 到哪台機器，寫在 tailnet 的 policy 裡，身分就是登入 Tailscale 的帳號，不需要另外管理 SSH 金鑰。所有方案都能使用。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件整理，CLI 範例以 Tailscale v1.102 為準。
+
+## 和「透過 tailnet 連 sshd」差在哪
+
+|            | 透過 tailnet 連一般的 sshd             | Tailscale SSH                                  |
+| ---------- | -------------------------------------- | ---------------------------------------------- |
+| SSH 伺服器 | 機器上的 OpenSSH `sshd`                | `tailscaled` 內建的 SSH 伺服器                 |
+| 身分驗證   | SSH 金鑰或密碼                         | Tailscale 的 node key（也就是你登入的帳號）    |
+| 誰能連     | ACL 管網路層，`authorized_keys` 管登入 | policy 的 `ssh` 規則一起管                     |
+| 收回權限   | 要到每台機器刪金鑰                     | 改 policy 存檔，幾秒內生效，連既有連線都會中斷 |
+| 進階功能   | —                                      | check 模式（定期重新驗證）、網頁 SSH console   |
+
+運作方式：在目的機器開啟 Tailscale SSH 後，`tailscaled` 會**接管 Tailscale IP 上的 22 埠**，也就是只攔截從 tailnet 進來的 SSH 連線。連線先經 WireGuard 用 node key 驗證與加密，到了 SSH 協定的驗證階段，伺服器已經知道對方是誰，就直接放行（SSH 驗證類型為 `none`），不再要求金鑰或密碼。
+
+`/etc/ssh/sshd_config` 與 `~/.ssh/authorized_keys` **都不會被修改**，所以從區網 IP 或公網連到原本 `sshd` 的連線照常運作，兩者可以並存。
+
+## 支援的平台
+
+- **可以當伺服器（被連）**：Linux，以及 macOS 的**開源 `tailscaled` 版**。需要 Tailscale v1.24 以上。
+- **不能當伺服器**：macOS 的 App Store 版與 Standalone 版（差異見 [macOS 上安裝 Tailscale 的三種方法](/platforms/macos-install/)）、Windows、Synology、QNAP。
+- **可以當用戶端（去連）**：任何裝了 Tailscale 的裝置都可以。
+
+## 啟用
+
+### 1. 在目的機器開啟
+
+```bash
+sudo tailscale set --ssh
+```
+
+這會產生一組 SSH host key，把公鑰交給 Tailscale 發給其他裝置，並讓 `tailscaled` 開始攔截 tailnet 進來的 22 埠流量。每台機器只要做一次。
+
+**注意**：執行後，原本經由這台機器 Tailscale IP 連進來的 SSH 連線會卡住。如果你現在就是透過 Tailscale IP SSH 進去操作，先準備好其他連線方式，或執行完重新連線。
+
+### 2. 確認 policy 允許
+
+一條 Tailscale SSH 連線要同時通過兩種規則：
+
+1. **網路層**：`grants`（或舊的 `acls`）允許來源連到目的機器的 22 埠。
+2. **SSH 規則**：`ssh` 區段允許來源以指定的本機帳號 SSH 到目的機器。
+
+沒改過 policy 的 tailnet，預設 policy 已經包含兩者，開啟後就能連自己的裝置。改過 policy 的話，兩種規則都要自己寫，語法基礎見 [ACL / Grants 入門](/admin/acl-grants/)。
+
+## policy 的 `ssh` 規則
+
+### 預設規則
+
+```json
+"ssh": [
+  {
+    // 每個人都能用 Tailscale SSH 連自己的裝置，check 模式，root 或非 root 都可以
+    "action": "check",
+    "src": ["autogroup:member"],
+    "dst": ["autogroup:self"],
+    "users": ["autogroup:nonroot", "root"],
+  },
+],
+```
+
+修改 `ssh` 區段會取代這條預設規則；整段刪掉則等於在 tailnet 停用 Tailscale SSH。
+
+### 欄位
+
+| 欄位          | 說明                                                                                      |
+| ------------- | ----------------------------------------------------------------------------------------- |
+| `action`      | `accept`：已登入 tailnet 就放行；`check`：要定期重新驗證身分                              |
+| `src`         | 從哪裡連：使用者、群組、tag、`user:*@<網域>`、`autogroup:`。不能寫 `*`                    |
+| `dst`         | 連到哪裡：使用者、tag、`autogroup:`。不能寫 `*`，也不能指定連接埠（固定 22）              |
+| `users`       | 允許登入的本機帳號，例如 `root`、`ubuntu`；`autogroup:nonroot` 代表任何非 root 帳號       |
+| `checkPeriod` | 只用於 `check`，多久要重新驗證一次，預設 12 小時（自訂限 Premium、Enterprise 方案）       |
+| `acceptEnv`   | 允許用戶端用 `SendEnv`／`SetEnv` 傳入的環境變數名稱，可用 `*`、`?`（主機需 v1.76.0 以上） |
+
+`users` 只能使用機器上**已經存在**的帳號，Tailscale 不會自動建立帳號。另外有 `localpart:*@<網域>`：登入帳號是 `dave@example.com` 的人，就以本機的 `dave` 登入；網域不能是 `gmail.com` 這類多人共用的網域。
+
+### 只允許這幾種連線
+
+不管 policy 怎麼寫，Tailscale SSH 只允許：
+
+- 使用者連到**自己的**裝置。
+- 使用者連到 **tag** 裝置（包含別人分享給你的 tag 裝置）。
+- tag 裝置連到 tag 裝置（這種規則不能用 check 模式）。
+
+換句話說，**不能 SSH 到別人以使用者身分登入的裝置**，tag 裝置也不能 SSH 到使用者的裝置。要讓多人共同管理的伺服器，應該讓它用 [tag 身分登入](/admin/tags-auth-keys/)。
+
+### 範例：tag 伺服器
+
+讓 `group:admins` 以 `root` 或 `ubuntu` 登入 `tag:server` 的機器，以 `root` 登入時需要每小時重新驗證（自訂 `checkPeriod` 需要 Premium 或 Enterprise 方案，其他方案拿掉這一行即使用預設的 12 小時）：
+
+```json
+{
+  "groups": {
+    "group:admins": ["alice@example.com", "bob@example.com"]
+  },
+  "tagOwners": {
+    "tag:server": ["group:admins"]
+  },
+  "grants": [
+    {
+      "src": ["group:admins"],
+      "dst": ["tag:server"],
+      "ip": ["22"]
+    }
+  ],
+  "ssh": [
+    {
+      "action": "accept",
+      "src": ["group:admins"],
+      "dst": ["tag:server"],
+      "users": ["ubuntu"]
+    },
+    {
+      "action": "check",
+      "checkPeriod": "1h",
+      "src": ["group:admins"],
+      "dst": ["tag:server"],
+      "users": ["root"]
+    }
+  ]
+}
+```
+
+把預設規則的 `dst` 從 `autogroup:self` 改成 tag 時，記得檢查 `users`：保留 `autogroup:nonroot` 的話，`src` 裡的每個人都能以那台機器上**任何非 root 帳號**登入。
+
+### 規則重疊時
+
+同一條連線同時符合 `check` 與 `accept` 規則時，**`check` 優先**，而且只看 `check` 規則裡的 `users`。上面的範例把 `ubuntu` 與 `root` 分在兩條規則，就是為了避免這個問題。
+
+policy 也可以寫 `sshTests` 來驗證規則是否如預期。
+
+## check 模式
+
+`action` 設為 `check` 時，連線前要先在瀏覽器重新登入身分提供者（Google、GitHub、Microsoft 等），會一併觸發多因素驗證。
+
+- `checkPeriod` 預設 **12 小時**。Premium 與 Enterprise 方案可以自訂（見 [方案與限制比較](/getting-started/plans/)），範圍是 1 分鐘到 168 小時（一週），單位用分鐘或小時，例如 `"30m"`、`"20h"`。
+- 也可以設 `"always"`，每次連線都要驗證。但 Ansible 這類短時間開很多連線的工具會因此出問題。
+- 驗證一次之後，在預設的 12 小時內連 tailnet 其他走 check 模式的機器也不用再驗證；有自訂 `checkPeriod` 的規則，則依它自己的期限判斷。
+- check 模式只用於 Tailscale SSH，一般的 SSH 或其他 TCP 連線無法使用。
+
+## 連線方式
+
+### 一般的 `ssh`
+
+不需要額外的程式或設定，直接用 MagicDNS 名稱或 Tailscale IP：
+
+```bash
+ssh my-server
+ssh ubuntu@my-server
+ssh ubuntu@100.64.0.1
+```
+
+Tailscale 會自動處理 `known_hosts`，第一次連線不會跳出 unknown host 的警告。`scp`、`sftp` 也能用。只能用 Tailscale IP 或 MagicDNS 名稱連，用機器的區網 IP 連到的是原本的 `sshd`。
+
+有些 SSH 用戶端不接受「不需驗證」的伺服器，這時在使用者名稱後加上 `+password`（例如 `ubuntu+password`），密碼隨便輸入即可。
+
+### `tailscale ssh`
+
+```bash
+tailscale ssh ubuntu@my-server
+```
+
+這是系統 `ssh` 的包裝，**不是必要的**。它會用 MagicDNS 解析名稱（即使關掉了 `--accept-dns`）、在 userspace networking 模式下也能用，並用 Tailscale 發的 host key 核對對方。macOS 的 App Store 版沒有這個指令，直接用 `ssh` 即可。
+
+### 網頁 SSH console
+
+在 Admin console 的 [Machines](https://console.tailscale.com/admin/machines) 頁面，點機器右邊的選單選 **SSH to machine**，選擇本機帳號後會在瀏覽器開一個 SSH 視窗。適合手邊的裝置沒裝 Tailscale 的時候。
+
+- 目前是 beta，所有方案都能使用，但只有 Owner、Admin、IT admin、Network admin 能用。
+- 每個新的 console session 都要重新驗證身分。
+- 瀏覽器會以 WebAssembly 跑一個 Tailscale 用戶端，在 tailnet 裡成為一台暫時（ephemeral）的節點，名稱像 `tailscale-ssh-console-alice-example-com-xxxxx`，關掉後自動移除。
+- 連線全程經過 DERP relay，仍是端對端加密。
+
+看不到 SSH 選項，代表那台機器沒開 Tailscale SSH，或 policy 不允許你連。
+
+## Session recording
+
+Tailscale 曾提供把 Tailscale SSH session 錄下來、串流到 tailnet 內錄影節點（`tsrecorder`）的功能。官方已**不再提供**這個做法給新使用者，既有使用者的支援預計在 2027 年 8 月結束，之後改由 Tailscale PAM 提供 session 紀錄與特權存取管理。個人使用通常用不到，有稽核需求再參考官方文件。
+
+## 關閉
+
+```bash
+# 在這台機器關閉 Tailscale SSH
+sudo tailscale set --ssh=false
+```
+
+關閉前先確認還有其他方式能登入這台機器。要整個 tailnet 停用，就在每台機器關閉，並刪除 policy 裡的 `ssh` 規則。
+
+## 限制
+
+- 只能連到裝了 Tailscale 的機器，[Subnet Router](/features/subnet-router/) 後面的設備不能用 Tailscale SSH。
+- 固定使用 22 埠，無法更改。
+- 重新啟動 `tailscaled`（例如升級 Tailscale）會中斷所有進行中的 Tailscale SSH session。
+- 用戶端不需要本機的 SSH 金鑰，所以**用戶端機器上的任何 OS 使用者**都能以你的 Tailscale 身分 SSH 出去。多人共用的機器、或跑著不信任程式的機器，不適合給它 SSH 出去的權限；可以用 `checkPeriod: "always"` 降低風險（Premium、Enterprise 方案）。
+- 靠 `authorized_keys` 的 `command=` 限制遠端能執行的指令，在 Tailscale SSH 上不適用。
+
+不適合 Tailscale SSH 的情況，仍然可以照舊用 OpenSSH，只是把 Tailscale 當網路層，一樣不用把 SSH 暴露在網際網路上。
+
+## 疑難排解
+
+連線被拒或要求輸入密碼時，依序檢查：
+
+1. **目的機器有沒有開啟**：在目的機器執行 `tailscale debug prefs | grep RunSSH`，或看 Admin console 的機器詳細資料是否標示 SSH。沒開就執行 `sudo tailscale set --ssh`。
+2. **是不是連到原本的 `sshd`**：要求輸入密碼或金鑰，多半是用了區網 IP 或其他名稱。改用 MagicDNS 名稱或 `100.x.y.z`。
+3. **網路層規則**：`grants`／`acls` 要允許你連到目的機器的 22 埠。
+4. **SSH 規則**：`src`、`dst`、`users` 是否涵蓋這次的連線；記得 check 規則優先，且只看它的 `users`。目的機器是別人以使用者身分登入的，就不能 SSH。
+5. **本機帳號**：`users` 寫的帳號要在目的機器上真的存在。
+6. **known_hosts 錯誤**：Tailscale SSH 依賴主機名稱寫入的 `known_hosts`，DNS 解析不到時可能出錯，可以試試 Tailscale IP 或 `tailscale ssh`。
+
+## 參考資料
+
+- [Tailscale SSH（官方）](https://tailscale.com/docs/features/tailscale-ssh)
+- [Tailscale SSH Console（官方）](https://tailscale.com/docs/features/tailscale-ssh/tailscale-ssh-console)
+- [Tailscale SSH session recording（官方）](https://tailscale.com/docs/features/tailscale-ssh/tailscale-ssh-session-recording)
+- [Tailscaled on macOS（GitHub wiki）](https://github.com/tailscale/tailscale/wiki/Tailscaled-on-macOS)
