@@ -118,7 +118,7 @@ tailscale dns status
 輸出分成三段：
 
 - **'Use Tailscale DNS' status**：這台裝置有沒有套用 Tailscale 的 DNS 設定（`--accept-dns`）。
-- **MagicDNS configuration**：控制伺服器下發的設定，包括 MagicDNS 是否開啟、這台裝置的完整名稱、**Resolvers**（Override 開啟時的 global nameserver）、**Split DNS Routes** 與 **Search Domains**。
+- **MagicDNS configuration**：控制伺服器下發的設定，包括 MagicDNS 是否開啟、這台裝置的完整名稱、**Resolvers**（Admin console 設定的 global nameserver）、**Split DNS Routes** 與 **Search Domains**。
 - **System DNS configuration**：Tailscale 認為作業系統原本使用的 DNS 伺服器。
 
 加上 `--all` 會輸出更多除錯資訊。
