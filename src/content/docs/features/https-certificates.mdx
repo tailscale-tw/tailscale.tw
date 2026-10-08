@@ -1,0 +1,191 @@
+---
+title: HTTPS 憑證：tailscale cert 的運作方式
+description: Tailscale 怎麼替 tailnet 裡的裝置簽發 *.ts.net 的 Let's Encrypt 憑證：開啟 HTTPS、憑證透明度的隱私影響、tailscale cert 的用法與續期、Serve、Caddy、Traefik 的自動續期，以及常見問題
+sidebar:
+  order: 8
+  label: HTTPS 憑證
+---
+
+Tailscale 的連線本來就經過 WireGuard 端對端加密，但瀏覽器不知道這件事：用 `http://nas:5000` 連 NAS，網址列照樣顯示「不安全」，有些網頁 API（例如剪貼簿、Service Worker）和工具（例如 VS Code 的部分功能）也會因為不是 HTTPS 而停用。要讓瀏覽器信任，需要公開憑證機構（CA）簽發的 TLS 憑證。
+
+Tailscale 可以替 tailnet 裡的每台裝置，以它的 MagicDNS 名稱（例如 `nas.tail1234.ts.net`）向 Let's Encrypt 申請憑證，不需要自己的網域，也不用開放任何連接埠。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件整理，CLI 範例以 Tailscale v1.102 為準。
+
+## 運作方式
+
+- 每個 tailnet 有一個 **tailnet DNS 名稱**，例如 `tail1234.ts.net`，裝置的完整名稱就是 `<機器名稱>.<tailnet DNS 名稱>`。
+- 執行 `tailscale cert` 時，裝置自己產生憑證私鑰與 Let's Encrypt（ACME）帳號金鑰，向 Let's Encrypt 申請憑證。
+- Let's Encrypt 用 **DNS-01** 驗證網域所有權：Tailscale 的控制伺服器替這台裝置在 `ts.net` 建立對應的 DNS TXT 紀錄，驗證通過後就簽發憑證。
+- 私鑰只存在你的裝置上，**Tailscale 看不到**。
+
+因為走 DNS-01，裝置不用對網際網路開放 80 或 443 埠，憑證照樣簽得下來。
+
+## 開啟 HTTPS
+
+由 Owner、Admin 等管理員在 Admin console 操作：
+
+1. 打開 [DNS](https://console.tailscale.com/admin/dns) 頁面。
+2. 沒開 [MagicDNS](https://tailscale.com/docs/features/magicdns) 的話先開啟。
+3. 在 **HTTPS Certificates** 選 **Enable HTTPS**。
+4. 確認你了解機器名稱與 tailnet DNS 名稱會公開在公開帳本上（見下一節）。
+
+開啟之後，還要在每台需要憑證的裝置上取得憑證，方法見後面幾節。只有實際取得憑證的裝置，名稱才會出現在公開帳本上。
+
+## 隱私：名稱會公開在憑證透明度日誌
+
+所有公開 CA 簽發的憑證都會記錄在 [憑證透明度](https://en.wikipedia.org/wiki/Certificate_Transparency)（Certificate Transparency，CT）日誌裡，這是一個任何人都能查詢的公開帳本，內容包含憑證的完整網域名稱。
+
+- Tailscale 用 `tail1234.ts.net` 這類 tailnet DNS 名稱，而不是你的公司網域、email 或 GitHub 帳號，用意就是不讓 tailnet 的擁有者曝光。
+- 但**機器名稱會公開**。名稱裡如果有客戶名稱、專案代號、人名等敏感資訊，取得憑證前先在 Admin console [改名](https://tailscale.com/docs/concepts/machine-names)。
+- 公開的只有名稱。能不能連到裝置，仍然由 Tailscale 的存取規則決定。
+
+### tailnet DNS 名稱
+
+預設名稱是 `tailNNNN.ts.net` 或 `tailnet-NNNN.ts.net` 的形式，也可以在 Admin console 的 DNS 頁面改用 Tailscale 隨機產生的名稱，例如 `yak-bebop.ts.net`。除了在這兩種之間切換，目前**不能自訂** tailnet 名稱。
+
+憑證是依「目前使用中」的 tailnet DNS 名稱簽發的。切換名稱後，所有 `*.ts.net` 網址都會改變，原本的書籤、設定與憑證也要跟著更新，最好在一開始就決定好。
+
+## `tailscale cert`
+
+先找出這台裝置的完整名稱。不帶參數執行 `tailscale cert` 就會提示：
+
+```bash
+tailscale cert
+# Usage: tailscale cert [flags] <domain>
+# For domain, use "nas.tail1234.ts.net".
+```
+
+取得憑證（Linux 通常要 `sudo`）：
+
+```bash
+sudo tailscale cert nas.tail1234.ts.net
+```
+
+預設會在目前目錄寫出 `nas.tail1234.ts.net.crt` 與 `nas.tail1234.ts.net.key`。常用選項：
+
+| 選項                        | 作用                                                                  |
+| --------------------------- | --------------------------------------------------------------------- |
+| `--cert-file`、`--key-file` | 指定憑證與私鑰的輸出路徑，給 `-` 代表輸出到 stdout                    |
+| `--min-validity=<時間>`     | 要求拿到的憑證至少還有這麼久才到期，例如 `720h`；不夠的話會立即續期   |
+| `--serve-demo`              | 不寫出檔案，直接在 443 埠用這張憑證跑一個示範網頁，用來確認憑證能使用 |
+
+```bash
+sudo tailscale cert \
+  --cert-file /etc/ssl/tailscale/nas.crt \
+  --key-file /etc/ssl/tailscale/nas.key \
+  nas.tail1234.ts.net
+```
+
+再把這兩個檔案設定到 nginx、Apache 或其他服務即可。
+
+### 只能用完整名稱
+
+憑證只涵蓋完整的 `nas.tail1234.ts.net`。瀏覽器用 `https://nas` 連線時名稱對不上，仍然會出現憑證錯誤，要改用完整名稱連線。
+
+### 續期要自己處理
+
+Let's Encrypt 的憑證效期是 **90 天**。`tailscale cert` 把憑證寫成檔案之後，`tailscaled` 不知道檔案被放到哪裡、要怎麼讓服務重新載入，所以**用 `tailscale cert` 拿的憑證，續期要自己處理**。
+
+做法是定期重新執行 `tailscale cert`，再重新載入服務：
+
+- `tailscaled` 會把憑證快取在自己的狀態目錄（Linux 通常是 `/var/lib/tailscale/certs/`）。快取的憑證還有效時，`tailscale cert` 直接交出快取，不會每次都向 Let's Encrypt 申請。
+- 快取的憑證用掉約三分之二效期（90 天的憑證約剩 30 天）時，`tailscaled` 會在背景續期；搭配 `--min-validity`，剩餘效期不夠時則當場續期。
+- 所以排程每天或每週跑一次 `tailscale cert --min-validity=720h ...`，再 reload 服務，就能在到期前換上新憑證。
+
+PVE 與 Synology 的完整做法見：
+
+- [PVE 憑證自動更新](/pve/auto-renew-tailscale-certificate-on-pve/)：用 systemd timer 定期執行 `tailscale cert` 並安裝到 PVE。
+- [在 Synology NAS 上安裝 Tailscale 憑證方法](/synology/install-tailscale-certificate-on-synology/)：用 `tailscale configure synology-cert` 搭配任務排程表。
+
+### Let's Encrypt 的速率限制
+
+短時間內反覆申請新憑證（例如一直刪掉快取重新申請、或一直改機器名稱）可能觸發 Let's Encrypt 的[速率限制](https://letsencrypt.org/docs/rate-limits/)，之後可能要等上 34 小時才能再申請。正常排程續期不會遇到這個問題。
+
+## 不用自己續期的做法
+
+憑證不經過檔案、由程式直接向 `tailscaled` 拿的話，續期會自動完成。
+
+### Tailscale Serve／Funnel
+
+[Tailscale Serve](/features/serve/) 與 [Tailscale Funnel](/features/funnel/) 由 `tailscaled` 自己處理 HTTPS，取得與續期憑證都不用手動處理。只是要把本機的 HTTP 服務或資料夾加上 HTTPS 給 tailnet 用，這是最簡單的做法：
+
+```bash
+# 把本機 8080 的服務以 https://nas.tail1234.ts.net 提供給 tailnet
+sudo tailscale serve --bg 8080
+```
+
+Serve 第一次使用時，如果 tailnet 還沒開 HTTPS，CLI 也會引導你開啟。
+
+### Caddy
+
+Caddy 2.5 以上遇到 `*.ts.net` 的網站時，會自動向本機的 `tailscaled` 拿憑證，不需要任何憑證設定：
+
+```
+nas.tail1234.ts.net {
+	reverse_proxy localhost:8080
+}
+```
+
+Caddy 以非 root 帳號執行時（例如 Debian 套件的 `caddy` 使用者），要讓它有權限向 `tailscaled` 拿憑證：在 `/etc/default/tailscaled` 加上下面這行，再重新啟動 `tailscaled`。
+
+```bash
+TS_PERMIT_CERT_UID=caddy
+```
+
+### Traefik
+
+Traefik Proxy 3.0 以上內建 Tailscale 的憑證解析器。在安裝設定（static configuration）定義：
+
+```yaml
+certificatesResolvers:
+  myresolver:
+    tailscale: {}
+```
+
+再在路由設定（dynamic configuration）指定使用它：
+
+```yaml
+http:
+  routers:
+    myrouter:
+      rule: "Host(`nas.tail1234.ts.net`)"
+      service: myservice
+      tls:
+        certResolver: myresolver
+  services:
+    myservice:
+      loadBalancer:
+        servers:
+          - url: "http://localhost:8080"
+```
+
+Go 程式則可以用 `tailscale.com/client/local` 的 `GetCertificate`，直接當成 `tls.Config.GetCertificate` 使用。
+
+## 查看憑證狀態
+
+在 Admin console 的 [Machines](https://console.tailscale.com/admin/machines) 頁面點進某台機器，**TLS certificate** 區塊會顯示憑證狀態：Valid、Invalid、Certificate expired、No certificate found 等。機器要在線上，而且是 Tailscale v1.56 以上才能回報。
+
+## 關閉 HTTPS
+
+在 Admin console 的 [DNS](https://console.tailscale.com/admin/dns) 頁面，**HTTPS Certificates** 選 **Disable HTTPS**。
+
+- 所有依賴 HTTPS 的連結與連線都會失效，包括 Serve 與 Funnel。
+- 已簽發的憑證**不會被撤銷**，也沒有辦法單獨撤銷某一台機器的憑證。
+- 之後重新開啟時，會以當時使用中的 tailnet DNS 名稱為準。
+
+## 常見問題
+
+- **想用自己的網域？** `tailscale cert` 只能簽 `*.ts.net` 名稱。要用自己的網域，可以自己用 DNS-01 簽憑證，見 [在內網裝置上安裝 Cloudflare 憑證，透過 Subnet Router 安全瀏覽內網網站](/use-cases/internal-https-with-cloudflare/)。
+- **tailnet 以外的人能用這個網址嗎？** 不能。名稱與憑證是公開的，但 `100.x.y.z` 位址只有 tailnet 內的裝置連得到。要公開給網際網路，用 [Tailscale Funnel](/features/funnel/)。
+- **Subnet Router 後面的設備能拿憑證嗎？** 不能。`tailscale cert` 只能替執行它的這台 Tailscale 裝置申請憑證，沒裝 Tailscale 的設備沒有自己的 `ts.net` 名稱。
+- **出現 `your Tailscale account does not support getting TLS certs`？** tailnet 還沒開 HTTPS，到 Admin console 的 DNS 頁面開啟。
+
+## 參考資料
+
+- [Enabling HTTPS（官方）](https://tailscale.com/docs/how-to/set-up-https-certificates)
+- [tailscale cert（官方 CLI 說明）](https://tailscale.com/docs/reference/tailscale-cli#cert)
+- [Caddy certificates on Tailscale（官方）](https://tailscale.com/docs/integrations/web-servers/caddy/caddy-certificates)
+- [Traefik certificates on Tailscale（官方）](https://tailscale.com/docs/integrations/web-servers/traefik/traefik-certificates)
+- [Provision TLS certificates for internal Tailscale services（官方 blog）](https://tailscale.com/blog/tls-certs)
+- [Rate Limits（Let's Encrypt）](https://letsencrypt.org/docs/rate-limits/)
