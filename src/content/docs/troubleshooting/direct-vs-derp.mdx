@@ -162,7 +162,7 @@ tailscale set --relay-server-port=40000
 
 官方建議 `src` 不要用 `*`，也不要放常常換網路的筆電或手機，否則所有裝置都會嘗試經過 Peer Relay，反而繞遠路。Tag 的用法見 [Tags 與 auth key](/admin/tags-auth-keys/)。
 
-設定好之後產生一些流量，再用 `tailscale status | grep peer-relay` 或 `tailscale ping` 確認。要停用時執行 `tailscale set --relay-server-port=""`。
+設定好之後產生一些流量，再用 `tailscale status | grep peer-relay` 或 `tailscale ping` 確認。要停用時執行 `tailscale set --relay-server-port=""`。完整的規劃與設定見 [Peer Relay](/features/peer-relay/)。
 
 ## DERP 區域
 

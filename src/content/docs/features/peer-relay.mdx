@@ -1,0 +1,201 @@
+---
+title: Peer Relay：用自己的裝置當中繼，取代遠方的 DERP
+description: 直連失敗時，讓 tailnet 裡一台網路條件好的裝置轉送流量，取代繞到香港或東京的 DERP。說明適用情境、需求、grant 的 src／dst 怎麼寫、連接埠與 static endpoint、多台 relay 的選擇方式與確認方法
+sidebar:
+  order: 11
+  label: Peer Relay
+---
+
+Tailscale 的兩台裝置沒辦法直連時，流量會改走官方的 DERP 中繼伺服器。台灣沒有 DERP 區域，中繼通常要繞到香港或東京，而且 DERP 有頻寬限制，傳大檔案、看影片或經由 Subnet Router 存取內網時特別慢。
+
+**Peer Relay** 讓你指定 tailnet 裡的一台裝置當中繼：直連失敗時，先改經這台裝置轉送，找不到可用的 Peer Relay 才退回 DERP。中繼的位置與頻寬由你決定，通常比 DERP 快很多。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件整理，CLI 範例以 Tailscale v1.104 為準。
+
+## 三種連線方式的差別
+
+| 方式       | 經過哪裡                     | 協定 | 速度                       |
+| ---------- | ---------------------------- | ---- | -------------------------- |
+| 直連       | 兩台裝置之間直接傳送         | UDP  | 最快                       |
+| Peer Relay | tailnet 裡你指定的裝置       | UDP  | 多一跳，通常比 DERP 快很多 |
+| DERP       | Tailscale 官方的 DERP 伺服器 | TCP  | 最慢，頻寬有限制           |
+
+三種方式都是端對端的 WireGuard 加密，Peer Relay 和 DERP 一樣看不到流量的內容，差別只在效能。
+
+連線的優先順序是：能直連就直連；直連失敗時，先試可用的 Peer Relay；都不行才用 DERP。Tailscale 會持續嘗試直連，打洞成功就從 Peer Relay 切回直連。為什麼直連會失敗、怎麼先試著改善網路讓它直連，見 [直連與 DERP 中繼](/troubleshooting/direct-vs-derp/)。
+
+Peer Relay 不是用來取代 DERP 的：DERP 仍然負責建立連線前的協調，也是最後的備援。
+
+## 什麼時候需要 Peer Relay
+
+- **裝置在改不了設定的網路裡**：公司防火牆、雲端的 NAT gateway、hard NAT，讓連線只能走 DERP。
+- **流量大**：傳大檔案、串流影片，或經由 Subnet Router、Exit Node 存取整個網段，DERP 的頻寬不夠用。
+- **DERP 太遠**：從台灣繞到香港、東京再回來，延遲明顯。
+
+如果 `tailscale status` 顯示已經是 `direct`，就不需要 Peer Relay。
+
+## 需求
+
+- **當 Peer Relay 的裝置**：Tailscale v1.86 以上；iOS、Apple TV、Android 以外的作業系統都可以；頻寬夠、延遲低；有一個其他裝置連得到的 UDP 埠。
+- **使用 Peer Relay 的裝置**：Tailscale v1.86 以上，作業系統沒有限制（iOS、Apple TV 也可以）；要連得到 Peer Relay 的 UDP 埠。
+- **帳號**：所有方案都能使用；設定存取規則需要 Owner、Admin 或 Network admin 權限。
+
+## 規劃：哪台當 Peer Relay
+
+Peer Relay 要讓**雙方都連得到**，所以最好放在有公開 IP、UDP 不被擋的地方：
+
+- **雲端 VPS**：最省事。要讓台灣的裝置延遲低，選台灣或鄰近的區域，例如 Google Cloud 的 `asia-east1`（台灣）。
+- **家裡或辦公室有固定 IP 的主機**：在路由器上把 relay 的 UDP 埠轉送到這台，再搭配下面的 static endpoint。
+- **雲端裡的機器自己當 Peer Relay**：機器只開一個 UDP 埠給 Peer Relay，其他入站全部關掉，見後面的「用自己當 Peer Relay」。
+
+放在誰附近也有關係。例如要從台灣存取一台在美國雲端、只能走 DERP 的伺服器，Peer Relay 放在同一個雲端區域，比繞到其他地方的 DERP 快得多；官方也建議依地理區域配置 Peer Relay。
+
+## 設定步驟
+
+### 步驟一：在 Peer Relay 裝置上開啟
+
+在要當 Peer Relay 的裝置上指定 UDP 埠（以 `40000` 為例）：
+
+```bash
+tailscale set --relay-server-port=40000
+```
+
+設成 `0` 會隨機挑一個沒用到的埠，但之後不好設定防火牆，建議指定固定的埠。
+
+接著讓這個埠連得到：
+
+- 本機防火牆：例如 `ufw allow 40000/udp`。
+- 雲端：在安全群組（security group）或防火牆規則放行 UDP `40000`。
+- 在路由器後面：設定連接埠轉送。
+
+### 步驟二：連接埠轉送或負載平衡器後面要加 static endpoint
+
+Peer Relay 會自動找出自己的對外位址，但在連接埠轉送或 AWS NLB 這類負載平衡器後面，可能找不到所有能用的位址。這時用 `--relay-server-static-endpoints` 直接告訴其他裝置要連哪裡，可以列多個，用逗號分隔：
+
+```bash
+tailscale set --relay-server-port=40000 \
+  --relay-server-static-endpoints="203.0.113.10:40000"
+```
+
+IPv6 位址要加方括號，例如 `[2001:db8::1]:40000`。
+
+### 步驟三：用 grant 指定誰可以用
+
+只開 relay 埠還不夠，要在 Admin console 的 [Access controls](https://console.tailscale.com/admin/acls/file) 加上 grant，用 `tailscale.com/cap/relay` 指定哪些裝置可以使用這台 Peer Relay。先替 Peer Relay 加上 tag（例如 `tag:relay`），在嚴格 NAT 後面的裝置也加上 tag（例如 `tag:office`）：
+
+```json
+{
+  "tagOwners": {
+    "tag:relay": ["autogroup:admin"],
+    "tag:office": ["autogroup:admin"]
+  },
+  "grants": [
+    {
+      "src": ["tag:office"],
+      "dst": ["tag:relay"],
+      "app": {
+        "tailscale.com/cap/relay": []
+      }
+    }
+  ]
+}
+```
+
+- **`src`**：在嚴格 NAT 或防火牆後面、需要透過 Peer Relay 才連得到的裝置。
+- **`dst`**：當 Peer Relay 的裝置。可以寫 tag、機器名稱、IP set 或 Tailscale IP。
+- `tailscale.com/cap/relay` 不需要參數，留空陣列即可。
+
+這條 grant 的意思是：**其他裝置要和 `tag:office` 的裝置連線時，可以經過 `tag:relay` 轉送**。所以不必把每一台會連進來的筆電、手機都寫進 `src`，只要寫「難連的那一端」。
+
+這條 grant 只授權 Peer Relay 的轉送，不會讓任何人多連到什麼服務。其他裝置能不能存取 `tag:office` 上的服務，仍由原本的存取規則決定，例如：
+
+```json
+{
+  "src": ["autogroup:member"],
+  "dst": ["tag:office"],
+  "ip": ["tcp:80", "tcp:443"]
+}
+```
+
+也不需要另外開一條規則讓裝置「存取」Peer Relay 本身。Tag 的設定方式見 [Tags 與 auth key](/admin/tags-auth-keys/)，grant 的寫法見 [ACL / Grants 入門](/admin/acl-grants/)。
+
+#### `src` 不要用 `*`
+
+官方特別提醒，`src` 不要寫 `*` 這類範圍太大的目標，否則所有裝置都會嘗試經過 Peer Relay，流量繞遠路、延遲反而變高。`src` 應該是**位置固定、在嚴格 NAT 或防火牆後面**的裝置，例如公司或雲端裡的機器；常常換網路的筆電、手機通常不適合放在 `src`。
+
+### 步驟四：確認流量走 Peer Relay
+
+先產生一些流量（例如連到對方的服務，或用 `tailscale ping`），再查看連線狀態：
+
+```bash
+tailscale status | grep peer-relay
+```
+
+```text
+100.64.0.3  office-nas  alice@  linux  active; peer-relay 203.0.113.10:40000:vni:7, tx 1048576 rx 2097152
+```
+
+狀態從 `relay "hkg"` 變成 `peer-relay <位址>:<埠>:vni:<編號>`，就代表改走 Peer Relay 了。`tailscale ping` 會顯示 `via peer-relay(...)`：
+
+```text
+pong from office-nas (100.64.0.3) via peer-relay(203.0.113.10:40000:vni:7) in 12ms
+```
+
+如果還是 `direct`，代表兩邊本來就能直連，不需要 Peer Relay；如果還是 `relay "<區域>"`，檢查 relay 的 UDP 埠是不是真的連得到、grant 的 `src` 有沒有包含難連的那一端、兩邊的版本是不是 v1.86 以上。指令的判讀方式見 [用 tailscale netcheck 與 tailscale ping 診斷連線](/troubleshooting/netcheck-and-ping/)。
+
+## 多台 Peer Relay
+
+可以設定多台 Peer Relay，例如每個雲端區域各一台。需要中繼時，裝置會向所有可用的 Peer Relay 建立路徑，再依量到的延遲選擇最快的一條；直連成功的話，一律優先使用直連。
+
+沒辦法直接指定某一條連線要走哪台 Peer Relay，但可以用 grant 控制哪些裝置可以使用哪些 Peer Relay，例如讓 `tag:us-east-vpc` 只能用 `tag:us-east-relays`：
+
+```json
+{
+  "src": ["tag:us-east-vpc"],
+  "dst": ["tag:us-east-relays"],
+  "app": {
+    "tailscale.com/cap/relay": []
+  }
+}
+```
+
+## 用自己當 Peer Relay
+
+裝置也可以當自己的 Peer Relay：`src` 和 `dst` 寫同一台。適合雲端主機只想開一個固定的 UDP 埠、其他入站全部關掉的情況：
+
+```json
+{
+  "src": ["us-west-1"],
+  "dst": ["us-west-1"],
+  "app": {
+    "tailscale.com/cap/relay": []
+  }
+}
+```
+
+同樣要在這台裝置上執行 `tailscale set --relay-server-port=<埠>`。
+
+## 停用
+
+在 Peer Relay 裝置上把埠設成空字串：
+
+```bash
+tailscale set --relay-server-port=""
+```
+
+之後再把存取規則裡對應的 grant 移除。
+
+## 安全性
+
+- Peer Relay 只能轉送**同一個 tailnet** 裡的流量。
+- 沒有 `tailscale.com/cap/relay` grant 的裝置，無法在 Peer Relay 上建立中繼。
+- 流量是端對端加密的，Peer Relay 只看得到加密後的封包，看不到內容。
+- Peer Relay 的 UDP 埠要對外開放；放在公網上時，記得只開這一個埠，並讓 Tailscale 保持更新。
+
+## 參考資料
+
+- [Tailscale Peer Relays（官方）](https://tailscale.com/docs/features/peer-relay)
+- [Connection types（官方）](https://tailscale.com/docs/reference/connection-types)
+- [DERP servers（官方）](https://tailscale.com/docs/reference/derp-servers)
+- [Tailscale CLI：set（官方）](https://tailscale.com/docs/reference/tailscale-cli#set)
+- [直連與 DERP 中繼：為什麼連線變慢、怎麼改善](/troubleshooting/direct-vs-derp/)
