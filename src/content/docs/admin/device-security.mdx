@@ -1,0 +1,141 @@
+---
+title: 裝置核准、金鑰到期與 Tailnet Lock
+description: 認識 device approval、key expiry 與 Tailnet Lock 三種保護 tailnet 的機制：各自防什麼、怎麼開啟與操作、遺失簽署節點的後果，以及個人 tailnet 建議怎麼設定
+sidebar:
+  order: 3
+  label: 裝置安全
+---
+
+[ACL / grants](/admin/acl-grants/) 決定裝置加入之後能連到哪裡；這篇談的是另一層：**誰能加入 tailnet、加入多久、加入要經過誰同意**。Tailscale 有三個相關的機制：
+
+| 機制                        | 防的是什麼                                                     | 預設   |
+| --------------------------- | -------------------------------------------------------------- | ------ |
+| 裝置核准（device approval） | 有人用合法帳號登入了一台你不認得的裝置                         | 關閉   |
+| 金鑰到期（key expiry）      | 裝置遺失或被偷走後，長期留在 tailnet 裡                        | 180 天 |
+| Tailnet Lock                | Tailscale 的協調伺服器被入侵或作惡，偷偷把節點塞進你的 tailnet | 關閉   |
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件整理，CLI 範例以 Tailscale v1.102 為準。
+
+## 裝置核准（device approval）
+
+開啟之後，新裝置登入後不會馬上能用，要先經過管理員核准。適合想確保「只有自己認得的裝置」才能進來的情況，例如 tailnet 裡有家人或同事的帳號。所有方案都能使用。
+
+### 開啟與核准
+
+1. Owner、Admin 或 IT admin 到 Admin console 的 [Device management](https://console.tailscale.com/admin/settings/device-management) 頁面開啟 device approval。
+2. 之後有新裝置登入時，它會出現在 [Machines](https://console.tailscale.com/admin/machines) 頁面的最上方，下面標示 **Needs approval**。在核准前，這台裝置在 tailnet 上不能收送任何流量。
+3. 確認裝置與使用者沒問題後，點裝置右邊的選單選 **Approve**，裝置馬上就能連線，不用重開機或重新登入。
+
+### 不想每台都手動核准
+
+- **用 Pre-approved 的 auth key**：產生 auth key 時勾選 **Pre-approved**（只有開了 device approval 才會出現這個選項），用這把 key 加入的裝置會自動核准。伺服器、容器這類用 auth key 加入的裝置適合這樣做，見 [Tags 與 auth key](/admin/tags-auth-keys/)。
+- **自動化核准**：用 `nodeNeedsApproval` webhook 接收通知，自己檢查裝置是否符合條件，再呼叫 API 核准。
+
+device approval 針對的是「實體裝置」：同一台裝置被多個使用者共用時，只要核准一次。
+
+## 金鑰到期（key expiry）
+
+每台裝置登入時會產生一把 node key，到期後就要重新登入。新 tailnet 的預設期限是 **180 天**。
+
+### 到期後會怎樣
+
+金鑰到期的裝置，**進出的 Tailscale 連線都會中斷**，直到重新登入為止。用手機、筆電時只是跳出要你重新登入；但如果是伺服器、[Subnet Router](/features/subnet-router/) 或 [Exit Node](/features/exit-node/)，就是整台服務斷線，連帶依賴它的裝置也不通。
+
+### 調整預設期限
+
+在 Device management 頁面的 **Key Expiry** 區段可以設定 1 到 180 天。改了之後只影響**之後登入**的裝置，已經登入的裝置要等下次登入才會套用新期限。
+
+### 對伺服器停用金鑰到期
+
+可信任的伺服器、Subnet Router、不方便到現場處理的 IoT 裝置，可以停用金鑰到期：在 Machines 頁面點裝置右邊的選單，選 **Disable Key Expiry**。要恢復就選 **Enable Key Expiry**。
+
+更好的做法是讓伺服器用 [tag](/admin/tags-auth-keys/) 身分登入：tag 身分的裝置第一次登入時，金鑰到期預設就是停用的。
+
+### 重新登入
+
+- **還連得到那台裝置**：執行下面的指令重新驗證，換一把新的金鑰。
+
+  ```bash
+  sudo tailscale up --force-reauth
+  ```
+
+  這個指令可能會中斷 Tailscale 連線，**不要只透過 Tailscale 的 SSH／RDP 遠端執行**，除非你有其他方式能登入那台裝置。
+
+- **只能透過 Tailscale 連到的裝置已經到期**：管理員可以在 Machines 頁面點裝置右邊的選單，選 **Temporarily extend key**（只有金鑰已到期的裝置會出現），把金鑰暫時延長 30 分鐘。在這段時間內連上去重新登入，或直接停用這台裝置的金鑰到期。
+
+## Tailnet Lock
+
+一般情況下，新裝置能不能加入 tailnet 是由 Tailscale 的協調伺服器決定，再由它把新裝置的公鑰發給其他裝置。也就是說，你必須信任 Tailscale 的控制平面不會偷塞節點進來。
+
+**Tailnet Lock** 把這個信任收回自己手上：新裝置的 node key 必須由你指定的**簽署節點**（signing node）簽署，其他裝置會先驗證簽章才接受連線。即使協調伺服器被入侵，攻擊者也無法自己把節點加進你的 tailnet 收送流量。
+
+官方文件標示 Tailnet Lock 適用 Personal 與 Enterprise 方案，以 [方案與限制比較](/getting-started/plans/) 與官方頁面為準。
+
+### 啟用前要知道的限制
+
+- **不能和 device approval 同時開啟**，兩者互斥。
+- 要鎖定的裝置都要是 Tailscale **v1.46.1 以上**。
+- 至少要選**兩台**簽署節點，最多 20 台。
+- **Android 不能當簽署節點**。
+- 簽署用的私鑰存在簽署節點上，那台裝置被入侵，金鑰也可能被取走。
+- Linux 上自己跑 `tailscaled`、或在 Docker 裡用時，要設定 state 目錄（Docker 是 `TS_STATE_DIR`），否則 Tailnet Lock 的資料只能放在記憶體裡，每次啟動都要從控制平面重新抓。
+
+### 啟用流程
+
+1. Owner、Admin 或 IT admin 到 [Device management](https://console.tailscale.com/admin/settings/device-management) 頁面選 **Enable Tailnet Lock**。Admin console 與簽署節點要登入同一個 tailnet。
+2. 在 **Add signing nodes** 選至少兩台簽署節點。建議選自己長期使用、不同類型的裝置，例如一台桌機加一台筆電。
+3. 選擇是否要把一份 disablement secret 交給 Tailscale 客服（見下一節）。
+4. 複製畫面上的 `tailscale lock init` 指令，到其中一台簽署節點的終端機執行。
+5. 指令會顯示 **10 組 disablement secret**，馬上抄下來妥善保存。
+
+完成後，tailnet 裡現有的裝置都會被簽署，之後所有新加入的裝置都要經過簽署才能和其他裝置連線。可以在每台裝置上執行 `tailscale lock status`，確認大家看到的簽署金鑰清單一致。
+
+### Disablement secret
+
+disablement secret 是停用 Tailnet Lock 用的長密碼，**只會在啟用時顯示一次**。停用 Tailnet Lock 時要輸入其中任一組（不用全部 10 組）。
+
+設計成這樣，是因為如果停用不需要任何驗證，被入侵的協調伺服器就能直接關掉 Tailnet Lock。官方建議存進密碼管理工具，或印出來放保險箱。
+
+啟用時可以選擇額外產生一組 secret 交給 Tailscale 客服。這樣萬一自己的 secret 全部遺失，還能請客服協助停用；代價是多了一份不在你手上的 secret，要依自己的信任程度決定。
+
+**官方明確寫到：disablement secret 全部遺失、又沒有交一份給客服的話，tailnet 就無法復原。**
+
+### 新增裝置時怎麼簽署
+
+新裝置登入後，會在 Machines 頁面標示 **Locked out**，要由簽署節點簽署後才能用。有幾種方式：
+
+- **Admin console**：點那台裝置，選 **Sign machine**。在 macOS／Windows 的簽署節點上可以直接選 **Sign this node**；用 iOS 的簽署節點可以掃 QR code；也可以複製簽署連結到簽署節點上開啟。
+- **CLI**：在 Sign machine 的 **CLI** 分頁複製 `tailscale lock sign` 指令（或在新裝置上執行 `tailscale lock status` 取得），到簽署節點上執行：
+
+  ```bash
+  tailscale lock sign nodekey:<新裝置的 node key>
+  ```
+
+- **預先簽署的 auth key**：在簽署節點上用 `tailscale lock sign <auth key>` 簽署一把 auth key，會得到一把新的 key，用它加入的裝置就不必再另外簽署。適合伺服器與自動化部署。
+
+已簽署的裝置之後金鑰到期、重新登入時，新的 node key 會自動重新簽署，不必再找簽署節點。
+
+### 遺失簽署節點的後果
+
+簽署新裝置、新增或移除簽署節點，都要在**現有的簽署節點**上操作。所以：
+
+- 只要還有一台簽署節點，就能用 `tailscale lock add tlpub:<公鑰>` 補上新的簽署節點。
+- 簽署節點**全部遺失**（例如兩台都壞了或重灌了），就沒辦法再簽署任何新裝置。這時只能用 disablement secret 停用 Tailnet Lock，再重新啟用並選新的簽署節點。
+- 如果連 disablement secret 都沒有，就是上面說的「無法復原」。官方另外提供 `tailscale lock local-disable`，讓每台裝置各自忽略 Tailnet Lock，但必須一台一台執行。
+
+簽署節點被入侵時，在其他簽署節點上用 `tailscale lock revoke-keys` 撤銷它的金鑰；這需要多台簽署節點輪流共同簽署，被撤銷金鑰簽過的裝置也要重新簽署。
+
+## 個人 tailnet 建議怎麼設定
+
+- **金鑰到期：保持開啟**。手機、筆電這類可能遺失的裝置，維持預設的 180 天或更短。伺服器、NAS、Subnet Router、Exit Node 改用 tag 身分，或個別停用金鑰到期，避免半年後突然斷線。
+- **device approval：tailnet 裡有其他人時開啟**。只有自己一個人用、帳號又有開兩步驟驗證時，效益有限；有家人、朋友的帳號時，開啟可以確認每台加入的裝置。用 auth key 加入的伺服器記得勾 Pre-approved。
+- **Tailnet Lock：需要時再開**。它防的是「Tailscale 本身被入侵」這種較極端的情境，代價是每台新裝置都要簽署、要妥善保管 disablement secret，而且不能和 device approval 並用。真的要開，至少準備兩台不同的簽署節點（不能是 Android），並把 disablement secret 存在 tailnet 以外的地方。
+
+不論開不開這些功能，最重要的仍是保護登入 Tailscale 用的帳號（Google、GitHub、Microsoft 等）：開啟兩步驟驗證，因為能登入那個帳號的人，就能把裝置加進你的 tailnet。
+
+## 參考資料
+
+- [Device approval（官方）](https://tailscale.com/docs/features/access-control/device-management/device-approval)
+- [Key expiry（官方）](https://tailscale.com/docs/features/access-control/key-expiry)
+- [Tailnet Lock（官方）](https://tailscale.com/docs/features/tailnet-lock)
+- [Tailnet Lock 白皮書（官方）](https://tailscale.com/docs/concepts/tailnet-lock-whitepaper)
