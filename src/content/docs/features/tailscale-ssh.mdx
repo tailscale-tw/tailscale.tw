@@ -77,10 +77,10 @@ sudo tailscale set --ssh
 | `src`         | 從哪裡連：使用者、群組、tag、`user:*@<網域>`、`autogroup:`。不能寫 `*`                    |
 | `dst`         | 連到哪裡：使用者、tag、`autogroup:`。不能寫 `*`，也不能指定連接埠（固定 22）              |
 | `users`       | 允許登入的本機帳號，例如 `root`、`ubuntu`；`autogroup:nonroot` 代表任何非 root 帳號       |
-| `checkPeriod` | 只用於 `check`，多久要重新驗證一次，預設 12 小時                                          |
+| `checkPeriod` | 只用於 `check`，多久要重新驗證一次，預設 12 小時（自訂限 Premium、Enterprise 方案）       |
 | `acceptEnv`   | 允許用戶端用 `SendEnv`／`SetEnv` 傳入的環境變數名稱，可用 `*`、`?`（主機需 v1.76.0 以上） |
 
-`users` 只能使用機器上**已經存在**的帳號，Tailscale 不會自動建立帳號。另外有 `localpart:*@<網域>`：登入帳號是 `dave@example.com` 的人，就以本機的 `dave` 登入。
+`users` 只能使用機器上**已經存在**的帳號，Tailscale 不會自動建立帳號。另外有 `localpart:*@<網域>`：登入帳號是 `dave@example.com` 的人，就以本機的 `dave` 登入；網域不能是 `gmail.com` 這類多人共用的網域。
 
 ### 只允許這幾種連線
 
@@ -94,7 +94,7 @@ sudo tailscale set --ssh
 
 ### 範例：tag 伺服器
 
-讓 `group:admins` 以 `root` 或 `ubuntu` 登入 `tag:server` 的機器，以 `root` 登入時需要每小時重新驗證：
+讓 `group:admins` 以 `root` 或 `ubuntu` 登入 `tag:server` 的機器，以 `root` 登入時需要每小時重新驗證（自訂 `checkPeriod` 需要 Premium 或 Enterprise 方案，其他方案拿掉這一行即使用預設的 12 小時）：
 
 ```json
 {
@@ -141,7 +141,7 @@ policy 也可以寫 `sshTests` 來驗證規則是否如預期。
 
 `action` 設為 `check` 時，連線前要先在瀏覽器重新登入身分提供者（Google、GitHub、Microsoft 等），會一併觸發多因素驗證。
 
-- `checkPeriod` 預設 **12 小時**，可設定 1 分鐘到 168 小時（一週），單位用分鐘或小時，例如 `"30m"`、`"20h"`。
+- `checkPeriod` 預設 **12 小時**。Premium 與 Enterprise 方案可以自訂（見 [方案與限制比較](/getting-started/plans/)），範圍是 1 分鐘到 168 小時（一週），單位用分鐘或小時，例如 `"30m"`、`"20h"`。
 - 也可以設 `"always"`，每次連線都要驗證。但 Ansible 這類短時間開很多連線的工具會因此出問題。
 - 驗證一次之後，在預設的 12 小時內連 tailnet 其他走 check 模式的機器也不用再驗證；有自訂 `checkPeriod` 的規則，則依它自己的期限判斷。
 - check 模式只用於 Tailscale SSH，一般的 SSH 或其他 TCP 連線無法使用。
@@ -199,7 +199,7 @@ sudo tailscale set --ssh=false
 - 只能連到裝了 Tailscale 的機器，[Subnet Router](/features/subnet-router/) 後面的設備不能用 Tailscale SSH。
 - 固定使用 22 埠，無法更改。
 - 重新啟動 `tailscaled`（例如升級 Tailscale）會中斷所有進行中的 Tailscale SSH session。
-- 用戶端不需要本機的 SSH 金鑰，所以**用戶端機器上的任何 OS 使用者**都能以你的 Tailscale 身分 SSH 出去。多人共用的機器、或跑著不信任程式的機器，不適合給它 SSH 出去的權限；可以用 `checkPeriod: "always"` 降低風險。
+- 用戶端不需要本機的 SSH 金鑰，所以**用戶端機器上的任何 OS 使用者**都能以你的 Tailscale 身分 SSH 出去。多人共用的機器、或跑著不信任程式的機器，不適合給它 SSH 出去的權限；可以用 `checkPeriod: "always"` 降低風險（Premium、Enterprise 方案）。
 - 靠 `authorized_keys` 的 `command=` 限制遠端能執行的指令，在 Tailscale SSH 上不適用。
 
 不適合 Tailscale SSH 的情況，仍然可以照舊用 OpenSSH，只是把 Tailscale 當網路層，一樣不用把 SSH 暴露在網際網路上。
