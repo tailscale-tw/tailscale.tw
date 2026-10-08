@@ -1,0 +1,188 @@
+---
+title: 用 tailscale netcheck 與 tailscale ping 診斷連線
+description: 連不上或變慢時，用 tailscale status 看對方狀態、tailscale ping 的四種 ping 判斷問題出在哪一層、tailscale netcheck 看本機網路的 UDP、NAT 與 DERP 延遲，最後用 bugreport 回報
+sidebar:
+  order: 1
+  label: netcheck 與 ping
+---
+
+Tailscale 連不上或很慢時，問題可能出在對方不在線、雙方只能透過 DERP 中繼、作業系統的防火牆，或存取規則。Tailscale CLI 內建的 `status`、`ping`、`netcheck` 三個指令，可以一步步縮小範圍。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件整理，CLI 範例以 Tailscale v1.102 為準。
+
+## 排查順序
+
+1. **`tailscale status`**：對方在不在線、有沒有過期、目前連線走哪一種路徑。
+2. **`tailscale ping`**：兩邊的 `tailscaled` 能不能互通，走直連、Peer Relay 還是 DERP。
+3. **`tailscale ping --tsmp`、`--icmp` 與系統的 `ping`**：分辨問題在 Tailscale 本身，還是對方作業系統。
+4. **`tailscale netcheck`**：檢查本機網路的 UDP、NAT 類型與到各 DERP 區域的延遲。
+5. 以上都正常、服務還是連不到：檢查 [存取規則](/admin/acl-grants/) 與服務本身。
+
+另外先確認兩邊的 Tailscale 都是新版本。Admin console 的 [Machines](https://console.tailscale.com/admin/machines) 頁面可以看到每台裝置的版本，本機用 `tailscale version` 查看。
+
+## `tailscale status`
+
+```bash
+tailscale status
+```
+
+```text
+100.101.102.103  laptop  alice@  macOS    -
+100.64.0.2       nas     alice@  linux    active; direct 203.0.113.5:41641, tx 51060 rx 49092
+100.64.0.3       pi      alice@  linux    active; relay "hkg", tx 1104 rx 980
+100.64.0.4       office  alice@  linux    idle; offers exit node
+100.64.0.5       old-pc  alice@  windows  offline, last seen 3d ago
+```
+
+第一列是本機，其餘是其他裝置。每列依序是 Tailscale IP、機器名稱、擁有者、作業系統與連線狀態。狀態欄的意思：
+
+| 狀態                            | 意思                                                                     |
+| ------------------------------- | ------------------------------------------------------------------------ |
+| `-`                             | 對方在線，但還沒有和它傳過任何資料                                       |
+| `idle`                          | 之前傳過資料，最近沒有                                                   |
+| `active; direct <IP>:<埠>`      | 正在傳資料，**直連**，後面是對方的實際位址                               |
+| `active; relay "<區域>"`        | 正在傳資料，經 **DERP** 中繼，`hkg` 是 DERP 區域代碼（香港）             |
+| `active; peer-relay <位址>`     | 正在傳資料，經 tailnet 裡的 **Peer Relay** 中繼                          |
+| `offline`                       | 對方沒有連上 Tailscale 的控制伺服器，後面的 `last seen` 是最後上線的時間 |
+| `offers exit node`／`exit node` | 對方可以當 Exit Node／正在被這台當 Exit Node 使用                        |
+
+`-` 和 `idle` 不代表有問題，只是沒有流量，所以看不出路徑。先用下一節的 `tailscale ping` 產生流量再看。
+
+另外：
+
+- 清單只列出這台裝置**依存取規則有關係**的裝置。某台裝置沒出現在清單裡，通常是存取規則讓雙方完全沒有往來。
+- 輸出最後如果有 `# Health check:`，代表 `tailscaled` 偵測到問題（例如 DNS 設定、防火牆、金鑰快到期），先處理這些訊息。
+- `tailscale status --active` 只列出正在往來的裝置；`--json` 輸出完整資料，其中 `CurAddr`（直連位址）、`Relay`（DERP 區域）、`PeerRelay`、`Online`、`KeyExpiry` 都很有用，但官方提醒 JSON 格式可能隨版本改變。
+
+## `tailscale ping`
+
+一般的 `ping` 要經過兩邊作業系統的網路堆疊和防火牆，失敗時看不出問題在哪裡。`tailscale ping` 支援四種 ping，各自走到不同的深度：
+
+| 指令                           | 類型    | 測試範圍                                                               |
+| ------------------------------ | ------- | ---------------------------------------------------------------------- |
+| `tailscale ping nas`           | DISCO   | 兩邊的 `tailscaled` 能不能互通，以及走哪一種路徑（預設）               |
+| `tailscale ping --tsmp nas`    | TSMP    | 再多經過 WireGuard 加密通道，但不經過兩邊作業系統的網路堆疊            |
+| `tailscale ping --icmp nas`    | ICMP    | 經過 WireGuard 送出真正的 ICMP，會進到**對方**作業系統的網路堆疊       |
+| `tailscale ping --peerapi nas` | PeerAPI | 對方 `tailscaled` 的 PeerAPI HTTP 伺服器，Taildrop、Serve 等功能會用到 |
+
+`nas` 可以換成機器名稱或 Tailscale IP。
+
+### 預設的 DISCO ping
+
+```bash
+tailscale ping nas
+```
+
+```text
+pong from nas (100.64.0.2) via DERP(hkg) in 38ms
+pong from nas (100.64.0.2) via DERP(hkg) in 36ms
+pong from nas (100.64.0.2) via 203.0.113.5:41641 in 9ms
+```
+
+`via` 後面就是這次走的路徑：
+
+- `via DERP(hkg)`：經香港的 DERP 中繼。
+- `via peer-relay(198.51.100.7:7777:vni:7)`：經 Peer Relay 中繼。
+- `via 203.0.113.5:41641`：直連，後面是對方的位址與連接埠。
+
+連線剛建立時通常先走 DERP，打洞成功後才換成直連，所以前幾次是 DERP 很正常。`tailscale ping` 一看到直連就會停止（`--until-direct`，預設開啟）；送滿 10 次都還沒直連的話，最後會印出 `direct connection not established` 並以錯誤結束。這代表**目前**只能透過中繼連線，連線本身是通的。
+
+常用選項：
+
+- `-c <次數>`：最多送幾次，預設 10，`0` 代表不停送。
+- `--until-direct=false`：直連後也繼續送，用來觀察延遲是否穩定。
+- `--timeout <時間>`：每次等待回應的時間，預設 `5s`。
+- `--verbose`：顯示更多資訊。
+
+### 一層一層縮小範圍
+
+把幾種 ping 和系統的 `ping` 一起跑，就能判斷問題在哪一層：
+
+| `tailscale ping` | `--tsmp` | 系統 `ping 100.x.y.z` | 可能的原因                                                                                           |
+| ---------------- | -------- | --------------------- | ---------------------------------------------------------------------------------------------------- |
+| 逾時             | 逾時     | 失敗                  | 對方不在線、金鑰過期，或雙方之間連 DERP 都不通；回到 `tailscale status`，再跑 `netcheck`             |
+| 成功             | 失敗     | 失敗                  | 較少見：兩邊 `tailscaled` 互通，但封包沒有通過 WireGuard 通道；先更新兩邊版本、重新啟動 `tailscaled` |
+| 成功             | 成功     | 失敗                  | 對方作業系統擋掉了 ICMP，或存取規則不允許                                                            |
+| 成功             | 成功     | 成功                  | Tailscale 這層正常；服務還是連不到，檢查存取規則的連接埠、服務有沒有在聽、對方的防火牆               |
+
+第三種情況最常見：
+
+- **Windows** 的防火牆規則很嚴格，預設連 ICMP 也會擋，要允許 ICMP 的收送。
+- **macOS** 開啟「隱形模式」（stealth mode）時不會回應 ping。
+- Linux 則看 `iptables`／`nftables`、`ufw`、`firewalld` 的規則。
+
+`--icmp` 的 ICMP 會進到對方的作業系統，但不經過本機的作業系統，所以 `--icmp` 成功、系統 `ping` 失敗時，問題比較可能在**本機**。
+
+### 有連線，但大檔案或某些服務卡住
+
+`ping` 都正常，SSH 能登入但傳大檔案卡住、網頁載到一半停住，可能是封包大小的問題。Tailscale 的 MTU 是 `1280`，路徑上如果有其他介面送出更大的封包，可能被默默丟掉。可以用 `tcpdump` 確認，再調低 LAN 的 MTU 或設定 MSS clamping。
+
+## `tailscale netcheck`
+
+`netcheck` 檢查的是**本機所在的網路**，和對方無關：
+
+```bash
+tailscale netcheck
+```
+
+```text
+Report:
+	* Time: 2026-10-08 13:14:32.557201+08:00
+	* UDP: true
+	* IPv4: yes, 203.0.113.10:41641
+	* IPv6: no, but OS has support
+	* MappingVariesByDestIP: false
+	* PortMapping:
+	* CaptivePortal: false
+	* Nearest DERP: Hong Kong
+	* DERP latency:
+		- hkg: 36.6ms  (Hong Kong)
+		- tok: 49.9ms  (Tokyo)
+		- sin: 66.9ms  (Singapore)
+		- lax: 140.5ms (Los Angeles)
+		...
+```
+
+| 欄位                    | 意思與判讀                                                                          |
+| ----------------------- | ----------------------------------------------------------------------------------- |
+| `UDP`                   | 這個網路能不能送 UDP。`false` 時幾乎不可能直連，只能走 DERP                         |
+| `IPv4`／`IPv6`          | 對外的公開位址；IPv6 會標示是網路沒有 IPv6，還是作業系統不支援                      |
+| `MappingVariesByDestIP` | `true` 代表 NAT 會依目的地換不同的對外位址或連接埠（俗稱 hard NAT），直連比較難建立 |
+| `PortMapping`           | 路由器支援的自動開埠協定：`UPnP`、`NAT-PMP`、`PCP`。空白代表都沒有偵測到            |
+| `CaptivePortal`         | 是否偵測到 captive portal（飯店、機場 Wi-Fi 的登入頁）。`true` 時先在瀏覽器完成登入 |
+| `Nearest DERP`          | 延遲最低的 DERP 區域，需要中繼時會用它                                              |
+| `DERP latency`          | 到每個 DERP 區域的延遲                                                              |
+
+欄位空白代表沒有量到這一項。在台灣，最近的 DERP 區域通常是香港（`hkg`）或東京（`tok`），實際依 ISP 的國際線路而定。
+
+比較好的狀況是 `UDP: true`、`MappingVariesByDestIP: false`；如果 `PortMapping` 還有偵測到協定，就更容易直連。反過來，`UDP: false` 或 `MappingVariesByDestIP: true` 時，連線常常只能走 DERP，速度會受影響。
+
+其他選項：
+
+- `--format=json`：輸出 JSON，方便寫腳本。
+- `--every=30s`：每 30 秒重新檢查一次，適合觀察切換網路（例如 Wi-Fi 換到行動網路）的變化。
+
+`netcheck` 的資訊在 Admin console 也看得到：在 [Machines](https://console.tailscale.com/admin/machines) 頁面點進某台機器即可。要查遠端機器的網路狀況時，不用登入那台機器。
+
+## 回報問題：`tailscale bugreport`
+
+自己查不出來、要找 Tailscale 支援或在 GitHub 開 issue 時，**在出問題的裝置上**、問題發生後盡快執行：
+
+```bash
+tailscale bugreport
+```
+
+它會印出一組 `BUG-...` 開頭的識別碼。識別碼本身不含個人資料，只是在診斷日誌上做標記，讓支援人員找到對應時間點的日誌。GUI 版本也能產生：
+
+- **macOS**：選單列圖示 → **Settings** → **About** → **Report an Issue**。
+- **Windows**：按住 `Ctrl` 在系統匣圖示按右鍵 → **Debug** → **Bug report**。
+- **Android**：App 選單的 **Bug report**。
+
+## 參考資料
+
+- [Tailscale CLI：netcheck、ping、status（官方）](https://tailscale.com/docs/reference/tailscale-cli)
+- [Tailscale ping message types（官方）](https://tailscale.com/docs/reference/ping-types)
+- [Can't connect to other tailnet devices（官方）](https://tailscale.com/docs/reference/troubleshooting/connectivity/connect-device-failure)
+- [Troubleshoot TCP connection issues between two devices（官方）](https://tailscale.com/docs/reference/troubleshooting/network-configuration/tcp-connection-two-devices)
+- [Generate a bug report（官方）](https://tailscale.com/docs/account/bug-report)
+- [CLI 指令速查](/getting-started/cli-cheatsheet/)
