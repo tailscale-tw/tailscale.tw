@@ -1,0 +1,163 @@
+---
+title: MagicDNS 與自訂 DNS 設定
+description: MagicDNS 怎麼替 tailnet 裡的裝置自動取名、短名稱與完整名稱的差別，以及 Admin console 的 nameserver、split DNS、search domain、Override DNS servers、Exit Node 下的 DNS 行為與各平台的檢查方法
+sidebar:
+  order: 10
+  label: MagicDNS 與 DNS 設定
+---
+
+Tailscale 會給每台裝置一個固定的 `100.x.y.z` 位址，但沒有人記得住這些數字。**MagicDNS** 會自動替 tailnet 裡的每台裝置登記 DNS 名稱，裝好 Tailscale 之後直接用 `ssh nas`、`http://nas:5000` 連線就好。Admin console 的 DNS 頁面還能設定 tailnet 共用的 DNS 伺服器、指定某些網域交給內網 DNS 解析（split DNS）等。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件整理，CLI 範例以 Tailscale v1.102 為準。
+
+## MagicDNS 的名稱怎麼來
+
+每台裝置的完整名稱（FQDN）由兩段組成：
+
+| 部分             | 例子                  | 說明                                                                                               |
+| ---------------- | --------------------- | -------------------------------------------------------------------------------------------------- |
+| 機器名稱         | `nas`                 | 預設由裝置的 OS hostname 產生，可以在 Admin console 或用 `tailscale set --hostname` 改             |
+| tailnet DNS 名稱 | `tail1234.ts.net`     | 整個 tailnet 共用，在 Admin console 的 [DNS](https://console.tailscale.com/admin/dns) 頁面可以看到 |
+| 完整名稱（FQDN） | `nas.tail1234.ts.net` | 兩者相接                                                                                           |
+
+- 機器名稱在 tailnet 裡不能重複。新裝置的 hostname 和既有裝置撞名時，會變成 `nas-1` 這類名稱，之後就算舊的那台改名，`nas-1` 也不會自動改回來。
+- OS hostname 裡不允許的字元會被轉換，例如 `John's-iPhone-6S.local` 會變成 `johns-iphone-6s`。
+- 改機器名稱時，MagicDNS 名稱會跟著變。不想讓 OS 改 hostname 時連帶改掉名稱，可以在 Admin console 的機器名稱編輯畫面取消 **Auto-generate from OS hostname**。
+
+開啟 MagicDNS 時，Tailscale 會自動把 tailnet DNS 名稱加到 search domain 的第一位，所以 `ping nas` 和 `ping nas.tail1234.ts.net` 是一樣的。
+
+兩個例外要用完整名稱：
+
+- **別人分享給你的裝置**（見 [分享裝置給 tailnet 以外的人](/admin/sharing/)）：出於安全考量，只能用它的完整名稱，例如 `webserver.example2.ts.net`。
+- **HTTPS**：[`tailscale cert`](/features/https-certificates/) 簽的憑證只涵蓋完整名稱，用 `https://nas` 會出現憑證錯誤。
+
+tailnet DNS 名稱預設是 `tail1234.ts.net` 這種形式，可以改成 Tailscale 隨機產生的 `yak-bebop.ts.net` 這類名稱，但目前不能完全自訂。
+
+## 開啟與關閉
+
+2022 年 10 月 20 日以後建立的 tailnet 預設就開啟 MagicDNS，所有方案都能用。要確認或切換，到 Admin console 的 [DNS](https://console.tailscale.com/admin/dns) 頁面看 **MagicDNS** 區塊。
+
+MagicDNS 的開關是整個 tailnet 共用的。只有某台裝置有問題時，沒辦法單獨對它關閉 MagicDNS，只能讓它整個不套用 Tailscale 的 DNS 設定：
+
+| 平台    | 做法                                                                      |
+| ------- | ------------------------------------------------------------------------- |
+| Linux   | `sudo tailscale set --accept-dns=false`                                   |
+| macOS   | 選單列的 Tailscale 圖示 → 取消 **Use Tailscale DNS settings**             |
+| Windows | 按住 `Shift` 在系統匣的 Tailscale 圖示按右鍵 → 取消 **Use Tailscale DNS** |
+
+關掉之後，這台裝置就只能用 Tailscale IP 連其他裝置。[`tailscale ssh`](/features/tailscale-ssh/) 例外，它即使在 `--accept-dns=false` 時也能用 MagicDNS 名稱。
+
+## 100.100.100.100：裝置上的 DNS 轉發器
+
+`tailscaled` 在每台裝置上都有一個 DNS 轉發器，位址是 `100.100.100.100`。它回答 MagicDNS 的名稱，其他查詢再依 Admin console 的設定轉給對應的 nameserver。
+
+各平台把查詢交給它的方式不同：
+
+- **macOS**：在 `/etc/resolver/` 下為 tailnet 網域（以及 split DNS 網域）建立設定，只有這些網域走 `100.100.100.100`，其他查詢照舊。
+- **Windows**：用 Name Resolution Policy Table（NRPT）規則，只把特定網域交給 Tailscale。
+- **Linux**：搭配 systemd-resolved 時可以做到只接管特定網域；沒有 systemd-resolved 等 DNS 管理程式時，`tailscaled` 會直接改寫 `/etc/resolv.conf`，讓所有查詢都經過 `100.100.100.100`。
+
+MagicDNS 不能新增任意的 DNS 紀錄（例如替某個服務多取一個名稱），官方在 [GitHub issue #1543](https://github.com/tailscale/tailscale/issues/1543) 追蹤這項需求。需要自訂名稱時，用下面的 split DNS 交給自己的 DNS 伺服器。
+
+## Nameserver：tailnet 共用的 DNS 伺服器
+
+在 DNS 頁面的 **Nameservers** 可以加兩種 nameserver：
+
+| 種類                               | 處理哪些查詢             | 常見用途                                                              |
+| ---------------------------------- | ------------------------ | --------------------------------------------------------------------- |
+| Global nameserver                  | 所有網域                 | 統一使用 Cloudflare、Google、Quad9、NextDNS、自架的 Pi-hole 等        |
+| Restricted nameserver（split DNS） | 只處理指定網域及其子網域 | 把 `home.example.com` 交給家裡的 DNS，把公司網域交給公司的 DNS 伺服器 |
+
+### Global nameserver 與 Override DNS servers
+
+**預設情況下，裝置還是用自己原本的 DNS 解析一般網域**，只有 MagicDNS 名稱與 split DNS 網域會交給 Tailscale。要讓 tailnet 裡的裝置一律改用你設定的 global nameserver，要打開 **Override DNS servers**：
+
+1. 在 DNS 頁面的 **Nameservers** 加入 global nameserver，例如從下拉選單選 Cloudflare。
+2. 打開 **Override DNS servers**。
+
+幾點要注意：
+
+- 選 Cloudflare、Google 這類公開 DNS 時，Tailscale 會自動改用 **DNS-over-HTTPS（DoH）** 送出查詢。
+- 加入某個供應商的其中一個位址，Tailscale 會把該供應商的所有位址視為同一組一起使用。
+- 多台 nameserver 不保證依你排列的順序查詢。Tailscale 自己代理查詢時會**同時**問所有 nameserver，用最快的回應。如果某台 DNS 會回答其他台沒有的內網名稱，不要把它和公開 DNS 一起當 global nameserver，改用 split DNS。
+- 開 Override 前確認所有裝置都連得到這些 nameserver。用 Tailscale IP 或內網 IP 的 DNS 伺服器，要被存取規則允許，內網 IP 還需要 [Subnet Router](/features/subnet-router/)。連不到的話，整台裝置都會解析不了網域。
+- 用 NextDNS 時不要再加其他 global nameserver，否則被 NextDNS 擋下的查詢可能被其他 nameserver 回答，過濾就失效了。NextDNS 也不能當 split DNS 用。要對不同裝置套用不同 NextDNS 設定檔，在 policy 的 `nodeAttrs` 加上 `nextdns:<設定檔 ID>`。
+
+### Split DNS：指定網域交給特定 DNS
+
+例如家裡的 Pi-hole（`192.168.1.53`）負責 `home.example.com` 的名稱，而這個網段由 Subnet Router 分享到 tailnet：
+
+1. 在 DNS 頁面的 **Nameservers** 區段新增一個自訂的 nameserver，填入 `192.168.1.53`。
+2. 開啟限定網域（split DNS）的選項，填入 `home.example.com`。
+3. 儲存。
+
+之後不論裝置在哪裡，查詢 `nas.home.example.com` 都會經過 Tailscale 送到家裡的 Pi-hole；其他網域照常用裝置原本的 DNS。
+
+Split DNS 也是解決 **DNS rebinding 防護**的建議做法。有些家用路由器、公司或 ISP 的 DNS 會擋掉「回應私有 IP」的結果，如果你把內網名稱放在公開 DNS 上，在外面的網路就可能解析不到。用 split DNS 把這個網域交給你自己的 DNS（或不做這種防護的公開 DNS），就能避開。完整的例子見 [在內網裝置上安裝 Cloudflare 憑證，透過 Subnet Router 安全瀏覽內網網站](/use-cases/internal-https-with-cloudflare/)。
+
+### Search domains
+
+在 **Search Domains** 加入 `home.example.com` 之後，輸入 `nas` 時會依序嘗試 `nas.<tailnet DNS 名稱>`、`nas.home.example.com`。MagicDNS 開啟時，tailnet DNS 名稱固定排在第一位，不能調整。Search domain 需要 Tailscale v1.34 以上。
+
+## 使用 Exit Node 時的 DNS
+
+裝置使用 [Exit Node](/features/exit-node/) 時，**預設所有網域的 DNS 都交給 Exit Node 解析**，不管你設定了什麼 global 或 split DNS nameserver。這樣 DNS 查詢和其他流量一樣從 Exit Node 出去，結果也符合 Exit Node 所在地。
+
+如果某台 nameserver 在使用 Exit Node 時仍然要用（例如公司內網網域的 split DNS），在 DNS 頁面編輯這個 nameserver，打開 **Use with exit node**。
+
+## 確認與除錯
+
+### `tailscale dns status`
+
+v1.74 以上可以用 `tailscale dns status` 查看這台裝置實際拿到的 DNS 設定：
+
+```bash
+tailscale dns status
+```
+
+輸出分成三段：
+
+- **'Use Tailscale DNS' status**：這台裝置有沒有套用 Tailscale 的 DNS 設定（`--accept-dns`）。
+- **MagicDNS configuration**：控制伺服器下發的設定，包括 MagicDNS 是否開啟、這台裝置的完整名稱、**Resolvers**（Override 開啟時的 global nameserver）、**Split DNS Routes** 與 **Search Domains**。
+- **System DNS configuration**：Tailscale 認為作業系統原本使用的 DNS 伺服器。
+
+加上 `--all` 會輸出更多除錯資訊。
+
+### `tailscale dns query`
+
+v1.76 以上可以直接請 `100.100.100.100` 查詢一個名稱，並顯示它把查詢轉給哪一台 nameserver：
+
+```bash
+tailscale dns query nas
+tailscale dns query home.example.com AAAA
+```
+
+### 系統本身的查詢工具
+
+`nslookup` 在部分平台會繞過系統的 DNS 設定，查 MagicDNS 與 split DNS 時會得到錯誤的結果。官方建議：
+
+| 平台    | 指令                                      |
+| ------- | ----------------------------------------- |
+| macOS   | `dscacheutil -q host -a name nas`         |
+| Windows | PowerShell 的 `Resolve-DnsName -Name nas` |
+| Linux   | `nslookup nas`（Linux 上結果正確）        |
+
+macOS 的 `host`、`nslookup` 也會繞過系統 DNS，可能出現 `ping nas` 可以、`host nas` 卻查不到的情況，這不代表 MagicDNS 壞了。
+
+## 常見問題
+
+- **用名稱連不到，用 IP 可以？** 先用 `tailscale dns status` 確認這台裝置有套用 Tailscale DNS、MagicDNS 有開啟；再用上表的指令（不是 `nslookup`）查一次。分享來的裝置記得用完整名稱。
+- **Linux 開了 Tailscale 之後 MagicDNS 時好時壞？** 常見原因是 DHCP 用戶端（例如 `dhclient`）和 `tailscaled` 輪流改寫 `/etc/resolv.conf`。改用 systemd-resolved 或 resolvconf 管理 DNS。同時用 NetworkManager 與 systemd-resolved 時，`/etc/resolv.conf` 應該是指向 `/run/systemd/resolve/stub-resolv.conf` 的 symlink。
+- **Amazon Linux 2023 開了 Tailscale 之後完全不能解析？** `tailscaled` 會把查詢轉給自己，造成迴圈。官方的解法是把 systemd-resolved 改成 stub resolver 模式，見 [Configuring Linux DNS](https://tailscale.com/docs/reference/linux-dns)。
+- **本機已經跑了自己的 DNS 伺服器（例如 Pi-hole 本身）？** 在這台機器上用 `tailscale set --accept-dns=false`，避免 Tailscale 改掉它的 DNS 設定。
+- **可以把 `*.ts.net` 名稱放到公開 DNS 嗎？** 不需要。若想用自己的網域，可以在公開 DNS 放指向 `100.x.y.z` 的紀錄：別人查得到，但 tailnet 以外的人連不到這些位址。只是在有 DNS rebinding 防護的網路上可能解析不到，這時改用 split DNS。
+
+## 參考資料
+
+- [MagicDNS（官方）](https://tailscale.com/docs/features/magicdns)
+- [DNS in Tailscale（官方）](https://tailscale.com/docs/reference/dns-in-tailscale)
+- [Machine names（官方）](https://tailscale.com/docs/concepts/machine-names)
+- [Configuring Linux DNS（官方）](https://tailscale.com/docs/reference/linux-dns)
+- [DNS problems with internal services and DNS rebinding protection（官方）](https://tailscale.com/docs/reference/faq/dns-rebinding)
+- [Use NextDNS（官方）](https://tailscale.com/docs/integrations/nextdns)
+- [tailscale dns（官方 CLI 說明）](https://tailscale.com/docs/reference/tailscale-cli#dns)
