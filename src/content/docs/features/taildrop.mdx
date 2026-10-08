@@ -1,0 +1,154 @@
+---
+title: Taildrop：裝置間傳送檔案
+description: 用 Taildrop 在自己的 Tailscale 裝置之間直接傳檔案：開啟方式、各平台怎麼傳與收、Linux 的 tailscale file 指令與自動接收、NAS 設定與限制
+sidebar:
+  order: 5
+  label: Taildrop
+---
+
+Taildrop 讓你在自己的裝置之間傳檔案，像跨平台的 AirDrop：手機拍的照片丟到電腦、電腦的 PDF 丟到手機、檔案丟到家裡的 Linux 伺服器。檔案走 Tailscale 的加密連線，直接從一台裝置傳到另一台，不經過雲端硬碟或第三方伺服器。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件整理，CLI 範例以 Tailscale v1.102 為準。
+
+## 開啟前先知道的事
+
+- Taildrop 目前仍是 **alpha** 功能，所有方案都能使用，但 tailnet 要先手動開啟。
+- **只能傳給自己的裝置**：同一個帳號登入的裝置之間才能互傳，即使是同一個 tailnet 的其他使用者也不行。
+- **tag 身分的裝置不能用**：用 [tag](/admin/tags-auth-keys/) 登入的伺服器不能傳送或接收 Taildrop 檔案。
+- **被[分享](/admin/sharing/)進來的裝置不能用**。
+- 兩邊都要裝 Tailscale 並連線中。
+- Taildrop 不受 [ACL / grants](/admin/acl-grants/) 限制：只要是你自己登入的裝置，即使存取規則擋掉了彼此的連線，仍然可以互傳檔案。
+
+## 開啟 Taildrop
+
+Owner、Admin 等管理員到 Admin console 的 [General](https://console.tailscale.com/admin/settings/general) 設定頁面，開啟 **Send Files**。
+
+除了 NAS 之外，用戶端不需要額外設定。macOS 第一次使用前要多一個步驟，見下面的說明。
+
+## 傳送檔案
+
+| 平台    | 傳送方式                                                                |
+| ------- | ----------------------------------------------------------------------- |
+| macOS   | 在 Finder 對檔案按右鍵 → **Share**（分享）→ **Tailscale**，選擇目的裝置 |
+| Windows | 對檔案按右鍵 → **Send with Tailscale**                                  |
+| iOS     | 在分享選單選 **Tailscale**，點選目的裝置                                |
+| Android | 按 **Share**（分享）選 **Tailscale**，點選目的裝置                      |
+| Linux   | 用 `tailscale file cp` 指令                                             |
+
+- **macOS**：第一次使用前，要到 **系統設定** → **一般** → **登入項目與延伸功能** → **分享**，勾選 **Tailscale**，右鍵的分享選單才會出現 Tailscale。
+- **iOS／Android**：第一次使用時，Tailscale 可能藏在分享選單的「更多」裡。系統會依使用頻率排序，用過一次之後就會出現在前面。
+
+### Linux：`tailscale file cp`
+
+```bash
+tailscale file cp ./report.pdf my-phone:
+```
+
+最後一個參數是目的裝置的名稱或 Tailscale IP，**後面要加冒號**，用來區分檔名與裝置名稱，寫法類似 `scp`。可以一次傳多個檔案：
+
+```bash
+tailscale file cp ./a.jpg ./b.jpg my-laptop:
+```
+
+不知道有哪些裝置可以傳，用 `--targets` 列出：
+
+```bash
+tailscale file cp --targets
+```
+
+也可以從標準輸入傳送，搭配 `--name` 指定檔名：
+
+```bash
+tar czf - ./project | tailscale file cp --name project.tar.gz - my-laptop:
+```
+
+### 中斷後續傳
+
+傳輸中斷時，重新傳送同一個檔案，Taildrop 會嘗試從中斷的地方繼續，大檔案特別有用。多數情況下，失敗後一小時內都能續傳。目前**接收端是 macOS 或 iOS 時不支援續傳**。
+
+## 接收檔案
+
+| 平台    | 收到的檔案在哪裡                                          |
+| ------- | --------------------------------------------------------- |
+| macOS   | `~/Downloads`                                             |
+| Windows | `C:\Users\<使用者>\Downloads`（v1.34 以前的版本在桌面）   |
+| iOS     | 跳出通知，點開後在「檔案」App 裡                          |
+| Android | 跳出通知，點開後在「檔案」App 的 Downloads                |
+| Linux   | 先放在 Tailscale 的收件匣，要用 `tailscale file get` 取出 |
+| NAS     | 共用資料夾 `Taildrop`（要先設定，見下文）                 |
+
+### Linux：`tailscale file get`
+
+Linux 上的 `tailscaled` 以 root 執行，收到的檔案會先放在 Tailscale 自己的收件匣，要用 `sudo` 取出到指定的目錄：
+
+```bash
+sudo tailscale file get ~/Downloads
+```
+
+常用選項：
+
+| 選項                   | 作用                                             |
+| ---------------------- | ------------------------------------------------ |
+| `--wait`               | 收件匣是空的時候，等到有檔案進來再取出           |
+| `--loop`               | 持續執行，有檔案進來就取出                       |
+| `--conflict=skip`      | 目的地已有同名檔案時跳過，檔案留在收件匣（預設） |
+| `--conflict=overwrite` | 覆蓋同名檔案                                     |
+| `--conflict=rename`    | 改用加上數字的新檔名                             |
+
+### Linux 伺服器自動接收
+
+想讓 Linux 伺服器像桌機一樣自動收檔案，可以用 `--loop` 搭配 systemd 常駐執行。以下是本站的範例，收到的檔案放在 `/srv/taildrop`。建立 `/etc/systemd/system/taildrop-receiver.service`：
+
+```ini
+[Unit]
+Description=Receive Taildrop files
+After=tailscaled.service
+Requires=tailscaled.service
+
+[Service]
+ExecStartPre=/usr/bin/mkdir -p /srv/taildrop
+ExecStart=/usr/bin/tailscale file get --loop --conflict=rename /srv/taildrop
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now taildrop-receiver.service
+```
+
+服務以 root 執行，收到的檔案擁有者也是 root，需要的話再自行調整權限。`tailscale` 的路徑依安裝方式可能不同，用 `which tailscale` 確認。
+
+注意這台伺服器要以**你的帳號**登入 Tailscale，不能是 tag 身分，否則收不到 Taildrop 檔案。
+
+## 在 NAS 上接收
+
+NAS 要先建立一個名為 `Taildrop` 的共用資料夾，收到的檔案會自動放進去。
+
+### Synology
+
+1. 在 DSM 打開 **File Station**，選 **新增** → **新增共用資料夾**，名稱填 `Taildrop`，其他設定依需求完成精靈。
+2. 在 File Station 對 `Taildrop` 資料夾按右鍵 → **內容** → **權限**。
+3. 選擇系統使用者 **tailscale**（這是 Tailscale 套件的系統帳號，不是 tailnet 的使用者），給它讀寫權限，儲存。
+4. 重新啟動 Synology 上的 Tailscale 套件。
+
+### QNAP
+
+在 File Station 新增一個名為 `Taildrop` 的共用資料夾即可。
+
+## 常見問題
+
+- **傳送清單裡看不到某台裝置？** 確認那台裝置是你自己的帳號登入、不是 tag 身分，也不是別人分享給你的裝置，而且目前在線上。
+- **macOS 的分享選單沒有 Tailscale？** 到系統設定的 **登入項目與延伸功能** → **分享** 勾選 Tailscale。
+- **Linux 收不到檔案？** 檔案還在收件匣裡，要執行 `sudo tailscale file get <目錄>` 取出。
+- **檔案會經過 Tailscale 的伺服器嗎？** 和其他 Tailscale 流量一樣，Taildrop 走點對點的加密連線，並使用最快的可用路徑。無法直連時會經由 DERP relay 轉送，但內容仍是端對端加密的，relay 看不到檔案內容。
+- **想傳給別人？** Taildrop 只能傳給自己的裝置。要和別人交換檔案，可以考慮用 [Tailscale Serve](/features/serve/) 在 tailnet 內分享資料夾，或用 [Tailscale Funnel](/features/funnel/) 短暫公開到網際網路。
+
+## 參考資料
+
+- [Taildrop（官方）](https://tailscale.com/docs/features/taildrop)
+- [Taildrop with NAS devices（官方）](https://tailscale.com/docs/features/taildrop/how-to/set-up-taildrop-with-nas)
+- [tailscale file（官方 CLI 說明）](https://tailscale.com/docs/reference/tailscale-cli#file)
