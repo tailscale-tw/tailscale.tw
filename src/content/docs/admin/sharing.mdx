@@ -1,0 +1,126 @@
+---
+title: 分享裝置給 tailnet 以外的人
+description: 用 Tailscale 的裝置分享（node sharing）把單一台機器分享給其他 tailnet 的使用者：怎麼寄送邀請、對方能做與不能做的事、ACL 與 Exit Node、Subnet Router 的行為，以及和邀請使用者、Funnel、Serve 的比較
+sidebar:
+  order: 4
+  label: 分享裝置
+---
+
+想讓朋友連到家裡的 Plex 或 Minecraft 伺服器，又不想把對方拉進自己的 tailnet、也不想公開到網際網路，可以用 Tailscale 的**裝置分享**（node sharing）：把單一台機器分享給另一個 tailnet 的使用者，對方接受後，那台機器就會出現在他自己的 tailnet 裡，而他看不到你的其他裝置。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件整理。
+
+## 分享前先知道的事
+
+- 所有方案都能使用。以連結邀請的分享方式（下面的 email 與連結兩種都是）官方目前標示為 beta，介面與行為可能還會變動。
+- 分享與收回都要由你 tailnet 的 Owner、Admin 或 IT admin 操作；接受分享的人也要是**對方 tailnet** 的 Owner、Admin 或 IT admin。個人 tailnet 的擁有者就是 Owner，一般不用擔心。
+- 只能分享給「使用者」：機器不能分享給 tag，對方 tailnet 裡用 tag 身分登入的機器也連不到分享過去的機器。
+- 被分享的使用者**不會計入你 tailnet 的使用者數**。
+
+## 怎麼分享
+
+在 Admin console 的 [Machines](https://console.tailscale.com/admin/machines) 頁面找到要分享的機器，點右邊的選單選 **Share**，有兩種方式：
+
+- **Share by email**：輸入對方的 email，系統寄出一次性的邀請連結。對方不一定要用同一個 email 的 Tailscale 帳號接受，可以用任何 Tailscale 帳號登入接受。
+- **Copy invite link**：產生連結自己傳給對方。預設是一次性連結；開啟 **Reusable link** 的話，同一個連結最多可以被接受 1,000 次。
+
+不管哪一種，沒用到的邀請連結 **30 天後失效**。邀請連結要當成密碼看待，拿到的人就能接受分享、連到你的機器。
+
+對方打開連結、登入並接受後，你會在 Share 對話框看到對方的頭像與 email，Machines 頁面也會標示這台機器有分享給外部使用者。
+
+## 對方會看到什麼
+
+接受之後，分享的機器就像對方自己 tailnet 裡的裝置一樣，出現在他的 Tailscale 用戶端與 Admin console 中，例如 macOS 的選單列，或 Linux 上的 `tailscale status`。
+
+- **只有接受的那個人看得到**，對方 tailnet 裡的其他使用者看不到這台機器。
+- 機器在對方 tailnet 裡顯示的擁有者是**分享的人**，不一定是機器真正的擁有者。
+- IPv4 位址通常和在你 tailnet 裡的一樣；如果那個位址在對方 tailnet 已經被別台裝置用掉，就會配發另一個位址。
+- **MagicDNS 只能用完整名稱**：要用 `<機器名稱>.<你的 tailnet 名稱>.ts.net` 連線，例如 `minecraft-server.yak-bebop.ts.net`，不能只打 `minecraft-server`。對方要自己在 tailnet 開啟 MagicDNS 才能用名稱連線。
+
+接受分享時，Tailscale 只會揭露最少的資訊：接受者的 email 與頭像（讓你確認是誰接受），以及連線需要的實體 IP。
+
+## 被分享的人能做與不能做的事
+
+### 隔離（quarantine）
+
+分享出去的機器預設是**隔離**的：它可以回應從對方 tailnet 進來的連線，但**不能主動連到對方的裝置**。所以對方接受分享不會讓自己的 tailnet 暴露在風險中。
+
+如果需要雙向連線，例如你和朋友的工作站要互相連，就**互相分享**：你把你的機器分享給對方，對方也把他的機器分享給你。
+
+### Subnet Router 與 Exit Node
+
+- **Subnet Router 的路由不會一起分享**：分享一台 [Subnet Router](/features/subnet-router/)，對方只能連到那台機器本身，連不到它後面的區網。要讓對方存取子網路，只能邀請對方加入你的 tailnet。
+- **Exit Node 可以分享**：先把機器設成 [Exit Node](/features/exit-node/) 並在 Admin console 核准（有設定 `autoApprovers` 則免），分享時勾選 **Allow use as an exit node**，對方就能用它當出口。
+
+### 其他限制
+
+- 不能用 [Taildrop](https://tailscale.com/docs/features/taildrop) 傳檔案。
+- 不能把新裝置加進你的 tailnet。
+- 你的 tag、群組與子網路資訊不會帶到對方 tailnet，對方的 policy 也不能引用你的 tag。
+
+## ACL 對分享的影響
+
+分享的連線同時受**兩邊 tailnet** 的存取規則限制。預設的 policy 允許這種連線；只要任一邊改過 policy，就要確認規則有放行。
+
+在你的 tailnet 裡，可以用對方的 email 或 `autogroup:shared` 寫規則（語法見 [ACL / Grants 入門](/admin/acl-grants/)）。例如只讓所有被分享的使用者連 80 與 443 連接埠：
+
+```json
+"grants": [
+  // 管理員可以連所有裝置
+  {
+    "src": ["group:admins"],
+    "dst": ["*"],
+    "ip": ["*"],
+  },
+  // 被分享的使用者只能連分享給他的機器的 80、443
+  {
+    "src": ["autogroup:shared"],
+    "dst": ["*"],
+    "ip": ["80", "443"],
+  },
+],
+```
+
+`"dst": ["*"]` 看起來像是開放所有機器，但被分享的使用者本來就只連得到分享給他的機器，這條規則只是再把連接埠限縮到 80 與 443。
+
+反過來要小心 `"src": ["*"]` 這類規則：它會套用到所有能連進你 tailnet 的人，**包含被分享的使用者**。官方建議改用一個包含所有成員的群組；也可以用 `autogroup:member`，它不包含只接受了裝置分享的人。
+
+## 和其他做法的比較
+
+| 做法                                  | 對象                    | 能連到什麼                                               | 適合                                      |
+| ------------------------------------- | ----------------------- | -------------------------------------------------------- | ----------------------------------------- |
+| **裝置分享**                          | 特定的 Tailscale 使用者 | 分享給他的機器（受雙方 ACL 限制）                        | 給朋友連 Plex、遊戲伺服器、給外包連開發機 |
+| **邀請加入 tailnet**                  | 特定的人                | 整個 tailnet（受 ACL 限制），含 Subnet Router 後面的區網 | 家人、長期合作的人，需要的裝置會越來越多  |
+| [Tailscale Funnel](/features/funnel/) | 任何拿到網址的人        | 單一服務，透過公開的 HTTPS 網址                          | 短期展示、接收 webhook                    |
+| [Tailscale Serve](/features/serve/)   | 自己 tailnet 內的人     | 單一服務，以 tailnet 內的 HTTPS 網址提供                 | 在 tailnet 內分享開發中的網站或資料夾     |
+
+邀請使用者加入 tailnet 的差別：
+
+- **會增加使用者數**。Personal 方案最多 6 位使用者，付費方案則依使用者計費（見 [方案與限制比較](/getting-started/plans/)）。
+- 可以指定對方的角色、用群組管理權限、讓他使用 Taildrop、新增自己的裝置。
+- 邀請方式是 Admin console 的 [Users](https://console.tailscale.com/admin/users) 頁面 → **Invite external users**，未使用的邀請同樣 30 天失效。
+
+簡單來說：只分享一兩台固定的機器、對方也有自己的 tailnet，用裝置分享；對方需要的範圍會變大、或要連區網裡的設備，就邀請加入；對方根本不用 Tailscale，用 Funnel。
+
+## 收回分享
+
+到 [Machines](https://console.tailscale.com/admin/machines) 頁面，點那台機器的選單選 **Share**，在 Share 對話框裡的選單選 **Revoke invite**。已接受的分享與尚未接受的邀請都能這樣收回。收回後對方就連不到這台機器；之後要恢復，得重新寄送邀請，讓對方再接受一次。
+
+另外要注意：
+
+- 刪除你 tailnet 裡的某個使用者時，**他管理的分享機器也會一起刪除**；停權（suspend）的話，他管理的分享機器無法再和其他機器連線。
+- 你的 tailnet 有開 [Tailnet Lock](/admin/device-security/) 時，對方接受分享的裝置要先在你的 tailnet 裡簽署，才連得到分享的機器；反過來，分享進一個有開 Tailnet Lock 的 tailnet 的機器，也要先在對方那邊簽署。
+
+## 疑難排解
+
+找得到分享的機器卻連不上：
+
+- 用名稱連線的話，確認自己的 tailnet 有開 MagicDNS，並且用的是完整的 `.ts.net` 名稱。
+- 檢查自己 tailnet 的存取規則有沒有擋掉；沒有的話，請分享的人檢查他那邊的規則。
+
+## 參考資料
+
+- [Share your machines with other users（官方）](https://tailscale.com/docs/features/sharing)
+- [Inviting users vs sharing a device（官方）](https://tailscale.com/docs/reference/inviting-vs-sharing)
+- [Funnel vs. sharing devices（官方）](https://tailscale.com/docs/reference/funnel-vs-sharing)
+- [Invite any user to your tailnet（官方）](https://tailscale.com/docs/features/sharing/how-to/invite-any-user)
