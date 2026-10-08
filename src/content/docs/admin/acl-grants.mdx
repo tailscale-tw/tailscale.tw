@@ -60,7 +60,7 @@ tailnet 的存取規則都寫在一份 **tailnet policy file** 裡，格式是 [
 - **在各裝置本機執行**：規則由控制平面下發，每台裝置自己過濾進來的封包。
 - **不影響區網**：規則只管走 Tailscale 的流量，裝置在自己區網上能連到什麼不受影響。
 
-另外 [Taildrop](https://tailscale.com/docs/features/taildrop) 可以在同一個人的裝置之間傳檔，不受存取規則限制。
+另外 [Taildrop](https://tailscale.com/docs/features/taildrop) 可以在同一個人的裝置之間傳檔，不受存取規則限制；但打了 tag 的裝置（例如下面的 `tag:nas`）不能用 Taildrop 收送檔案。
 
 ## ACL 與 grants
 
