@@ -83,16 +83,16 @@ sudo derper --hostname=derp.example.com
 
 常用選項：
 
-| 選項               | 說明                                                                   |
-| ------------------ | ---------------------------------------------------------------------- |
-| `--hostname`       | 這台 DERP 的網域名稱，用於申請憑證                                     |
-| `--certmode`       | 憑證來源：`letsencrypt`（預設）、`manual`（自備憑證）、`gcp`           |
-| `--certdir`        | 憑證目錄；`manual` 模式會讀這裡的 `<hostname>.crt` 與 `<hostname>.key` |
-| `-a`               | HTTPS 監聽位址，預設 `:443`                                            |
-| `--http-port`      | HTTP 埠，預設 `80`，`-1` 停用                                          |
-| `--stun-port`      | STUN 埠，預設 `3478`                                                   |
-| `-c`               | 設定檔（伺服器私鑰）的路徑                                             |
-| `--verify-clients` | 只允許自己 tailnet 的裝置使用，見後面的說明                            |
+| 選項               | 說明                                                                                             |
+| ------------------ | ------------------------------------------------------------------------------------------------ |
+| `--hostname`       | 這台 DERP 的網域名稱，用於申請憑證                                                               |
+| `--certmode`       | 憑證來源：`letsencrypt`（預設）、`manual`（自備憑證）、`gcp`                                     |
+| `--certdir`        | 憑證目錄；`manual` 模式會讀這裡的 `<hostname>.crt` 與 `<hostname>.key`                           |
+| `-a`               | HTTP／HTTPS 監聽位址，預設 `:443`；埠是 443 或 `--certmode=manual` 時才提供 HTTPS，否則只有 HTTP |
+| `--http-port`      | HTTP 埠，預設 `80`，`-1` 停用                                                                    |
+| `--stun-port`      | STUN 埠，預設 `3478`                                                                             |
+| `-c`               | 設定檔（伺服器私鑰）的路徑                                                                       |
+| `--verify-clients` | 只允許自己 tailnet 的裝置使用，見後面的說明                                                      |
 
 ### 用 systemd 常駐
 
