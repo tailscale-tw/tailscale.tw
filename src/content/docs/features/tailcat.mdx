@@ -1,0 +1,191 @@
+---
+title: Tailcat：不用帳號、不用 tailnet 的臨時加密連線
+description: Tailcat 是 Tailscale 推出的 netcat 風格工具，用 Tailscale 的資料平面在兩台機器之間建立加密連線，不需要帳號或 tailnet：安裝、傳資料與檔案、轉送連接埠、SSH、金鑰與安全注意事項
+sidebar:
+  order: 6
+  label: Tailcat
+---
+
+有時候只是想把一個檔案丟到朋友的機器、讓 AI 代理連到某台測試機做一件事、或臨時 SSH 進一台開發環境一小時，為此建一個 tailnet、登入帳號、設定 ACL 都嫌太重。**Tailcat** 就是為這種情況做的：一邊執行後拿到一串 tailcat 位址，把位址交給另一邊，就能建立加密連線。不用帳號、不用登入、沒有 tailnet，也沒有 IP 位址。
+
+> 本文以 tailcat v0.7.0（2026 年 9 月）為準，依 GitHub README 與官方網頁整理。Tailcat 目前仍是實驗性工具，指令與參數可能隨版本變動。
+
+## Tailcat 是什麼
+
+Tailcat 是 Tailscale 開源的命令列工具（BSD-3-Clause 授權），行為像 [netcat](https://en.wikipedia.org/wiki/Netcat)，但連線走的是 Tailscale 的**資料平面**：
+
+- **WireGuard** 加密所有流量（使用者空間實作，不建立 TUN 網卡）。
+- **magicsock** 負責 NAT traversal，盡量打洞建立點對點直連。
+- **DERP relay** 用來交換連線資訊，直連失敗時也當成最後的轉送路徑。
+
+它**沒有 Tailscale 的控制平面**：沒有帳號、使用者、管理員、policy，也不會改機器的路由表或 DNS，所以不需要 root 權限。原本由控制平面交換的連線資訊，改成放在 tailcat 位址裡，由你自己用任何方式交給對方。
+
+## 使用流程
+
+1. **Listen**：在要被連的那台機器執行 tailcat，它會印出一串以 `tc` 開頭的 tailcat 位址。
+2. **Share**：用安全的管道把位址交給要連線的人、機器或 AI 代理。
+3. **Connect**：另一台用這個位址連線。能直連就直連，不行的話經 tailcat relay 轉送。
+
+tailcat 位址裡包含伺服器的 WireGuard 公鑰、預設還有一把 pre-shared key，以及要使用的 DERP relay 資訊。**拿到位址就能連線，所以要把它當成密碼**。
+
+## 安裝
+
+| 平台    | 安裝方式                                                                      |
+| ------- | ----------------------------------------------------------------------------- |
+| macOS   | `brew install tailcat`                                                        |
+| Windows | `scoop install tailcat`，或下載 Releases 頁面的 zip                           |
+| Linux   | Releases 頁面的靜態執行檔、`.deb`、`.rpm`（amd64、arm64、armv7），或 Nix、AUR |
+| 其他    | 有 Go 的話：`go install github.com/tailscale/tailcat/cmd/tailcat@latest`      |
+
+也有容器映像檔 `ghcr.io/tailscale/tailcat`。完整方式見 [INSTALL.md](https://github.com/tailscale/tailcat/blob/main/INSTALL.md)，執行檔在 [Releases](https://github.com/tailscale/tailcat/releases) 頁面。
+
+## 基本用法
+
+以下的 `tcXXXXXXXXX` 代表伺服器印出的 tailcat 位址，實際上是一長串字元。
+
+### 用 pipe 傳資料
+
+伺服器端直接執行 `tailcat`，等待連線：
+
+```bash
+tailcat
+# 🐈 Server listening with new address: tcXXXXXXXXX
+```
+
+用戶端把資料 pipe 給它，伺服器端就會在標準輸出印出收到的內容：
+
+```bash
+echo hello | tailcat tcXXXXXXXXX
+```
+
+傳一個目錄可以搭配 `tar`：
+
+```bash
+# 伺服器端：收下並解開
+tailcat | tar xzf -
+
+# 用戶端：打包後送出
+tar czf - ./project | tailcat tcXXXXXXXXX
+```
+
+### 傳檔案
+
+接收的一方開一個收件夾：
+
+```bash
+tailcat recv ~/inbox
+```
+
+傳送的一方用 `tailcat cp`，位址後面加冒號：
+
+```bash
+tailcat cp report.pdf tcXXXXXXXXX:
+```
+
+`tailcat cp` 實際上是呼叫系統的 `scp`，所以有進度顯示，也能用 `-r` 傳整個目錄。收件夾只能寫入：傳送方看不到目錄內容，也不能讀取或覆蓋既有檔案。
+
+反過來要提供檔案讓別人下載，用 `serve files`（預設唯讀，分享目前目錄）：
+
+```bash
+tailcat serve files
+```
+
+```bash
+tailcat ls -l tcXXXXXXXXX
+tailcat cp tcXXXXXXXXX:report.pdf .
+```
+
+傳輸不會壓縮，大檔案可以先自己壓縮再傳。
+
+### 分享本機的連接埠
+
+把伺服器上的 8080 與 3306 連接埠透過 tailcat 提供出去：
+
+```bash
+tailcat serve 8080,3306
+```
+
+用戶端用 `forward` 把它們變成本機的連接埠，瀏覽器、資料庫工具就能直接連：
+
+```bash
+# 本機 18080 → 伺服器 8080；本機 3306 → 伺服器 3306
+tailcat forward tcXXXXXXXXX 18080:8080 3306
+```
+
+只是要用瀏覽器看伺服器上 80 埠的網站，可以直接：
+
+```bash
+tailcat browse tcXXXXXXXXX
+```
+
+`forward` 預設只聽 `127.0.0.1`；要讓區網內其他機器也能連，才加 `--bind=0.0.0.0`。
+
+### SSH
+
+Tailcat 內建 SSH 伺服器，不需要另外開 `sshd`。建議要求公鑰驗證，金鑰可以來自 `authorized_keys` 檔案或 GitHub 帳號：
+
+```bash
+# 伺服器端：只接受 alice 在 GitHub 上公開的金鑰
+tailcat serve --ssh-authorized-keys=alice@github ssh
+```
+
+```bash
+# 用戶端
+tailcat ssh tcXXXXXXXXX
+```
+
+另外有不驗證的 `no-auth-ssh` 模式，連線只靠 tailcat 位址：**拿到位址的人就能以執行 tailcat 的使用者身分取得 shell**。只在自己用、而且位址只經私人管道傳遞時才考慮使用。
+
+### 其他
+
+- `tailcat ping --until-direct tcXXXXXXXXX`：測試連線，並顯示每次回應是經 DERP 還是直連。
+- `tailcat socks tcXXXXXXXXX curl http://...`：讓指令經 SOCKS5 走 tailcat 通道。
+- `tailcat serve exit-node`：讓用戶端透過這台伺服器連到它所在的網路。這等於把伺服器的網路開給對方，只給信任的人使用。
+
+## 金鑰與安全
+
+### 位址就是密碼
+
+官方的說法是：把 tailcat 位址當密碼看待，不要寫進 log、不要 commit 到版本控制，也不要公開貼出。
+
+### 預設金鑰是一次性的
+
+- **預設（ephemeral）**：每次執行都在記憶體產生新的金鑰，印出一個沒人看過的位址；程式結束，金鑰就丟掉，這個位址也永久失效。
+- **儲存的金鑰**：`tailcat genkey` 會把金鑰存到磁碟（`~/.config/tailcat/keys/`），讓位址在重新啟動後維持不變。代價是**任何曾經拿到這個位址的人，以後都還能連線**，這時應該用 `tailcat serve --allow=nodekey:...` 限定只接受特定用戶端的金鑰。
+
+要注意的是，`genkey` 產生名為 `default` 的金鑰之後，`tailcat` 就會**自動使用它**，不再產生一次性金鑰。tailcat 啟動時會印出用的是哪一種（`new address` 或 `saved key "default"`），要臨時改回一次性金鑰可加 `--key=new`。
+
+### 不是匿名服務
+
+Tailcat 不需要帳號，但並非完全匿名：連線雙方會交換公鑰，公鑰就代表節點的身分。官方託管的 relay 會**保留 metadata log**，並不是為隱私設計的。
+
+### 對方不一定可信
+
+官方的 SECURITY.md 坦白寫到，tailcat 最初是設計給「自己連自己」用的，威脅模型還沒有完整涵蓋雙方互不信任的情境。從不信任的人那裡拿到位址，或要把 shell、可寫入的目錄、exit node 開給不信任的人時，都要特別小心。
+
+## Relay 的限制
+
+- 官方免費的 relay 有**速率限制**，不適合大流量傳輸，也沒有 SLA，官方保留隨時停止提供的權利。
+- 通常 NAT traversal 都能成功建立直連，流量不經 relay；兩邊都在嚴格的 NAT 後面時，才會一直走 relay 而變慢。
+- 可以[自架 DERP](https://github.com/tailscale/tailscale/tree/main/cmd/derper#derp)，用 `tailcat genkey --region=derp.example.com` 讓位址指向自己的 relay，就完全不經過 Tailscale 的伺服器。
+
+## 和 Tailscale 怎麼選
+
+|          | Tailcat                      | Tailscale                                      |
+| -------- | ---------------------------- | ---------------------------------------------- |
+| 帳號     | 不需要                       | 需要                                           |
+| 身分     | 只有金鑰                     | 使用者、裝置、tag                              |
+| 存取控制 | 位址本身、`--allow` 金鑰清單 | [ACL / grants](/admin/acl-grants/)、裝置核准等 |
+| 稽核     | 無                           | 有                                             |
+| 適合     | 臨時、一次性的兩台機器連線   | 長期、多人多裝置、需要管控的網路               |
+
+官方的建議很直接：需要可管控、長期的網路就用 Tailscale；只是要快速連一下，就用 Tailcat。Tailcat 不是 Tailscale 的替代品，兩者可以並存：自己的裝置放在 tailnet 裡，臨時要和 tailnet 以外的人或機器連線時用 Tailcat。
+
+如果對方也有 Tailscale，想長期連到你的某台機器，可以考慮[分享裝置](/admin/sharing/)；只是自己的裝置之間傳檔案，用 [Taildrop](/features/taildrop/) 即可。
+
+## 參考資料
+
+- [Tailcat（官方網頁）](https://tailscale.com/tailcat)
+- [Tailcat 介紹文章（官方 blog）](https://tailscale.com/blog/tailcat)
+- [tailscale/tailcat（GitHub）](https://github.com/tailscale/tailcat)
+- [SECURITY.md（威脅模型）](https://github.com/tailscale/tailcat/blob/main/SECURITY.md)
