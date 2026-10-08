@@ -1,0 +1,204 @@
+---
+title: 直連與 DERP 中繼：為什麼連線變慢、怎麼改善
+description: Tailscale 的三種連線方式（直連、Peer Relay、DERP）差在哪裡、什麼網路條件會讓連線只能走 DERP，以及開放 UDP 41641、UPnP／NAT-PMP、避免雙層 NAT、Peer Relay 等改善方法
+sidebar:
+  order: 2
+  label: 直連與 DERP 中繼
+---
+
+Tailscale 兩台裝置之間的速度，最大的差別在於有沒有**直連**。直連時封包直接在兩台裝置之間傳送；直連失敗時，封包會經過中繼伺服器轉送，延遲變高、速度變慢。官方文件也指出，能直連卻走了中繼，是 tailnet 裡效能問題最常見的原因。
+
+這篇說明連線方式的差別、哪些網路條件會讓直連失敗，以及可以怎麼改善。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件整理，CLI 範例以 Tailscale v1.102 為準。
+
+## 三種連線方式
+
+| 方式           | 封包怎麼走                                        | 效能                             |
+| -------------- | ------------------------------------------------- | -------------------------------- |
+| **直連**       | 兩台裝置直接用 UDP 互傳                           | 延遲最低、速度最快               |
+| **Peer Relay** | 經 tailnet 裡一台你指定的裝置轉送（UDP）          | 多一跳，但通常比 DERP 快         |
+| **DERP**       | 經 Tailscale 營運的 DERP 伺服器轉送（HTTPS，TCP） | 延遲較高、頻寬有限，是最後的備援 |
+
+三種方式都經過 WireGuard 端對端加密，中繼只轉送加密過的封包，看不到內容，差別在效能，不是安全性。
+
+### 連線怎麼建立
+
+1. 每台裝置都會連上一個延遲最低的 DERP 區域（home DERP）。
+2. 連線一開始先經 DERP 傳送，同時兩台裝置透過 DERP 交換彼此的位址，嘗試 NAT 穿透（打洞）。
+3. 打洞成功就換成直連。
+4. 失敗的話，如果 tailnet 有設定雙方都能用的 Peer Relay，就改走 Peer Relay。
+5. 都不行就繼續走 DERP。
+6. 之後 Tailscale 會定期重新嘗試直連；網路改變時，原本的直連也可能退回中繼。
+
+所以連線剛建立時走 DERP 是正常的，持續走 DERP 才需要處理。
+
+### 為什麼 DERP 比較慢
+
+- 封包要繞到 DERP 伺服器再回來。在台灣，最近的 DERP 區域通常是香港（`hkg`）或東京（`tok`），即使兩台裝置都在台灣，封包也要先出國再回來。
+- DERP 為了讓所有使用者公平分享，會**限制頻寬**。
+- DERP 走 TCP（HTTPS，443 埠）。Subnet Router、Exit Node 這類替很多連線轉送流量的裝置走 DERP 時，所有流量擠在同一條 TCP 連線上，一個封包遺失就會卡住後面所有封包（head-of-line blocking），延遲敏感的流量（例如 DNS 查詢）可能逾時。
+
+## 先確認現在走哪一種
+
+在其中一台裝置執行：
+
+```bash
+tailscale ping nas
+```
+
+最後一行是 `via <IP>:<埠>` 代表直連；`via DERP(hkg)` 是 DERP；`via peer-relay(...)` 是 Peer Relay。送滿 10 次還沒直連，會印出 `direct connection not established`。
+
+再用 `tailscale netcheck` 分別檢查**兩台裝置**所在的網路，看 `UDP` 與 `MappingVariesByDestIP`。各欄位的意思與更多判讀方法見 [用 tailscale netcheck 與 tailscale ping 診斷連線](/troubleshooting/netcheck-and-ping/)。
+
+`tailscale status` 也能判斷問題在哪一邊：如果這台裝置跟所有裝置都只能走 `relay`，問題多半在**這台**的網路；如果跟有些裝置能 `direct`、有些只能 `relay`，問題比較可能在**對方**的網路。
+
+## 為什麼直連會失敗
+
+### UDP 被擋
+
+直連只能用 UDP。公司、學校、飯店、公共 Wi-Fi 的防火牆如果擋掉 UDP、只開放 TCP 80／443，就不可能直連，只能走 DERP（DERP 走 443 埠，所以還是連得上）。`netcheck` 會顯示 `UDP: false`。
+
+### Hard NAT
+
+NAT 依照對外連線時的行為，大致分成兩種：
+
+- **Easy NAT**：同一個內部位址與連接埠連到任何目的地，對外都用同一個位址與連接埠。對方容易預測，打洞容易成功。
+- **Hard NAT**：連到不同目的地時，對外的連接埠會改變。`netcheck` 會顯示 `MappingVariesByDestIP: true`。
+
+只有一邊是 hard NAT，另一邊條件好（有公開 IP、開了 UDP 埠或 easy NAT）時，通常還是能直連；**兩邊都是 hard NAT** 時，就幾乎只能走中繼。
+
+常見的 hard NAT 來源：
+
+- **企業防火牆**：官方整理過幾個廠牌的狀況，例如 Fortinet、Cisco、Palo Alto Networks、pfSense／OPNsense 預設常常只能走中繼，各有不同的解法，見 [Using Tailscale with your firewall](https://tailscale.com/docs/integrations/firewalls)。
+- **雲端的 NAT gateway**：例如 AWS 的 NAT gateway，行為常常像 hard NAT。
+- **電信業者的 CGNAT**：行動網路和部分固網業者不會給你公開 IP，而是讓很多用戶共用一個公開 IP（Carrier-grade NAT）。
+
+### 雙層 NAT
+
+家裡如果是「業者的數據機兼路由器」後面再接自己的路由器，就有兩層 NAT；業者使用 CGNAT 時，等於外面又多一層。每多一層，打洞的難度就多一分，而且下一節的 UPnP／NAT-PMP 只能在你控制的那一層開埠，外層的 NAT 不受影響。
+
+判斷方式：進路由器的管理頁面看 WAN 端的 IP。如果是 `192.168.x.x`、`10.x.x.x`、`172.16.x.x`～`172.31.x.x` 這類私有位址，代表上面還有一層 NAT；如果是 `100.64.x.x`～`100.127.x.x`，則是業者的 CGNAT。
+
+## 改善方法
+
+### 開放 UDP 41641
+
+`tailscaled` 預設用 **UDP 41641** 收發直連的 WireGuard 封包。在**有公開 IP** 的裝置上允許外部連進這個埠，其他裝置就能直接連到它。例如 Ubuntu 的 `ufw`：
+
+```bash
+sudo ufw allow 41641/udp
+```
+
+裝置在路由器後面的話，在路由器設定一條**連接埠轉送**，把 UDP 41641 轉到這台裝置。同一個網路裡有多台裝置要這樣做時，每台要用不同的埠（見下面的「固定埠」）。
+
+公司防火牆的出站規則，官方建議至少允許：
+
+| 方向 | 協定與連接埠                | 用途                                                 |
+| ---- | --------------------------- | ---------------------------------------------------- |
+| 出站 | TCP `443` 到任何目的地      | 控制伺服器與 DERP                                    |
+| 出站 | UDP 從 `41641` 到任何目的地 | 直連的 WireGuard 封包                                |
+| 出站 | UDP `3478` 到任何目的地     | STUN，用來查自己的公開位址並判斷 NAT 類型            |
+| 出站 | TCP `80` 到任何目的地       | 控制伺服器（優先使用）與 captive portal 偵測，非必要 |
+
+DERP 伺服器會增加，所以官方建議目的地用「任何」，不要列舉 IP，以免日後新增的 DERP 伺服器被擋，造成某幾對裝置莫名其妙連不上。
+
+### 打開路由器的 UPnP、NAT-PMP 或 PCP
+
+路由器支援 UPnP、NAT-PMP 或 PCP 的話，Tailscale 會自動向路由器要一個對外的連接埠，不用手動設定連接埠轉送。`netcheck` 的 `PortMapping` 會列出偵測到的協定。
+
+要注意的是，這些協定讓區網裡**任何程式**都能自行在路由器上開埠，不只 Tailscale。官方也提醒這是安全與延遲之間的取捨，公司網路要評估是否適合。
+
+### 固定埠：`--port`
+
+`tailscaled` 的 `--port` 可以改用其他 UDP 埠，`0` 代表自動選擇。設好連接埠轉送之後，要確保 `tailscaled` 一直用同一個埠。
+
+- **Linux**：在 `/etc/default/tailscaled` 的 `FLAGS` 加上 `--port=41642`，再重新啟動 `tailscaled`。
+- **Windows**：在 `C:\ProgramData\Tailscale\tailscaled-env.txt` 加上 `PORT=41642`。
+
+同一個區網裡有好幾台 Tailscale 裝置都要開連接埠轉送時，每台設定不同的埠即可。
+
+反過來，有些企業防火牆在很多台裝置都用 41641 時表現不好，例如官方建議 Fortinet 的環境在存取規則加上 `"randomizeClientPort": true`，讓裝置改用隨機的連接埠。
+
+### 避免雙層 NAT
+
+- 把業者的數據機改成**橋接模式**（bridge），讓自己的路由器直接撥號，只留一層 NAT。
+- 或在業者的設備上設定 DMZ／連接埠轉送到自己的路由器。
+- 業者使用 CGNAT 時，可以詢問業者能否改配公開 IP（通常要另外申請或付費）。
+
+### 設定 Peer Relay
+
+沒辦法改網路設定（例如公司或雲端環境），可以在 tailnet 裡找一台網路條件好的裝置當 **Peer Relay**，讓連不上直連的裝置改經它轉送。它在你自己的網路或主機上，通常比繞到國外的 DERP 快很多。
+
+- 當 Peer Relay 的裝置與使用它的裝置都要 **Tailscale v1.86 以上**；Peer Relay 不能是 iOS、Apple TV 或 Android。
+- 所有方案都能使用。
+
+**步驟一**：在要當 Peer Relay 的裝置上指定一個 UDP 埠：
+
+```bash
+tailscale set --relay-server-port=40000
+```
+
+這個埠要讓其他裝置連得到；在路由器後面的話，同樣要設定連接埠轉送。
+
+**步驟二**：在 Admin console 的 [Access controls](https://console.tailscale.com/admin/acls/file) 加上 grant，用 `tailscale.com/cap/relay` 指定誰可以用這台 Peer Relay：
+
+```json
+{
+  "grants": [
+    {
+      "src": ["tag:office"],
+      "dst": ["tag:relay"],
+      "app": {
+        "tailscale.com/cap/relay": []
+      }
+    }
+  ]
+}
+```
+
+- `src`：在嚴格 NAT 後面、需要透過 Peer Relay 連線的裝置，例如辦公室或雲端裡的機器。
+- `dst`：當 Peer Relay 的裝置。
+
+官方建議 `src` 不要用 `*`，也不要放常常換網路的筆電或手機，否則所有裝置都會嘗試經過 Peer Relay，反而繞遠路。Tag 的用法見 [Tags 與 auth key](/admin/tags-auth-keys/)。
+
+設定好之後產生一些流量，再用 `tailscale status | grep peer-relay` 或 `tailscale ping` 確認。要停用時執行 `tailscale set --relay-server-port=""`。
+
+## DERP 區域
+
+DERP 伺服器分布在世界各地。亞太地區目前有：
+
+| 代碼  | 區域     |
+| ----- | -------- |
+| `hkg` | 香港     |
+| `tok` | 東京     |
+| `sin` | 新加坡   |
+| `blr` | 班加羅爾 |
+| `syd` | 雪梨     |
+
+完整清單見 [DERP servers](https://tailscale.com/docs/reference/derp-servers) 或 [DERP map](https://login.tailscale.com/derpmap/default)。目前在台灣沒有 DERP 伺服器。
+
+每台裝置會依 `netcheck` 量到的延遲自動選擇 home DERP，不需要手動設定。走 DERP 時，封包會送到**對方的 home DERP** 再轉給對方，所以兩邊選到的區域不同時（例如一台選香港、一台選東京），延遲可能比預期高。
+
+管理員可以在存取規則的 `derpMap` 把某個區域設成 `null`，讓整個 tailnet 不再使用該區域，但一般不需要這樣做。
+
+### 自架 DERP
+
+Tailscale 可以自架 DERP 伺服器（`cmd/derper`），讓中繼的延遲更低，但官方認為大多數情況不需要這麼做：
+
+- 要自己建置、部署、更新，維運成本高。
+- 自架的 DERP 不支援裝置分享等跨 tailnet 的功能，也無法享有控制平面的某些最佳化。
+- DERP 看不到加密的內容，對網路除錯沒有幫助。
+
+只是想讓中繼快一點的話，官方建議先設定 **Peer Relay**：一樣在自己的網路裡、延遲低，維護也簡單得多。
+
+## 參考資料
+
+- [Connection types（官方）](https://tailscale.com/docs/reference/connection-types)
+- [DERP servers（官方）](https://tailscale.com/docs/reference/derp-servers)
+- [Tailscale Peer Relays（官方）](https://tailscale.com/docs/features/peer-relay)
+- [What firewall ports should I open to use Tailscale?（官方）](https://tailscale.com/docs/reference/faq/firewall-ports)
+- [Using Tailscale with your firewall（官方）](https://tailscale.com/docs/integrations/firewalls)
+- [Troubleshoot hard NAT issues（官方）](https://tailscale.com/docs/reference/troubleshooting/network-configuration/hard-nat-issues)
+- [How NAT traversal works（官方 blog）](https://tailscale.com/blog/how-nat-traversal-works)
+- [Tailscale 是什麼](/getting-started/what-is-tailscale/)
