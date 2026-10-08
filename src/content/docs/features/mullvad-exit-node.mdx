@@ -1,0 +1,146 @@
+---
+title: Mullvad Exit Node：用 Mullvad 的伺服器當出口
+description: Tailscale 的 Mullvad VPN 加購方案：和自架 Exit Node 的差別、價格與授權、用 Admin console 或 nodeAttrs 指定裝置、各平台選擇國家與城市、tailscale exit-node list 與 set、限制與隱私
+sidebar:
+  order: 9
+  label: Mullvad Exit Node
+---
+
+[Exit Node](/features/exit-node/) 讓裝置的網際網路流量從 tailnet 裡的另一台機器出去，但前提是你在那個地方有一台機器。想在咖啡廳的公用 Wi-Fi 上保護流量、或用日本、美國的 IP 上網，又沒有在當地放機器，可以加購 **Mullvad VPN**：直接把 [Mullvad](https://mullvad.net/) 在全球各地的 VPN 伺服器當成 Exit Node 使用，不用另外裝 Mullvad 的 App。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件整理，CLI 範例以 Tailscale v1.102 為準。這個功能目前仍是 beta。
+
+## 和自架 Exit Node 的差別
+
+|           | 自架 Exit Node                    | Mullvad Exit Node                        |
+| --------- | --------------------------------- | ---------------------------------------- |
+| 出口在哪  | 你自己的機器（家裡、VPS 等）      | Mullvad 的伺服器，約 50 個國家           |
+| 對外的 IP | 那台機器的 IP，例如家裡的 IP      | Mullvad 的 IP，可以選國家與城市          |
+| 費用      | 機器與網路的成本                  | 加購費用，見下一節                       |
+| 設定      | 開 IP forwarding、廣告、核准      | 購買後指定哪些裝置可以用                 |
+| 用途      | 在外面用家裡的 IP、連回家裡的服務 | 公用 Wi-Fi 的隱私保護、換到其他國家的 IP |
+
+選了 Mullvad Exit Node 之後，只有**網際網路**的流量會經過 Mullvad；連 tailnet 裡其他裝置的流量照常走 Tailscale，不受影響。
+
+Mullvad 目前**沒有台灣的伺服器**（依 2026 年 10 月 Mullvad 的伺服器清單），離台灣最近的是東京、大阪、香港與新加坡。要用台灣的 IP 出去，還是要自架 Exit Node，例如放在家裡的一台機器。
+
+## 價格與授權
+
+- **US$5／月，每 5 台裝置**。這是另外加購的方案，免費的 Personal 方案也能買。
+- Personal 與 GitHub Community 方案可以選月繳或年繳；Standard、Premium 只能月繳；Enterprise 要洽業務。
+- 依裝置計算，不是依使用者：一個人的筆電與手機都要用，就占 2 台。
+- 少數國家與地區不能購買，詳見官方文件。購買後可以使用所有的 Mullvad 伺服器。
+
+方案的比較見 [方案與限制比較](/getting-started/plans/)。
+
+## 購買
+
+由 Owner、Admin 等管理員在 Admin console 操作：
+
+1. 打開 [General](https://console.tailscale.com/admin/settings/general) 設定頁面，捲到 **Mullvad VPN**。
+2. 選 **Configure**，完成結帳流程。
+
+之後要增加授權，到 [Billing](https://console.tailscale.com/admin/settings/billing) 頁面選 **Manage add-ons**。用 GitOps 管理 policy 的 tailnet，結帳流程可能被鎖住，也從 Billing 頁面處理。
+
+## 指定哪些裝置可以用
+
+買了之後，還要指定哪些裝置可以使用 Mullvad Exit Node。有兩種方式，**只能擇一**：用 policy 管理的話，就要全部用 policy 管理。
+
+### 用 Admin console
+
+在 General 設定頁面的 **Mullvad VPN** 選 **Configure** → **Add devices**，勾選裝置後儲存。每台裝置占用一個名額，月費會跟著增加或減少的裝置自動調整。要收回，在同一頁按 **Remove**。
+
+### 用 policy 的 `nodeAttrs`
+
+在 [Access controls](https://console.tailscale.com/admin/acls) 頁面的 policy 加上 `mullvad` 屬性，例如讓 `alice@example.com` 的所有裝置都能使用：
+
+```json
+"nodeAttrs": [
+  {
+    "target": ["alice@example.com"],
+    "attr": ["mullvad"],
+  },
+],
+```
+
+也可以指定群組，例如 `"target": ["group:family"]`。語法基礎見 [ACL / Grants 入門](/admin/acl-grants/)。
+
+用 policy 管理時，可以指定的裝置數比買的名額還多，大家**共用名額**。要注意的是，名額在裝置**連上 tailnet 時**就依先到先得分配，而不是在使用 Mullvad 時才分配。名額用完之後，其他裝置的 Exit Node 清單裡就看不到 Mullvad 的伺服器，要等某台裝置把名額釋出（從 policy 或設定裡移除）。所以買的名額最好還是足夠涵蓋平常會用的裝置。
+
+用 policy 管理的裝置，不會出現在 Admin console 的 Mullvad 設定頁面上。
+
+## 選擇出口
+
+裝置取得使用權後，每台裝置要各自選擇 Exit Node。第一次使用可能要等一下，最多約兩分鐘，Mullvad 的伺服器才會出現在清單上。
+
+| 平台    | 怎麼選                                                                                        |
+| ------- | --------------------------------------------------------------------------------------------- |
+| macOS   | 選單列的 Tailscale 選單 → **Exit Nodes** → **Location Based Exit Nodes** → **Countries**      |
+| Windows | 系統匣的 Tailscale 選單 → **Exit Nodes** → **Location Based Exit Nodes** → **Location Based** |
+| iOS     | **Exit Nodes** → **Location Based**，選國家或城市                                             |
+| Android | 選單的 **Use exit node**，選 Mullvad 的伺服器                                                 |
+| tvOS    | Apple TV 的 Tailscale App 也能選 Mullvad 的出口                                               |
+
+Windows 的圖形介面不會列出完整的 Mullvad 伺服器清單，要指定特定的伺服器時，改用 CLI。
+
+### Linux 與 CLI
+
+先列出可用的出口：
+
+```bash
+tailscale exit-node list
+```
+
+輸出包含 IP、名稱、國家、城市與狀態。沒有指定國家時，每個城市只列出優先順序最高的一台，國家有多個城市時還會多一個 `Any`。Mullvad 伺服器的名稱像 `jp-tyo-wg-001.mullvad.ts.net`。要看某個國家的完整清單，用 `--filter` 指定國家名稱：
+
+```bash
+tailscale exit-node list --filter=Japan
+```
+
+選定之後用 `tailscale set` 切換（名稱或 IP 都可以，用名稱要開啟 MagicDNS）：
+
+```bash
+sudo tailscale set --exit-node=jp-tyo-wg-001.mullvad.ts.net
+
+# 同時保留連本地區網的能力
+sudo tailscale set --exit-node=jp-tyo-wg-001.mullvad.ts.net --exit-node-allow-lan-access=true
+
+# 停用
+sudo tailscale set --exit-node=
+```
+
+`tailscale exit-node suggest` 會建議目前最適合的出口，Mullvad 伺服器也在建議範圍內。
+
+設定好之後，打開 Mullvad 的 [連線檢查頁面](https://mullvad.net/check) 就能確認流量是否經過 Mullvad。
+
+## 隱私
+
+使用 Mullvad Exit Node 時，Tailscale 會替你建立、管理 Mullvad 帳號，所以和直接用 Mullvad App 的隱私模型不同：
+
+- **Mullvad 不會拿到你的身分**：Tailscale 不把使用者資訊交給 Mullvad，Mullvad 只看得到有一台裝置連到它的伺服器。
+- **Tailscale 知道誰在用哪個 Mullvad 帳號**：Tailscale 本來就是綁身分的服務，帳號一定連到 email 或 GitHub 帳號，沒有匿名的 tailnet。
+- **Tailscale 從日誌可以知道哪台裝置連到哪台 Mullvad 伺服器**，但看不到流量內容。裝置關閉用戶端日誌的話，Tailscale 就看不到它用了哪台 Mullvad 伺服器。
+
+換句話說，這適合「不想讓公用 Wi-Fi、ISP 或網站看到真實 IP」的需求；需要對 VPN 服務商本身也保持匿名的話，直接用 Mullvad 的 App 比較合適。
+
+## 限制
+
+- 不能和[自訂 DERP 伺服器](https://tailscale.com/docs/reference/derp-servers/custom-derp-servers)一起使用。
+- 用 policy 管理使用權時，不能使用從 Google 同步的群組。
+- tailnet 開了 [Tailnet Lock](/admin/device-security/) 的話，每台 Mullvad 伺服器都要簽署才能使用，而且要在有 Mullvad 使用權的裝置上簽署。官方提供了[批次簽署的腳本](https://github.com/tailscale-support/mullvad-script)。
+- Admin console 與 policy 兩種管理方式不能混用。
+- Tailscale v1.48.1 與 v1.48.2 使用 Mullvad 時可能會無法解析 DNS，v1.48.3 以上不需要額外設定。
+
+## 常見問題
+
+- **原本有裝 Mullvad App，要改用這個？** 先在 Mullvad App 停用 VPN，並關掉 **Block connections without VPN**，否則可能會擋掉 Tailscale 的連線。
+- **用了 Mullvad 之後連不到家裡的印表機或 NAS？** 和一般 Exit Node 一樣，預設連不到本地區網，開啟 [允許本地區網存取](/features/exit-node/#連本地區網exit-node-allow-lan-access) 即可。
+- **清單裡沒有 Mullvad 的伺服器？** 確認這台裝置已經在 Admin console 或 `nodeAttrs` 取得使用權；用 policy 共用名額時，也可能是名額已經用完。
+- **不想再用了？** Owner、Admin 或 Billing admin 到 [Billing](https://console.tailscale.com/admin/settings/billing) 頁面選 **Manage add-ons** → **Mullvad VPN** → **Remove add-on**。
+
+## 參考資料
+
+- [Mullvad exit nodes（官方）](https://tailscale.com/docs/features/exit-nodes/mullvad-exit-nodes)
+- [Tailscale + Mullvad（官方網頁）](https://tailscale.com/mullvad)
+- [Mullvad on Tailscale: Privately browse the web（官方 blog）](https://tailscale.com/blog/mullvad-integration)
+- [Servers（Mullvad 伺服器清單）](https://mullvad.net/servers)
