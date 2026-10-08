@@ -1,0 +1,210 @@
+---
+title: 在內網裝置上安裝 Cloudflare 憑證，透過 Subnet Router 安全瀏覽內網網站
+description: 用放在 Cloudflare 的網域與 acme.sh 的 DNS-01 驗證，替 NAS、PVE 等內網服務簽發瀏覽器信任的 HTTPS 憑證並自動更新，再搭配 Subnet Router 在外面用同一個網址連回內網
+sidebar:
+  order: 1
+  label: 內網 HTTPS（Cloudflare）
+---
+
+家裡的 NAS、PVE、路由器、Home Assistant 都有網頁介面，但平常只能用 `http://192.168.1.10` 或自簽憑證開啟，瀏覽器一直跳警告。這篇的目標是：
+
+- 每個內網服務都有一個好記的名稱，例如 `nas.home.example.com`。
+- 用瀏覽器信任的公開憑證開啟，不再跳警告。
+- 在外面透過 Tailscale 的 [Subnet Router](/features/subnet-router/) 用同一個網址連回去，服務本身完全不必對外開放。
+
+> 本文依 2026 年 10 月的 acme.sh v3.1.6、Cloudflare 與 Tailscale 官方文件整理。
+
+## 先釐清：這裡的「Cloudflare 憑證」是什麼
+
+這篇用的是**經過 Cloudflare DNS 驗證、由 Let's Encrypt 簽發的公開憑證**，Cloudflare 在這裡只負責 DNS。
+
+Cloudflare 另外有一種 **Origin CA 憑證**，它只有在流量經過 Cloudflare 代理時才被信任，瀏覽器直接連內網會跳警告，不適用這個情境。
+
+## 架構
+
+```
+外面的筆電（Tailscale）
+  │  https://nas.home.example.com → 192.168.1.10
+  ▼
+Subnet Router（家裡，廣告 192.168.1.0/24）
+  ▼
+NAS 192.168.1.10（裝了 *.home.example.com 的憑證）
+```
+
+- **憑證**：用 ACME 的 DNS-01 驗證簽發。驗證時只要在 Cloudflare 上新增一筆 TXT 紀錄，Let's Encrypt 不需要連到你的服務，所以**不用對外開任何連接埠**。
+- **名稱解析**：`nas.home.example.com` 解析成內網 IP `192.168.1.10`。
+- **連線**：在家裡直接連；在外面，連到 `192.168.1.10` 的流量經由 Subnet Router 進入內網。
+
+## 前置條件
+
+- 一個 DNS 放在 Cloudflare 的網域（下面以 `example.com` 為例）。
+- 內網有一台 Linux 主機負責簽發與更新憑證，可以就是 Subnet Router 本身。
+- 已經設定好 [Subnet Router](/features/subnet-router/)，並在 Admin console 核准了內網網段的路由。
+
+## 1. 規劃名稱
+
+建議替內網服務另外切一層子網域，例如 `home.example.com`，再簽一張**萬用字元憑證** `*.home.example.com`：
+
+- 一張憑證就能給所有內網服務用，新增服務不必重簽。
+- 所有公開憑證都會記錄在公開的 [Certificate Transparency](https://certificate.transparency.dev/) log 裡，任何人都查得到。用萬用字元憑證時，log 只會出現 `*.home.example.com`，不會洩漏 `nas`、`pve` 這些個別主機名稱。
+
+萬用字元只涵蓋一層：`*.home.example.com` 適用 `nas.home.example.com`，不適用 `a.nas.home.example.com`。
+
+## 2. 決定 DNS 的做法
+
+瀏覽器要能把 `nas.home.example.com` 解析成 `192.168.1.10`，有兩種做法。
+
+### 做法 A：公開 DNS 直接指向私有 IP
+
+在 Cloudflare 新增 A 紀錄 `nas.home` → `192.168.1.10`，**Proxy status 要設成 DNS only（灰色雲朵）**，Cloudflare 的代理連不到你的內網。
+
+- 優點：最簡單，在家裡、在外面都用同一筆紀錄，不必額外架 DNS。
+- 缺點：內網的 IP 規劃會被公開查到；而且如果用萬用字元憑證是為了隱藏主機名稱，這裡把每筆紀錄都公開就前功盡棄了。
+- 注意：有些家用路由器、公司或 ISP 的 DNS 伺服器開了 **DNS rebinding 防護**，會擋掉「回應私有 IP」的 DNS 結果。不只是家裡，你在外面所在網路的 DNS 也可能這樣做，結果就是解析不到。官方建議的解法之一，是在 Tailscale 用 split DNS 把 `home.example.com` 指定給不做這種過濾的公開 DNS（例如 `1.1.1.1`）查詢，設定方式和下面的做法 B 相同，只是 nameserver 換成公開 DNS。
+
+### 做法 B：內網 DNS 搭配 Tailscale 的 split DNS
+
+公開 DNS 不放任何 `home.example.com` 的紀錄，改在內網的 DNS 伺服器（例如 Pi-hole、AdGuard Home、路由器的 DNS）設定這些名稱。在外面的裝置則透過 Tailscale 的 split DNS 查詢內網 DNS：
+
+1. 打開 Admin console 的 [DNS](https://console.tailscale.com/admin/dns) 頁面，在 **Nameservers** 區段新增一個自訂的 nameserver。
+2. 填入內網 DNS 伺服器的 IP（例如 `192.168.1.2`，要在 Subnet Router 廣告的網段內，裝置才連得到）。
+3. 開啟限定網域（split DNS）的選項，填入 `home.example.com`。
+
+之後 tailnet 裡的裝置只有查詢 `*.home.example.com` 時會問這台內網 DNS，其他網域照常。
+
+- 優點：主機名稱與內網 IP 都不會出現在公開 DNS。
+- 缺點：要多維護一台內網 DNS。
+
+測試 split DNS 時，官方提醒 Windows 的 `nslookup` 不會遵守 Tailscale 的 split DNS 規則，會得到錯誤的結果，改用 PowerShell 的 `Resolve-DnsName`；macOS 則用 `dscacheutil -q host -a name nas.home.example.com`。
+
+## 3. 建立 Cloudflare API token
+
+acme.sh 要透過 Cloudflare API 新增驗證用的 TXT 紀錄。不要用 Global API Key，改建一把權限最小的 API token：
+
+1. 到 Cloudflare 的 [User API Tokens](https://dash.cloudflare.com/profile/api-tokens) 頁面，選 **Create Token**，用 **Edit zone DNS** 範本或自訂。
+2. **Permissions** 只給 **Zone → DNS → Edit**。
+3. **Zone Resources** 只選 `example.com` 這一個 zone。
+4. 可以再用 **Client IP Address Filtering** 限制只有家裡的對外 IP 能使用。
+5. 建立後複製 token。到 `example.com` 的 Overview 頁面，右側 **API** 區塊可以找到 **Zone ID**。
+
+## 4. 安裝 acme.sh 並簽發憑證
+
+在負責簽發的 Linux 主機上，切換成 root 安裝 acme.sh。安裝程式會在 `~/.acme.sh/` 建立程式與設定，並加一個每天執行的 cron job 檢查是否需要續期：
+
+```bash
+sudo -i
+curl https://get.acme.sh | sh -s email=you@example.com
+exit
+sudo -i   # 重新登入讓 acme.sh 的 alias 生效
+```
+
+**acme.sh 預設的 CA 是 ZeroSSL**，這裡改用 Let's Encrypt：
+
+```bash
+acme.sh --set-default-ca --server letsencrypt
+```
+
+設定 Cloudflare 的 token 與 Zone ID，然後簽發：
+
+```bash
+export CF_Token="<API token>"
+export CF_Zone_ID="<Zone ID>"
+acme.sh --issue --dns dns_cf -d 'home.example.com' -d '*.home.example.com'
+```
+
+`CF_Token` 與 `CF_Zone_ID` 會存進 `~/.acme.sh/account.conf`，之後續期會自動沿用，不必每次重新設定。
+
+## 5. 把憑證安裝到內網裝置
+
+acme.sh 官方提醒，**不要直接引用 `~/.acme.sh/` 裡的憑證檔案**，那是內部使用的目錄，結構可能改變。要用 `--install-cert` 或 deploy hook 把憑證放到目標位置；這兩種方式的設定都會被記住，之後每次續期都會自動重做。
+
+### 本機的 nginx 等服務
+
+用 `--install-cert` 複製到 nginx 讀取的路徑，並指定續期後要執行的 `--reloadcmd`：
+
+```bash
+acme.sh --install-cert -d home.example.com \
+  --key-file       /etc/nginx/ssl/home.example.com.key \
+  --fullchain-file /etc/nginx/ssl/home.example.com.crt \
+  --reloadcmd      "systemctl reload nginx"
+```
+
+沒設定正確的 `--reloadcmd`，憑證雖然續期了，服務仍會繼續用舊的憑證直到過期。
+
+### Synology DSM
+
+acme.sh 內建 `synology_dsm` deploy hook。官方推薦的做法是在 DSM 本機執行 acme.sh 並使用臨時管理員帳號，就不必把自己的管理員密碼存在磁碟上：
+
+```bash
+export SYNO_USE_TEMP_ADMIN=1
+acme.sh --deploy -d home.example.com --deploy-hook synology_dsm
+```
+
+臨時管理員的方式只能在 DSM 本機使用。從其他主機部署時要改用 `SYNO_USERNAME`、`SYNO_PASSWORD` 指定帳號，細節見 acme.sh 的 [deploy hook 說明](https://github.com/acmesh-official/acme.sh/wiki/deployhooks)。
+
+### Proxmox VE
+
+`proxmoxve` deploy hook 透過 PVE API 上傳憑證，要先在 PVE 建立一把具備 `Sys.Modify` 權限的 API token：
+
+```bash
+export DEPLOY_PROXMOXVE_SERVER=pve.home.example.com
+export DEPLOY_PROXMOXVE_USER=root
+export DEPLOY_PROXMOXVE_USER_REALM=pam
+export DEPLOY_PROXMOXVE_API_TOKEN_NAME=acme
+export DEPLOY_PROXMOXVE_API_TOKEN_KEY=<API token>
+acme.sh --deploy -d home.example.com --deploy-hook proxmoxve
+```
+
+### 其他設備
+
+- acme.sh 還有 `ssh`（透過 SSH 複製到遠端主機並執行指令）、`routeros`、`unifi`、`truenas`、`openmediavault` 等 deploy hook，完整清單見 [deploy hook 說明](https://github.com/acmesh-official/acme.sh/wiki/deployhooks)。
+- 路由器、IoT 這類**不能自己換憑證**的設備，可以在內網架一台反向代理（nginx、Caddy 等）掛上萬用字元憑證，由它代為轉送到設備的 HTTP 介面。
+
+## 6. 確認自動續期
+
+```bash
+acme.sh --list
+```
+
+可以看到憑證的建立時間與下次續期時間。acme.sh 預設每 30 天續期一次（CA 透過 ARI 建議提早時會更早），續期時會自動重跑上面設定過的 `--install-cert` 與 deploy hook。
+
+想立刻測試整個流程，可以強制續期一次：
+
+```bash
+acme.sh --renew -d home.example.com --force
+```
+
+`--force` 會真的向 Let's Encrypt 申請新憑證，測試一兩次就好，避免碰到速率限制。
+
+## 7. 在外面透過 Subnet Router 連回來
+
+Subnet Router 設定好之後，外面的裝置只要連上 Tailscale，就能直接開 `https://nas.home.example.com`：
+
+- 名稱依照第 2 步的做法解析成 `192.168.1.10`。
+- 往 `192.168.1.0/24` 的流量經由 Subnet Router 進入內網。
+- NAS 回傳 `*.home.example.com` 的憑證，瀏覽器不會跳警告。
+
+Linux 用戶端預設不接受 subnet route，要執行 `sudo tailscale set --accept-routes`，其他平台預設就會接受，見 [Subnet Router](/features/subnet-router/) 一文。
+
+如果你有寫 [ACL / grants](/admin/acl-grants/)，記得放行要連的內網位址與連接埠，例如只開放 `192.168.1.10` 的 `tcp:443`。
+
+## 安全考量
+
+- **API token 等於能改你的 DNS**：只給單一 zone 的 DNS Edit 權限，並限制來源 IP；token 存在簽發主機的 `~/.acme.sh/account.conf`，這台主機要妥善保護。
+- **主機名稱會被公開**：Certificate Transparency log 是公開的，用萬用字元憑證可以避免個別名稱外洩；選做法 A 的話，公開 DNS 本身就會洩漏名稱與內網 IP。
+- **私鑰會散布到多台設備**：萬用字元憑證的私鑰部署到越多設備，任何一台被入侵，攻擊者就能用這把私鑰冒充 `*.home.example.com` 底下的任何名稱。重要的服務可以另外簽單一名稱的憑證。
+- **不需要對外開放**：整個流程沒有開任何對外連接埠，服務只在內網與 tailnet 裡看得到。
+
+## 常見問題
+
+- **在外面開不了，在家裡可以？** 先確認裝置有連上 Tailscale、有接受 subnet route。如果外面所在的網路也是 `192.168.1.0/24`，會和家裡的網段衝突，建議家裡改用比較少見的網段，例如 `192.168.77.0/24`。
+- **解析不到名稱？** 做法 A 的話，多半是所在網路的 DNS rebinding 防護擋掉了私有 IP 的回應，見第 2 步的說明與官方的 [DNS rebinding 說明](https://tailscale.com/docs/reference/faq/dns-rebinding)。
+- **裝了 Tailscale 的設備有沒有更簡單的做法？** 設備本身能跑 Tailscale 的話，也可以用 Tailscale 自己的 `*.ts.net` 憑證，見 [Tailscale Serve](/features/serve/)、PVE 的 [憑證自動更新](/pve/auto-renew-tailscale-certificate-on-pve/) 與 [在 Synology NAS 上安裝 Tailscale 憑證](/synology/install-tailscale-certificate-on-synology/)。本文的做法適合設備沒裝 Tailscale、或想用自己網域的情況。
+
+## 參考資料
+
+- [acme.sh：Cloudflare DNS API（dns_cf）](https://github.com/acmesh-official/acme.sh/wiki/dnsapi#dns_cf)
+- [acme.sh：deploy hooks](https://github.com/acmesh-official/acme.sh/wiki/deployhooks)
+- [acme.sh：切換預設 CA](https://github.com/acmesh-official/acme.sh/wiki/Server)
+- [Subnet routers（Tailscale 官方）](https://tailscale.com/docs/features/subnet-routers)
+- [DNS in Tailscale（Tailscale 官方）](https://tailscale.com/docs/reference/dns-in-tailscale)
