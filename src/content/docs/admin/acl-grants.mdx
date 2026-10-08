@@ -1,0 +1,258 @@
+---
+title: ACL / Grants 入門：限制誰能連到哪裡
+description: 認識 tailnet policy file、預設全開的規則、ACL 與 grants 的差別，用 group、tag、autogroup 寫出只開放必要連線的規則，並用 tests 防止改壞
+sidebar:
+  order: 1
+  label: ACL / Grants 入門
+---
+
+剛建好的 tailnet 預設是**全開**的：每台裝置都能連到其他每台裝置的任何連接埠。自己一個人用沒什麼問題，但只要加入了家人、同事、伺服器或像 [Codex Cloud](/platforms/codex-cloud/) 這種自動化節點，就該決定「誰能連到哪裡」。這篇介紹 Tailscale 的存取控制怎麼寫。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件整理。存取規則在 Tailscale 的控制平面處理，和用戶端版本無關，所有方案都能使用 ACL 與 grants。
+
+## Tailnet policy file
+
+tailnet 的存取規則都寫在一份 **tailnet policy file** 裡，格式是 [HuJSON](https://github.com/tailscale/hujson)：就是 JSON，但允許 `//` 註解和結尾多一個逗號。這份檔案可以在 Admin console 的 [Access controls](https://console.tailscale.com/admin/acls) 頁面編輯（有視覺化編輯器和 JSON 編輯器兩種模式），也可以用 [GitOps](https://tailscale.com/docs/gitops) 或 API 管理。
+
+常用的區段：
+
+| 區段            | 用途                                                                     |
+| --------------- | ------------------------------------------------------------------------ |
+| `grants`        | 存取規則（建議的寫法）                                                   |
+| `acls`          | 舊式存取規則，仍可使用                                                   |
+| `groups`        | 把使用者分組，例如 `group:family`                                        |
+| `tagOwners`     | 定義有哪些 tag、誰可以把 tag 套到裝置上                                  |
+| `hosts`         | 替 IP 或網段取好記的名字                                                 |
+| `tests`         | 存取規則的測試，存檔時不通過就拒絕                                       |
+| `ssh`           | [Tailscale SSH](https://tailscale.com/docs/features/tailscale-ssh) 規則  |
+| `autoApprovers` | 自動核准 [Subnet Router](/features/subnet-router/) 路由與 Exit Node 宣告 |
+| `nodeAttrs`     | 替裝置加上屬性，例如 [Funnel](/features/funnel/) 需要的 `funnel`         |
+
+### 預設的規則
+
+新 tailnet 的預設 policy 長這樣：
+
+```json
+{
+  "acls": [{ "action": "accept", "src": ["*"], "dst": ["*:*"] }],
+  "ssh": [
+    {
+      "action": "check",
+      "src": ["autogroup:member"],
+      "dst": ["autogroup:self"],
+      "users": ["autogroup:nonroot", "root"]
+    }
+  ]
+}
+```
+
+第一條讓所有裝置互連；第二條讓每個人能用 Tailscale SSH 連自己的裝置（check 模式，要重新驗證身分）。
+
+要特別注意的是**空的和沒寫不一樣**：policy 裡完全沒有 `acls` 區段時，Tailscale 會套用上面的預設全開規則；要全部拒絕，得明確寫 `"acls": []`。官方的 grants 範例都只寫 `grants` 區段，自己改寫時建議搭配下面的 `tests`，確認改完的效果符合預期。
+
+## 規則怎麼運作
+
+不論 ACL 或 grants，規則都有這幾個特性：
+
+- **預設拒絕**：只有被某條規則明確放行的連線才會通，沒有「拒絕」規則可寫。
+- **規則取聯集**：多條規則同時符合時，權限是全部加起來。寫得比較細的規則**不會**蓋掉寬鬆的規則，所以只要留著一條 `*` 到 `*` 的全開規則，其他限制都等於沒有作用。
+- **有方向性**：允許 A 連 B，不代表 B 能主動連 A；但 A 連過去之後，B 的回應封包可以正常回來。
+- **在各裝置本機執行**：規則由控制平面下發，每台裝置自己過濾進來的封包。
+- **不影響區網**：規則只管走 Tailscale 的流量，裝置在自己區網上能連到什麼不受影響。
+
+另外 [Taildrop](https://tailscale.com/docs/features/taildrop) 可以在同一個人的裝置之間傳檔，不受存取規則限制；但打了 tag 的裝置（例如下面的 `tag:nas`）不能用 Taildrop 收送檔案。
+
+## ACL 與 grants
+
+Tailscale 有兩種寫法：舊的 **ACL**（`acls` 區段）與新的 **grants**（`grants` 區段）。兩者可以同時存在同一份 policy 裡。
+
+|            | ACL                                                    | Grants                                                        |
+| ---------- | ------------------------------------------------------ | ------------------------------------------------------------- |
+| 寫法       | `"action": "accept"`、`src`、`dst` 裡帶連接埠（`*:*`） | `src`、`dst`、`ip`（連接埠與協定獨立一個欄位）                |
+| 現況       | 會持續支援，但不會再加新功能                           | 官方建議的寫法                                                |
+| 額外的能力 | —                                                      | `via` 限定經由哪些路由裝置、`app` 應用層權限、`srcPosture` 等 |
+| 視覺化編輯 | 用視覺化編輯器修改後會自動轉成 grants 語法             | 原生支援                                                      |
+
+同一條規則的兩種寫法：
+
+```json
+// ACL
+"acls": [
+  { "action": "accept", "src": ["group:family"], "dst": ["tag:nas:443"] },
+],
+
+// Grants
+"grants": [
+  { "src": ["group:family"], "dst": ["tag:nas"], "ip": ["tcp:443"] },
+],
+```
+
+新寫的規則建議直接用 grants，本站其他文章的範例也都用 grants。
+
+### `ip` 欄位的寫法
+
+| 寫法                    | 意思                                             |
+| ----------------------- | ------------------------------------------------ |
+| `*`                     | 所有連接埠（TCP、UDP 與 ICMP）                   |
+| `443`、`80-443`         | 指定連接埠或範圍，TCP、UDP 與 ICMP 都算          |
+| `tcp:443`、`tcp:80-443` | 指定協定的連接埠或範圍                           |
+| `icmp:*`                | 某個協定的全部（適合 ICMP 這類沒有連接埠的協定） |
+
+可以一次寫多個，例如 `"ip": ["tcp:443", "udp:53"]`。一般只想限制 TCP 服務時寫 `tcp:<port>` 最精準，寫成單純的 `443` 會連 UDP 443 一起開放。
+
+## 來源與目的地的寫法
+
+`src` 與 `dst` 用「selector」指定對象，常用的有：
+
+| Selector             | 代表                                                                                      |
+| -------------------- | ----------------------------------------------------------------------------------------- |
+| `*`                  | 所有對象                                                                                  |
+| `alice@example.com`  | 某個使用者（的所有裝置）。GitHub 登入的帳號寫成 `alice@github`                            |
+| `group:family`       | 自己在 `groups` 定義的群組                                                                |
+| `tag:nas`            | 打上某個 tag 的裝置（tag 要先在 `tagOwners` 定義）                                        |
+| `autogroup:member`   | tailnet 的直接成員（含受邀的使用者，不含只接受了裝置分享的人）                            |
+| `autogroup:admin`    | 角色是 Admin 的使用者；另有 `autogroup:owner` 等角色                                      |
+| `autogroup:tagged`   | 所有打了 tag 的裝置                                                                       |
+| `autogroup:self`     | 只能放在 `dst`：「來源使用者自己的裝置」，不含打了 tag 的裝置                             |
+| `autogroup:internet` | 只能放在 `dst`：經由 [Exit Node](/features/exit-node/) 上網                               |
+| `autogroup:shared`   | 只能放在 `src`：接受了[裝置分享](https://tailscale.com/docs/features/sharing)的外部使用者 |
+| `192.168.1.0/24`     | IP 或網段，例如 [Subnet Router](/features/subnet-router/) 後面的設備                      |
+
+### Groups
+
+把人分組，規則就不必一個個列帳號，換人時也只要改一個地方：
+
+```json
+"groups": {
+  "group:family": ["mom@example.com", "dad@example.com"],
+  "group:admins": ["me@example.com"],
+},
+```
+
+群組名稱必須以 `group:` 開頭，成員要寫完整的登入帳號，群組不能包含其他群組。
+
+### Tags
+
+伺服器、NAS 這類「不屬於某個人」的裝置，建議用 tag 當身分。tag 要先在 `tagOwners` 定義誰能套用：
+
+```json
+"tagOwners": {
+  "tag:server": ["group:admins"],
+  "tag:nas": ["group:admins"],
+},
+```
+
+裝置打上 tag 後就不再以使用者的身分出現，規則改依 tag 判斷，`autogroup:self` 也不會包含它。tag 與 auth key 的完整說明見之後的文章。
+
+## 實際範例
+
+下面的範例都是「整份 policy 的一部分」，要搭配移除預設的全開規則才有效果。
+
+### 每個人只能連自己的裝置
+
+```json
+"grants": [
+  {
+    "src": ["autogroup:member"],
+    "dst": ["autogroup:self"],
+    "ip": ["*"],
+  },
+],
+```
+
+這是官方範例，適合多人共用一個 tailnet 但各自的裝置不互通的情況。注意它不影響[裝置分享](https://tailscale.com/docs/features/sharing)：某人把自己的裝置分享給別人時，對方仍然連得到。
+
+### 家人只能用 Exit Node 上網
+
+家人裝了 Tailscale，只想讓他們在外面時經由家裡的 Exit Node 上網，不能連到家裡其他設備：
+
+```json
+"groups": {
+  "group:family": ["mom@example.com", "dad@example.com"],
+},
+"grants": [
+  // 家人：只能經由 Exit Node 上網
+  {
+    "src": ["group:family"],
+    "dst": ["autogroup:internet"],
+    "ip": ["*"],
+  },
+  // 每個人都能連自己的裝置
+  {
+    "src": ["autogroup:member"],
+    "dst": ["autogroup:self"],
+    "ip": ["*"],
+  },
+],
+```
+
+`dst` 要寫 `autogroup:internet`，寫成 Exit Node 那台裝置只會允許**連到**它，不能**經由**它上網。Exit Node 本身仍要另外設定與核准，詳見 [Exit Node](/features/exit-node/)。
+
+### 伺服器只開放特定連接埠
+
+讓家人只能連 NAS 的網頁介面與檔案分享，管理者則能連所有伺服器：
+
+```json
+"grants": [
+  {
+    "src": ["group:family"],
+    "dst": ["tag:nas"],
+    "ip": ["tcp:443", "tcp:445"],
+  },
+  {
+    "src": ["group:admins"],
+    "dst": ["tag:server", "tag:nas"],
+    "ip": ["*"],
+  },
+],
+```
+
+透過 Subnet Router 連到區網設備時，`dst` 改寫成 IP 或網段即可，例如 `"dst": ["192.168.1.20/32"]`，範例見 [Subnet Router](/features/subnet-router/)。
+
+## 用 tests 防止改壞
+
+規則越寫越多，很容易一改就把重要的連線擋掉，或不小心開太大。`tests` 區段讓你寫下「誰應該連得到、誰應該連不到」，每次儲存 policy 時都會執行，**有任何一項不通過，這次修改就會被拒絕**：
+
+```json
+"tests": [
+  {
+    "src": "mom@example.com",
+    "accept": ["tag:nas:443"],
+    "deny": ["tag:server:22", "100.101.102.103:80"],
+  },
+  {
+    "src": "me@example.com",
+    "proto": "icmp",
+    "accept": ["tag:server:0"],
+  },
+],
+```
+
+- `src` 是要模擬的身分：使用者、群組、tag 或 `hosts` 裡定義的名稱，**不能**用 `*`。
+- `accept`／`deny` 的每一項是 `目的地:連接埠`，連接埠只能寫單一數字；目的地可以是 Tailscale IP、使用者、群組、tag 或 `hosts` 名稱，**不能**寫網段。
+- 沒寫 `proto` 時檢查的是 TCP 或 UDP；測 ICMP 要寫 `"proto": "icmp"`，連接埠填 `0`。
+
+在 Admin console 的 Access controls 頁面，視覺化編輯器的 **Tests** 分頁也可以新增測試。
+
+改 policy 的建議流程：
+
+1. 先寫好 tests，描述想要的結果（例如家人連不到 `tag:server`）。
+2. 再改規則，存檔時讓 tests 幫你檢查。
+3. 改壞了可以到 Admin console 的 **Configuration logs** 頁面還原之前的版本。
+
+## 常見問題
+
+- **加了限制規則，結果什麼都沒變？** 多半是預設的 `*` 到 `*:*` 全開規則還在。規則是聯集，全開規則要拿掉，其他限制才有作用。
+- **改完規則後，連自己的裝置都連不到？** 拿掉全開規則後，記得補上 `autogroup:member` 到 `autogroup:self` 這一條。
+- **給了 Exit Node 那台裝置的權限，還是不能經由它上網？** 經由 Exit Node 上網要放行 `autogroup:internet`，見上面的範例。
+- **規則只放行 A 連 B，B 卻能回應？** 正常。規則限制的是誰能**發起**連線，回應封包本來就會通。
+
+## 參考資料
+
+- [Access control 概觀（官方）](https://tailscale.com/docs/features/access-control/acls)
+- [Grants（官方）](https://tailscale.com/docs/features/access-control/grants)
+- [Grants 語法參考（官方）](https://tailscale.com/docs/reference/syntax/grants)
+- [Tailnet policy file 語法（官方）](https://tailscale.com/docs/reference/syntax/policy-file)
+- [Grant 範例（官方）](https://tailscale.com/docs/reference/examples/grants)
+- [ACL 範例（官方）](https://tailscale.com/docs/reference/examples/acls)
+- [視覺化編輯器（官方）](https://tailscale.com/docs/reference/visual-editor)
