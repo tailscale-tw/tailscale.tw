@@ -1,0 +1,225 @@
+---
+title: 自架 DERP 伺服器：在台灣架一台自己的中繼
+description: 台灣沒有官方 DERP 區域，中繼要繞到香港或東京。說明什麼情況值得自架 DERP、和 Peer Relay 怎麼選，以及 derper 的安裝、憑證、連接埠、derpMap 設定、--verify-clients 與維運上的限制
+sidebar:
+  order: 12
+  label: 自架 DERP
+---
+
+Tailscale 的裝置沒辦法直連、也沒有可用的 [Peer Relay](/features/peer-relay/) 時，流量會經過官方的 DERP 伺服器轉送。台灣沒有官方的 DERP 區域，台灣的裝置通常選香港（`hkg`）或東京（`tok`），兩台台灣的裝置走 DERP 時，封包也要出國繞一圈。
+
+Tailscale 允許自己架 DERP 伺服器（`derper`），加到 tailnet 的 DERP 清單裡。這篇說明什麼時候值得這麼做，以及怎麼架設。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件整理，CLI 範例以 Tailscale v1.104 為準。自架 DERP 目前是 alpha 功能。
+
+## 先考慮 Peer Relay
+
+官方的立場很明確：大多數情況**不需要**自架 DERP。連線常常走 DERP 時，應該先查[為什麼沒辦法直連](/troubleshooting/direct-vs-derp/)，不行再設定 Peer Relay。
+
+|          | Peer Relay                        | 自架 DERP                                   |
+| -------- | --------------------------------- | ------------------------------------------- |
+| 協定     | UDP                               | TCP（HTTPS）                                |
+| 速度     | 通常比 DERP 快                    | 比官方 DERP 近，但仍受 TCP 中繼的限制       |
+| 架設     | 一行 `tailscale set` 加一條 grant | 要編譯、要網域與憑證、要開 3 個連接埠       |
+| 網路條件 | 一個連得到的 UDP 埠即可           | 要有公開 IP，不能在 NAT 或負載平衡器後面    |
+| 維運     | 跟著 Tailscale 一起更新           | 要自己定期重新編譯 `derper`，跟上用戶端版本 |
+| 適用範圍 | 直連失敗時的中繼                  | 直連失敗時的中繼，也負責建立連線時的協調    |
+
+值得自架 DERP 的情況比較少見：
+
+- **法規或公司政策**：要求流量（即使是加密的）不能經過別人的伺服器，必須只走自己控制的中繼。
+- **連 Peer Relay 都用不了**：例如某些裝置所在的網路只允許 TCP 443 出去，UDP 全擋。這時只有 DERP 這種走 HTTPS 的中繼能用，自架一台在台灣可以降低延遲。
+- 想把 DERP 的延遲從「台灣到香港」縮短到「台灣到台灣」，而且願意承擔維運成本。
+
+## 限制
+
+- 自架的 DERP **不支援裝置分享**等跨 tailnet 的功能。
+- [Mullvad Exit Node](/features/mullvad-exit-node/) 不能搭配自架 DERP 使用。
+- 自架的 DERP 不會用於高可用設定中的 regional routing。
+- 享受不到 Tailscale 控制平面對官方 DERP 的某些最佳化。
+- DERP 只轉送加密後的封包，看不到內容，對網路除錯沒有幫助。
+- 不能放在 NAT、防火牆或負載平衡器後面（見下一節）。
+
+## 需求
+
+- **公開 IP，直接連上網際網路**：DERP 靠封包的來源位址辨識裝置，經過 NAT 或負載平衡器會改掉來源位址；用戶端也用 HTTP upgrade 建立雙向通道，大部分雲端負載平衡器不支援。所以家裡路由器後面、靠連接埠轉送的主機不適合，建議用雲端 VPS。
+- **連接埠**：
+
+  | 服務  | 連接埠     | 用途                                   |
+  | ----- | ---------- | -------------------------------------- |
+  | HTTP  | TCP `80`   | 申請 Let's Encrypt 憑證等              |
+  | HTTPS | TCP `443`  | DERP 本身                              |
+  | STUN  | UDP `3478` | 讓裝置查詢自己的對外位址，幫助打洞直連 |
+
+  HTTPS 與 STUN 可以改用其他埠（derpMap 裡的 `DERPPort`、`STUNPort`），HTTP 不能改。
+
+- **ICMP**：入站與出站的 ICMP 都要放行。
+- **網域**：一個指向這台主機的網域名稱，例如 `derp.example.com`，用來申請憑證。
+- **Go**：`derper` 要從原始碼編譯，需要最新版的 Go。
+
+台灣的 VPS 可以選 Google Cloud 的 `asia-east1`（台灣）或國內的 VPS 業者。注意 DERP 轉送的流量會算在主機的出站流量費用裡。
+
+## 安裝與執行 `derper`
+
+### 編譯
+
+```bash
+go install tailscale.com/cmd/derper@latest
+```
+
+執行檔會裝在 `$HOME/go/bin/derper`，把它複製到 `/usr/local/bin/`。
+
+### 執行
+
+```bash
+sudo derper --hostname=derp.example.com
+```
+
+預設會：
+
+- 在 TCP `443` 提供 HTTPS、TCP `80` 提供 HTTP、UDP `3478` 提供 STUN。
+- 用 Let's Encrypt 自動申請 `derp.example.com` 的憑證（`--certmode=letsencrypt`），憑證存在 `--certdir` 指定的目錄。
+- 以 root 執行且沒指定 `-c` 時，使用 `/var/lib/derper/derper.key` 當設定檔（內含伺服器私鑰，不存在時會自動產生）。
+
+常用選項：
+
+| 選項               | 說明                                                                   |
+| ------------------ | ---------------------------------------------------------------------- |
+| `--hostname`       | 這台 DERP 的網域名稱，用於申請憑證                                     |
+| `--certmode`       | 憑證來源：`letsencrypt`（預設）、`manual`（自備憑證）、`gcp`           |
+| `--certdir`        | 憑證目錄；`manual` 模式會讀這裡的 `<hostname>.crt` 與 `<hostname>.key` |
+| `-a`               | HTTPS 監聽位址，預設 `:443`                                            |
+| `--http-port`      | HTTP 埠，預設 `80`，`-1` 停用                                          |
+| `--stun-port`      | STUN 埠，預設 `3478`                                                   |
+| `-c`               | 設定檔（伺服器私鑰）的路徑                                             |
+| `--verify-clients` | 只允許自己 tailnet 的裝置使用，見後面的說明                            |
+
+### 用 systemd 常駐
+
+`/etc/systemd/system/derper.service`：
+
+```ini
+[Unit]
+Description=Tailscale DERP server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/derper --hostname=derp.example.com -c /var/lib/derper/derper.key --certdir=/var/lib/derper/certs --verify-clients
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo mkdir -p /var/lib/derper/certs
+sudo systemctl daemon-reload
+sudo systemctl enable --now derper
+```
+
+這個範例用了 `--verify-clients`，所以同一台主機也要安裝 Tailscale 並登入你的 tailnet，見下一節。
+
+## 只讓自己的 tailnet 使用：`--verify-clients`
+
+知道你的 DERP 位址的人，都可以把它加到自己的 derpMap，用你的伺服器和頻寬轉送他們的流量。加上 `--verify-clients` 可以避免這件事：
+
+1. 在 DERP 主機上安裝 Tailscale，登入你的 tailnet。
+2. 啟動 `derper` 時加上 `--verify-clients`。
+
+`derper` 會向本機的 `tailscaled` 查詢每個連進來的裝置，本機 `tailscaled` 不認得的裝置會被拒絕。也因此：
+
+- DERP 主機的 `tailscaled` 要能看到使用這台 DERP 的裝置；如果存取規則讓它和某些裝置完全沒有往來，那些裝置可能會被拒絕。
+- `derper` 和 `tailscaled` 的版本要保持同步，版本差太多時驗證會失敗。
+
+## 加到 tailnet：`derpMap`
+
+在 Admin console 的 [Access controls](https://console.tailscale.com/admin/acls/file) 加上 `derpMap`。Region ID `900` 到 `999` 保留給自訂區域：
+
+```json
+{
+  "derpMap": {
+    "Regions": {
+      "900": {
+        "RegionID": 900,
+        "RegionCode": "tpe",
+        "RegionName": "Taipei",
+        "Nodes": [
+          {
+            "Name": "1",
+            "RegionID": 900,
+            "HostName": "derp.example.com",
+            "IPv4": "203.0.113.15"
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+- `RegionCode`：顯示在 `tailscale status`（例如 `relay "tpe"`）與 `netcheck` 的代碼。
+- `IPv4`、`IPv6`：選填但建議填，DNS 有問題時裝置也找得到 DERP。必須是公開 IP。
+- 官方文件說明**每個區域只能有一台 DERP**。要備援的話，用多個區域，每個區域放一台。
+
+存檔後，裝置會像對待官方區域一樣量測延遲，自訂區域比較近的話，就會被選為 home DERP。
+
+### 移除官方的 DERP 區域
+
+只加自訂區域時，官方的區域仍然可用，自架的那台掛掉，裝置會自動改用官方 DERP。這是比較安全的做法。
+
+如果政策要求流量只能經過自己的 DERP，可以設定 `"OmitDefaultRegions": true` 移除所有官方區域：
+
+```json
+{
+  "derpMap": {
+    "OmitDefaultRegions": true,
+    "Regions": {
+      "900": {
+        "RegionID": 900,
+        "RegionCode": "tpe",
+        "RegionName": "Taipei",
+        "Nodes": [
+          {
+            "Name": "1",
+            "RegionID": 900,
+            "HostName": "derp.example.com",
+            "IPv4": "203.0.113.15"
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+這樣一來，只有一台自架 DERP 時，它就是單點故障：DERP 掛了，無法直連的裝置就完全連不上，新的連線也會受影響。這麼做之前至少準備兩個區域。
+
+也可以只停用特定的官方區域，把它設成 `null`，例如 `"Regions": { "1": null }`。官方區域的 ID 可以從預設的 DERP map 查：
+
+```bash
+curl -s https://controlplane.tailscale.com/derpmap/default | jq -r '.Regions[] | "\(.RegionID) \(.RegionCode) \(.RegionName)"'
+```
+
+## 確認生效
+
+- **`tailscale netcheck`**：`DERP latency` 裡出現自訂的區域與延遲；它最近的話，`Nearest DERP` 會是它。
+- **`tailscale debug derp tpe`**：測試能不能連上這個區域的 DERP 與 STUN，結果分成 `Info`、`Warnings`、`Errors`。
+- **`tailscale status`**：走中繼的連線顯示 `relay "tpe"`。
+
+指令的判讀方式見 [用 tailscale netcheck 與 tailscale ping 診斷連線](/troubleshooting/netcheck-and-ping/)。要長期監控，官方提供 `cmd/derpprobe`，用 `--derp-map=file://` 指定包含你 derpMap 的 JSON 檔。
+
+## 維運
+
+- **定期更新**：用戶端更新後，舊版的 `derper` 可能不相容。定期執行 `go install tailscale.com/cmd/derper@latest` 重新編譯，再重新啟動服務；有用 `--verify-clients` 的話，同時更新那台的 Tailscale。
+- **防火牆**：只開 TCP `80`、`443`、UDP `3478` 與 ICMP，管理用的 SSH 可以改走 Tailscale。
+- **備援**：至少保留官方區域，或架兩個以上的自訂區域。
+
+## 參考資料
+
+- [Custom DERP servers（官方）](https://tailscale.com/docs/reference/derp-servers/custom-derp-servers)
+- [DERP servers（官方）](https://tailscale.com/docs/reference/derp-servers)
+- [cmd/derper 原始碼](https://github.com/tailscale/tailscale/tree/main/cmd/derper)
+- [DERPMap 欄位定義](https://pkg.go.dev/tailscale.com/tailcfg#DERPMap)
+- [Peer Relay：用自己的裝置當中繼，取代遠方的 DERP](/features/peer-relay/)
+- [直連與 DERP 中繼：為什麼連線變慢、怎麼改善](/troubleshooting/direct-vs-derp/)
