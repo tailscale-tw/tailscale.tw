@@ -1,0 +1,160 @@
+---
+title: 常見問題：DNS、IP 衝突、防火牆與其他 VPN
+description: 開了 Tailscale 之後上不了網、網域解析不了、內網連不到、和其他 VPN 打架、用了 Exit Node 就斷線：依症狀整理常見原因與解法
+sidebar:
+  order: 3
+  label: 常見問題
+---
+
+這篇依症狀整理 Tailscale 常見的問題：開了 Tailscale 之後上不了網、網域解析不了、內網服務連不到、和其他 VPN 打架、用了 Exit Node 就斷線。每一項只說明原因與解法的方向，細節連到對應的文章。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件整理，CLI 範例以 Tailscale v1.102 為準。
+
+## 先確認問題跟 Tailscale 有沒有關係
+
+1. 執行 `tailscale down`（或在 App 裡關閉連線），再試一次。
+2. 關掉之後還是有問題，就是本機或網路本身的問題，與 Tailscale 無關。
+3. 關掉就正常、打開才出問題，再往下看。
+
+另外看一下 `tailscale status` 輸出的最後有沒有 `# Health check:`，`tailscaled` 偵測到的問題（DNS、captive portal 等）會列在這裡。
+
+## DNS：開了 Tailscale 之後網域解析不了
+
+先分清楚是**所有網域**都解析不了，還是只有**內網的名稱**有問題。
+
+### 所有網域都解析不了
+
+- **Override DNS servers 指向連不到的 DNS 伺服器**：Admin console 的 [DNS](https://console.tailscale.com/admin/dns) 頁面開了 **Override DNS servers** 時，裝置的所有查詢都會交給 Admin console 設定的 nameserver。如果它是 tailnet 裡的 Pi-hole 之類，而這台裝置因為存取規則、Subnet Router 沒核准或對方離線而連不到，就整台都解析不了。
+- **Linux 的 `/etc/resolv.conf` 被改來改去**：DHCP 用戶端（例如 `dhclient`）和 `tailscaled` 輪流改寫 `/etc/resolv.conf`，造成時好時壞。改用 systemd-resolved 或 resolvconf 管理 DNS。
+- **Amazon Linux 2023**：`tailscaled` 會把查詢轉給自己，形成迴圈，要把 systemd-resolved 改成 stub resolver 模式。
+
+確認方式與這幾種情況的細節見 [MagicDNS 與自訂 DNS 設定](/features/magicdns/)。用 `tailscale dns status` 可以看到這台裝置目前套用的 DNS 設定。
+
+### 這台裝置不想用 Tailscale 的 DNS
+
+本機已經有自己的 DNS 設定（例如這台就是 Pi-hole，或公司的 DNS 有特殊用途）時，可以讓這台裝置不套用 Tailscale 的 DNS 設定：
+
+```bash
+tailscale set --accept-dns=false
+```
+
+macOS 與 Windows 的 App 裡也有對應的選項（**Use Tailscale DNS settings**）。關掉之後，這台裝置就不能用 MagicDNS 名稱連其他裝置，要改用 Tailscale IP 或完整的 `*.ts.net` 名稱（後者要本機的 DNS 能解析）。
+
+### 只有內網的名稱有問題
+
+- **MagicDNS 名稱**：用名稱連不到、用 Tailscale IP 可以，見 [MagicDNS 與自訂 DNS 設定](/features/magicdns/) 的常見問題。注意 `nslookup` 在部分平台會繞過系統的 DNS 設定，查 MagicDNS 時會得到錯誤的結果。
+- **自己的網域指向內網 IP**：公開 DNS 上把 `nas.example.com` 指向 `192.168.1.10` 或 `100.x.y.z`，在某些網路（路由器、ISP 或公司的 DNS）上會被 **DNS rebinding 防護**擋掉，查到空的結果。解法是在 Admin console 設定 split DNS，讓這個網域交給內網的 DNS 伺服器解析。
+
+## IP 衝突
+
+### `100.64.0.0/10` 和其他服務衝突
+
+Tailscale 的 IP 位址來自 `100.64.0.0/10`（`100.64.0.0` 到 `100.127.255.255`），這段原本是保留給電信業者 CGNAT 使用的位址。以下情況會和 Tailscale 衝突：
+
+- ISP 的 CGNAT 使用了同一段位址，而你需要連到其中的某些位址。
+- 其他 VPN、Kubernetes 叢集或公司內部服務也用這一段。
+
+在 Linux 上，Tailscale 還會用防火牆規則丟掉這段範圍內**不是來自 Tailscale** 的封包，所以 Tailscale 開著時，連不到用這段位址的本地服務。
+
+解法：
+
+| 做法                            | 說明                                                                                                                                              |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **IP pool**（beta）             | 在存取規則用 `nodeAttrs` 的 `ipPool` 指定 Tailscale 只用其中一小段，例如 `100.81.0.0/16`，避開別人用的部分                                        |
+| `disable-ipv4`                  | 用 `nodeAttrs` 讓指定的裝置（或整個 tailnet）不使用 Tailscale 的 IPv4 位址、只用 IPv6。代價是連不到只支援 IPv4 的資源，例如只有 IPv4 的 Exit Node |
+| `disable-linux-cgnat-drop-rule` | 只適用於 Linux：用 `nodeAttrs` 關掉上面那條丟封包的規則。這會降低對偽造來源 IP 的防護，要確認系統有開 Reverse Path Filtering                      |
+
+IP pool 的設定範例：
+
+```json
+{
+  "nodeAttrs": [
+    {
+      "target": ["autogroup:admin"],
+      "ipPool": ["100.81.0.0/16"]
+    }
+  ]
+}
+```
+
+管理員也可以在 Admin console 的 [Machines](https://console.tailscale.com/admin/machines) 頁面手動修改單一裝置的 IPv4 位址。
+
+### Subnet Router 的網段和本地區網重疊
+
+例如 Subnet Router 廣告家裡的 `192.168.1.0/24`，而你在外面接的 Wi-Fi 剛好也是 `192.168.1.0/24`，兩邊的路由就會衝突：可能連不到本地的印表機，或連不到家裡的 NAS。
+
+- **最根本的解法**：規劃網段時避開 `192.168.0.0/24`、`192.168.1.0/24` 這類最常見的網段。
+- **這台裝置不需要用 Subnet Router 時**：關掉接受路由，`tailscale set --accept-routes=false`，或在 App 裡關掉對應選項。
+- **Windows、macOS**：作業系統會優先使用前綴最長的路由。Subnet Router 改廣告範圍更大的網段（例如 `192.168.1.0/23`），本地 `/24` 的路由就會優先。
+- **Linux**：Tailscale 用 policy routing（優先順序 `5200`～`5500` 的 `ip rule`），要加一條優先順序更高的規則讓本地網段走一般路由表：
+
+  ```bash
+  sudo ip rule add to 192.168.1.0/24 priority 2500 lookup main
+  ```
+
+  這條規則重開機後會消失，要寫進開機時執行的設定。
+
+官方提醒，這些做法只適合網路環境固定的裝置；筆電到處接 Wi-Fi 的話，可能讓原本要走 Tailscale 的流量送到陌生的區網。更多 Subnet Router 的問題見 [Subnet Router](/features/subnet-router/)。
+
+## 防火牆、防毒軟體與 captive portal
+
+- **作業系統的防火牆**：`tailscale ping` 通、一般的 `ping` 或服務不通，通常是對方的防火牆擋掉了。Windows 預設會擋 ICMP，macOS 的隱形模式不回應 ping。判斷方法見 [用 tailscale netcheck 與 tailscale ping 診斷連線](/troubleshooting/netcheck-and-ping/)。
+- **公司的防火牆**：連得上但很慢，多半是防火牆讓連線只能走 DERP 中繼。各廠牌的狀況與要開的連接埠見 [直連與 DERP 中繼](/troubleshooting/direct-vs-derp/)。有些防火牆的 SSL 檢查（例如 FortiGate）會攔截 Tailscale 控制伺服器的 HTTPS 連線，造成 `certificate is not trusted` 錯誤、完全連不上。
+- **防毒軟體誤判**：新版本的 Tailscale 偶爾會被防毒軟體誤判。確認是誤判後，回報給防毒軟體廠商，或把 Tailscale 加到允許清單；不確定的話不要直接忽略警告，可以寄信到 `security@tailscale.com` 詢問。
+- **Captive portal**：飯店、機場的 Wi-Fi 要先在網頁登入才能上網，在這之前 Tailscale 也連不上控制伺服器。Tailscale v1.72 以上會偵測 captive portal，`tailscale status` 會顯示 `This network requires you to log in using your web browser.`，macOS 與 iOS 也會跳出通知。用瀏覽器打開任意網站完成登入即可；沒看到登入頁的話，試著打開 `http://neverssl.com`。
+- **Tailscale 的網站或 Admin console 打不開**：Tailscale 的網域偶爾會被誤列入 DNS 封鎖清單。如果你用 NextDNS、Pi-hole 這類有封鎖清單的 DNS，把 `*.tailscale.com` 和 `*.tailscale.io` 加到允許清單。
+
+## 和其他 VPN 同時使用
+
+Tailscale 預設只把 Tailscale IP 的流量導進 tailnet，理論上可以和其他 VPN 並存，但實際上常常衝突：
+
+- **防火牆規則**：很多 VPN 為了確保所有流量都經過自己，會設定很嚴格的防火牆規則，把 Tailscale 的流量也丟掉。
+- **手機一次只能開一個 VPN**：iOS 與 Android 都是這樣，開了另一個 VPN，Tailscale 就會斷線。
+- **IP 衝突**：另一個 VPN 也用 `100.64.0.0/10` 的話，會和 Tailscale IP 衝突，處理方式見上面的 [IP 衝突](#ip-衝突)。
+
+可以嘗試的做法：
+
+- **Split tunnel**：另一個 VPN 支援依網段分流的話，把 Tailscale 的 `100.64.0.0/10`、`fd7a:115c:a1e0::/48`，以及 Subnet Router 廣告的網段設成不經過那個 VPN。使用 Exit Node 時這招無效，因為 Exit Node 本身就要接管所有流量。
+- **Userspace networking**：Tailscale 改用 userspace 模式，不建立網路介面，改用 SOCKS5 proxy 連到 tailnet。這時一般的 `ping` 不能用，要改用 `tailscale ping`。
+- 只是想要換出口 IP 的話，可以考慮 [Mullvad Exit Node](/features/mullvad-exit-node/)，在 Tailscale 裡直接用 Mullvad 的伺服器，不用同時開兩個 VPN。
+
+## 用了 Exit Node 之後
+
+### 完全上不了網
+
+- **Exit Node 不在線或還沒核准**：在 `tailscale status` 看 Exit Node 是不是 `offline`；在 Admin console 確認它的 Exit Node 已經核准。
+- **Linux 的 Exit Node 沒開 IP forwarding**：沒開的話封包到了 Exit Node 也轉不出去。
+- **存取規則沒有放行**：使用 Exit Node 要能存取 `autogroup:internet`。
+- **DNS**：使用 Exit Node 時，DNS 查詢預設也交給 Exit Node 解析，Exit Node 本身的 DNS 有問題時也會像上不了網。
+
+設定方式與檢查項目見 [Exit Node](/features/exit-node/)。
+
+### 連不到本地的印表機或 NAS
+
+這是預設行為：使用 Exit Node 時，本地區網被當成不可信任的網路，連不到。在信任的網路上可以打開本地區網存取：
+
+```bash
+tailscale set --exit-node-allow-lan-access=true
+```
+
+App 裡也有對應的選項（例如 macOS 的 **Allow Local Network Access**）。公共 Wi-Fi 上不建議打開。
+
+### Windows 的網路圖示顯示「沒有網際網路」
+
+沒有使用 Exit Node 時，Windows 的網路圖示可能顯示 Tailscale 介面「沒有網際網路存取」。這是因為 Windows 會從每一個網路介面測試能不能上網，而 Tailscale 介面在不用 Exit Node 時不會回應，可以忽略，不影響使用。
+
+## 參考資料
+
+- [Troubleshooting guide（官方）](https://tailscale.com/docs/reference/troubleshooting)
+- [Can't resolve domain names（官方）](https://tailscale.com/docs/reference/troubleshooting/resolve-domain-names-failure)
+- [Can't connect to internet（官方）](https://tailscale.com/docs/reference/troubleshooting/connectivity/connect-internet-failure)
+- [Can't connect to local area network（官方）](https://tailscale.com/docs/reference/troubleshooting/connectivity/connect-lan-failure)
+- [Troubleshoot CGNAT conflicts（官方）](https://tailscale.com/docs/reference/troubleshooting/network-configuration/cgnat-conflicts)
+- [CGNAT interoperability（官方）](https://tailscale.com/docs/reference/cgnat-interoperability)
+- [IP pool（官方）](https://tailscale.com/docs/reference/ip-pool)
+- [LAN traffic prioritization with overlapping subnet routes（官方）](https://tailscale.com/docs/reference/troubleshooting/network-configuration/lan-traffic-overlapping-subnets)
+- [Can I use Tailscale alongside other VPNs?（官方）](https://tailscale.com/docs/reference/faq/other-vpns)
+- [Tailscale domains or sites unreachable（官方）](https://tailscale.com/docs/reference/troubleshooting/network-configuration/tailscale-domains-sites-unreachable)
+- [Using Tailscale with captive portals（官方）](https://tailscale.com/docs/integrations/captive-portals)
+- [Antivirus flagging of the Tailscale client（官方）](https://tailscale.com/docs/concepts/av-flagging)
+- [Using Tailscale with your firewall（官方）](https://tailscale.com/docs/integrations/firewalls)
