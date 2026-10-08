@@ -1,0 +1,202 @@
+---
+title: Tags 與 auth key：給伺服器用的非互動登入
+description: 用 tag 讓伺服器以「服務」的身分加入 tailnet，搭配 auth key 或 OAuth client 免開瀏覽器登入，並說明效期、Docker 與 cloud-init 用法，以及 key 外洩時怎麼處理
+sidebar:
+  order: 2
+  label: Tags 與 auth key
+---
+
+在筆電上裝 Tailscale，跳出瀏覽器登入就好；但伺服器、NAS、容器、雲端 VM 通常沒有瀏覽器可開，而且不該掛在某個人的帳號下。這篇介紹兩個解法：**tag** 讓裝置以「服務」的身分加入 tailnet，**auth key** 讓裝置不必互動登入。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件整理，CLI 範例以 Tailscale v1.102 為準。Tags、auth key 與 OAuth client 所有方案都能使用。
+
+## 為什麼伺服器不該用個人帳號登入
+
+用自己的帳號登入伺服器，那台伺服器的身分就是「你」：
+
+- **人離開，伺服器跟著不見**：把某個使用者從 tailnet 移除時，他名下的裝置會一起被移除。
+- **金鑰到期就斷線**：使用者裝置的 node key 預設 180 天到期，到期後要重新登入；伺服器在機房裡沒人按，就這樣斷了。
+- **權限跟著人走**：伺服器拿到的是那個人的存取權限，往往比它實際需要的大得多。
+- **只能一個人管**：使用者裝置只能屬於一個人，共用的伺服器不適合綁在某個人身上。
+
+## Tags：讓裝置以服務的身分出現
+
+tag 就像服務帳號。裝置打上 tag 之後：
+
+- **身分從使用者換成 tag**：同一台裝置不能同時有使用者身分和 tag，加上 tag 會移除原本的使用者身分；反過來用使用者帳號重新登入，也會清掉所有 tag。
+- **移除使用者不影響它**：裝置不屬於任何人，人員異動不會連帶移除伺服器。
+- **金鑰到期預設關閉**：第一次以 tag 身分登入的裝置，key expiry 預設是停用的。之後如果只是改 tag，key expiry 設定不變，要等重新登入後才會改成停用。也可以在 Machines 頁面手動開關。
+- **一台可以有多個 tag**：例如 `tag:server` 加 `tag:prod`，任何一個 tag 的規則都會套用到它。
+
+tag 是設計給伺服器這類「非人」裝置的。筆電、手機不要打 tag：tag 身分的裝置不能用 SSH 連到使用者身分的裝置，Taildrop 也不能收送檔案到 tag 過的裝置。
+
+### 在 tagOwners 定義 tag
+
+tag 要先在 tailnet policy file 的 `tagOwners` 定義，並指定誰能把它套到裝置上：
+
+```json
+"tagOwners": {
+  "tag:server": ["group:admins"],
+  "tag:nas": ["me@example.com"],
+  "tag:ci": [], // 不指定擁有者，只有 Owner、Admin、Network admin 能用
+},
+```
+
+tag 名稱必須以 `tag:` 開頭。擁有者可以是使用者、群組、autogroup，也可以是另一個 tag。Owner、Admin、Network admin 不在清單上也能套用任何 tag。
+
+### 在規則裡使用 tag
+
+定義好之後，就能在 grants 裡用 tag 指定對象，例如只讓管理者連到伺服器，伺服器之間只開 PostgreSQL：
+
+```json
+"grants": [
+  {
+    "src": ["group:admins"],
+    "dst": ["tag:server"],
+    "ip": ["*"],
+  },
+  {
+    "src": ["tag:server"],
+    "dst": ["tag:db"],
+    "ip": ["tcp:5432"],
+  },
+],
+```
+
+規則的寫法見 [ACL / Grants 入門](/admin/acl-grants/)。注意 tag 之間不能做「交集」：沒辦法寫「同時有 `tag:prod` 和 `tag:db` 的裝置」，需要的話就用組合式的名稱，例如 `tag:prod-db`。
+
+### 套用 tag
+
+- **Admin console**：在 [Machines](https://console.tailscale.com/admin/machines) 頁面點裝置右邊的選單，選 **Edit tags**（要 Owner、Admin 或 Network admin）。
+- **CLI**：在裝置上以 tag 重新登入，多個 tag 用逗號分隔：
+
+  ```bash
+  sudo tailscale login --advertise-tags=tag:server,tag:prod
+  ```
+
+- **auth key**：產生 key 時預先套用 tag，裝置一加入就是 tag 身分（下一節）。
+
+以 tag 重新登入會產生新的 node key，但裝置的 Tailscale IP 不變。
+
+### Tag 對其他功能的影響
+
+除了上面提到的 SSH、Taildrop 限制，[Tailscale Serve](/features/serve/) 收到來自 tag 裝置的請求時，**不會**帶 `Tailscale-User-Login` 這類身份標頭，因為 tag 裝置沒有使用者身分。後端如果靠這些標頭做授權，要記得處理這個情況。
+
+另外，[Subnet Router](/features/subnet-router/)、[Exit Node](/features/exit-node/) 這類常駐的服務裝置，也很適合用 tag 身分，再搭配 `autoApprovers` 自動核准它們宣告的路由。
+
+## Auth key：免開瀏覽器登入
+
+auth key 讓裝置不用開瀏覽器登入就能加入 tailnet。沒有套用 tag 的 auth key，加入的裝置會以**產生 key 的那個人**的身分出現；套用了 tag，裝置就改以 tag 身分加入。所以給伺服器用的 key，幾乎都應該帶 tag。
+
+### 產生 auth key
+
+到 Admin console 的 [Keys](https://console.tailscale.com/admin/settings/keys) 頁面選 **Generate auth key**（要 Owner、Admin、IT admin 或 Network admin）：
+
+| 選項             | 說明                                                                                                                                                             |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Reusable**     | 不開就是一次性 key，用過一次就自動撤銷；開了可以讓多台裝置使用                                                                                                   |
+| **Expiration**   | key 的效期，1 到 90 天，沒有指定就是 90 天                                                                                                                       |
+| **Ephemeral**    | 用這把 key 加入的裝置離線後會被自動移除，適合容器、CI 這類短暫的工作                                                                                             |
+| **Pre-approved** | tailnet 有開 [device approval](https://tailscale.com/docs/features/access-control/device-management/device-approval) 時，用這把 key 加入的裝置不必再等管理員核准 |
+| **Tags**         | 預先套用 tag，裝置一加入就是 tag 身分                                                                                                                            |
+
+auth key 有分大小寫，複製時要完整。
+
+### Key 的效期與裝置的效期是兩回事
+
+這是最容易搞混的地方：
+
+- **auth key 的效期**（1–90 天）只決定**這把 key 還能不能拿來加入新裝置**。key 到期後，已經用它加入的裝置**不會**被登出。
+- **裝置的 node key 效期**才決定裝置何時要重新登入。使用者裝置預設 180 天；tag 身分的裝置預設停用。
+
+所以用帶 tag 的 auth key 加入的伺服器，即使 key 過期了，伺服器也會一直連著。沒辦法產生「永久有效」的 auth key：一般 key 最長 90 天，一次性 key 用過就失效。需要長期自動加入新裝置，改用下面的 OAuth client。
+
+### 用 auth key 登入
+
+```bash
+sudo tailscale up --auth-key=tskey-auth-xxxxx
+```
+
+key 已經預先套用 tag 時，不必再加 `--advertise-tags`。要搭配其他設定時一起帶上，例如同時當 Subnet Router：
+
+```bash
+sudo tailscale up --auth-key=tskey-auth-xxxxx --advertise-routes=192.168.1.0/24
+```
+
+`tailscale up` 的旗標行為（每次要帶齊非預設值）見 [CLI 指令速查](/getting-started/cli-cheatsheet/)。也可以把 key 存在檔案裡，用 `--auth-key=file:/path/to/key` 讀取，避免 key 出現在 shell 歷史紀錄。
+
+### 在 Docker 中使用
+
+官方映像檔 `tailscale/tailscale` 用環境變數設定，`TS_AUTHKEY` 放 auth key，`TS_STATE_DIR` 一定要掛載到會保留的目錄，否則容器每次重啟都會變成一台新裝置：
+
+```yaml
+services:
+  tailscale:
+    image: tailscale/tailscale:latest
+    hostname: my-service
+    environment:
+      - TS_AUTHKEY=tskey-auth-xxxxx
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_AUTH_ONCE=true
+    volumes:
+      - ./tailscale-state:/var/lib/tailscale
+    cap_add:
+      - net_admin
+      - net_raw
+    restart: unless-stopped
+```
+
+`TS_AUTH_ONCE=true` 讓容器在已經登入過時不再重新登入，搭配保留的 state 使用。其他 `tailscale up` 的旗標放在 `TS_EXTRA_ARGS`，例如 `TS_EXTRA_ARGS=--advertise-exit-node`。完整的參數見[官方的 Docker 參數說明](https://tailscale.com/docs/features/containers/docker/docker-params)。
+
+### 在 cloud-init 中使用
+
+建立雲端 VM 時，用 cloud-init 安裝 Tailscale 並以 auth key 加入，開機後就在 tailnet 裡了：
+
+```yaml
+#cloud-config
+runcmd:
+  - ["sh", "-c", "curl -fsSL https://tailscale.com/install.sh | sh"]
+  - ["tailscale", "up", "--auth-key=tskey-auth-xxxxx"]
+```
+
+cloud-init 的內容通常會存在雲端平台的 VM 中繼資料裡，建議用一次性、帶 tag、效期短的 key。
+
+## OAuth client：長期自動化的替代方案
+
+Terraform、CI/CD 這類需要長期、反覆建立裝置的情境，90 天就要手動換一次 auth key 很麻煩。這時改用 **OAuth client**：
+
+1. 在 Admin console 的 [Trust credentials](https://console.tailscale.com/admin/settings/trust-credentials) 頁面選 **Credential** → **OAuth** 建立 OAuth client，scope 給 `auth_keys` 的 Write 權限，並指定這個 client 能套用的 tag（要 Owner、Admin、Network admin 或 IT admin）。
+2. 建立後會拿到 client ID 與 client secret。**secret 只會顯示一次**，要當下存好。
+
+client secret 可以直接當 auth key 用，但一定要加上 `--advertise-tags`，而且 tag 要是建立 client 時指定的：
+
+```bash
+sudo tailscale up --auth-key="${OAUTH_CLIENT_SECRET}?ephemeral=false&preauthorized=true" \
+  --advertise-tags=tag:ci
+```
+
+- 用 OAuth client 加入的裝置**一定是 tag 身分**。
+- secret 後面可以加參數：`ephemeral` 預設是 `true`（裝置離線後自動移除），伺服器要長期保留就設成 `false`；`preauthorized` 預設是 `false`，有開 device approval 時設成 `true` 可以免核准。
+- Docker 映像檔一樣可以把 secret 放進 `TS_AUTHKEY`，tag 用 `TS_EXTRA_ARGS=--advertise-tags=tag:ci` 指定。
+
+也可以用 OAuth client 呼叫 Tailscale API，需要時再產生新的 auth key。
+
+## 安全提醒：key 外洩怎麼辦
+
+auth key 和 OAuth client secret 都等於「加入你 tailnet 的通行證」：
+
+- **可重複使用的 key 最危險**：被偷走的話，任何人都能用它把裝置加進你的 tailnet，拿到這把 key 所帶 tag 的權限（沒帶 tag 就是產生 key 那個人的權限）。官方建議存在專門的密鑰管理工具，不要放進 repository、聊天訊息或文件。
+- **能用一次性就用一次性**，效期設短一點，並盡量帶 tag，讓 tag 的規則限制它能連到哪裡。
+- **撤銷 key**：到 [Keys](https://console.tailscale.com/admin/settings/keys) 頁面，在 key 的那一列選 **Revoke**。每個人只能撤銷自己產生的 key。
+- **撤銷 key 不會踢掉已加入的裝置**：已經用這把 key 加入的裝置要到 [Machines](https://console.tailscale.com/admin/machines) 頁面逐一刪除。
+- **OAuth client secret 外洩**：到 Trust credentials 頁面撤銷或刪除那個 client，再檢查有沒有多出來的裝置。
+- 搭配 [device approval](https://tailscale.com/docs/features/access-control/device-management/device-approval)，沒開 Pre-approved 的 key 加入的裝置都要經過核准，可以多擋一層。
+
+## 參考資料
+
+- [Tags（官方）](https://tailscale.com/docs/features/tags)
+- [Auth keys（官方）](https://tailscale.com/docs/features/access-control/auth-keys)
+- [OAuth clients（官方）](https://tailscale.com/docs/features/oauth-clients)
+- [Docker 參數（官方）](https://tailscale.com/docs/features/containers/docker/docker-params)
+- [用 cloud-init 安裝 Tailscale（官方）](https://tailscale.com/docs/install/with-cloud-init)
+- [Key expiry（官方）](https://tailscale.com/docs/features/access-control/key-expiry)
