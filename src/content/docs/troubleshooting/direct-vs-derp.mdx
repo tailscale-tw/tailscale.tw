@@ -31,7 +31,7 @@ Tailscale 兩台裝置之間的速度，最大的差別在於有沒有**直連**
 5. 都不行就繼續走 DERP。
 6. 之後 Tailscale 會定期重新嘗試直連；網路改變時，原本的直連也可能退回中繼。
 
-所以連線剛建立時走 DERP 是正常的，持續走 DERP 才需要處理。
+所以連線剛建立時走 DERP 是正常的，持續走 DERP 才需要處理。打洞的原理見 [NAT 穿透原理](/getting-started/nat-traversal/)。
 
 ### 為什麼 DERP 比較慢
 

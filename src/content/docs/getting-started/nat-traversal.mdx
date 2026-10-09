@@ -1,0 +1,169 @@
+---
+title: NAT 穿透原理：Tailscale 怎麼在兩個 NAT 之間打通連線
+description: 從有狀態防火牆、STUN、easy／hard NAT、自動開埠協定、多層 NAT 與 IPv6，說明 Tailscale 怎麼收集候選位址、透過 DERP 協調、同時打洞，最後選出最好的連線路徑
+sidebar:
+  order: 1.5
+  label: NAT 穿透原理
+---
+
+家裡和公司的電腦通常都在路由器後面，沒有自己的公開 IP，也不接受外面主動連進來的連線。Tailscale 卻能讓這樣的兩台裝置直接連線，大多數時候不需要設定連接埠轉送。這篇說明背後的原理：防火牆和 NAT 為什麼擋連線、Tailscale 怎麼繞過，以及什麼情況下真的繞不過、只能走中繼。
+
+這篇以 Tailscale 官方部落格的〈[How NAT traversal works](https://tailscale.com/blog/how-nat-traversal-works)〉為主要來源重新整理，並對照目前版本的原始碼更新細節。實際的判斷與改善方法，見 [直連與 DERP 中繼](/troubleshooting/direct-vs-derp/)。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件與 v1.104 原始碼整理。
+
+## 前提：兩邊都要能送 UDP
+
+Tailscale 的資料平面是 WireGuard，WireGuard 走 UDP。NAT 穿透要成立，兩台裝置都要能送出 UDP 封包，也要能收到對方的 UDP 封包。
+
+另外，兩台裝置需要一個「兩邊都連得到的第三方」來交換資訊：誰在哪個位址、什麼時候開始打洞。這個角色由 Tailscale 的協調伺服器和 [DERP](/getting-started/what-is-tailscale/) 擔任。DERP 走 HTTPS，幾乎在任何網路都連得上，所以打洞失敗時，它也是最後的中繼。
+
+## 有狀態防火牆：只讓「回應」進來
+
+一般的防火牆，不論是電腦本身的還是路由器上的，大多是**有狀態（stateful）**的：
+
+- 從裡面往外送的封包，一律放行，並記下「我曾經從 `內部位址:埠` 送東西給 `外部位址:埠`」。
+- 從外面進來的封包，只有在符合剛才那筆紀錄時才放行，也就是看起來像是「回應」。其他一律丟掉。
+
+所以如果 A 直接送封包給 B，B 的防火牆沒有對應的紀錄，會把它丟掉。反過來也一樣。
+
+解法是**兩邊同時送**：
+
+1. A 送一個封包給 B。A 的防火牆記下「A 送過東西給 B」。這個封包到了 B 的防火牆，被丟掉。
+2. B 也送一個封包給 A。B 的防火牆記下「B 送過東西給 A」。這個封包到了 A 的防火牆，A 的防火牆認為這是剛才那筆的回應，放行。
+3. 之後 A 再送給 B，B 的防火牆也會放行。兩邊都打通了。
+
+這就是「打洞（hole punching）」。前提是兩邊都要知道對方的位址與連接埠，而且要差不多同時開始送，這正是需要第三方協調的原因。
+
+防火牆的紀錄會過期，UDP 通常是 30 秒左右。Tailscale 在連線使用中時，每 3 秒會對目前的路徑送一次 ping，讓紀錄不會消失。
+
+## NAT：位址被換掉之後
+
+如果只有防火牆，兩邊知道對方的 IP 就能打洞。NAT 讓事情變複雜：裝置用的是私有位址（例如 `192.168.1.10`），封包出去時，路由器會把來源改成自己的公開 IP，連接埠也可能換掉。裝置自己並不知道外面看到的是哪個位址和埠。
+
+### STUN：問別人「你看到我是誰」
+
+**STUN** 的做法很簡單：裝置送一個 UDP 封包給網際網路上的 STUN 伺服器，伺服器回覆「我看到你的來源是 `203.0.113.5:61234`」。裝置就知道自己對外的位址與連接埠了。
+
+Tailscale 的 DERP 伺服器同時提供 STUN（UDP `3478`）。`tailscale netcheck` 的 `IPv4: yes, 203.0.113.5:61234` 就是 STUN 的結果。
+
+關鍵在於：STUN 用的是**和 WireGuard 同一個 socket**。這樣 NAT 為 STUN 建立的對應，正好就是之後 WireGuard 封包會用的對應，問到的位址才有意義。
+
+### Easy NAT 與 hard NAT
+
+STUN 能不能幫上忙，取決於 NAT 怎麼分配對外的連接埠：
+
+| 類型                                         | 行為                                                              | STUN 問到的位址                  |
+| -------------------------------------------- | ----------------------------------------------------------------- | -------------------------------- |
+| **Easy NAT**（endpoint-independent mapping） | 同一個內部 `位址:埠` 不論連到哪個目的地，對外都用同一個 `位址:埠` | 別人也能用，打洞容易成功         |
+| **Hard NAT**（endpoint-dependent mapping）   | 連到不同目的地時，對外的連接埠會改變                              | 只對 STUN 伺服器有效，對方用不上 |
+
+Tailscale 會向多台 DERP 伺服器做 STUN，比較結果。如果不同伺服器看到的位址不一樣，就是 hard NAT，`tailscale netcheck` 會顯示 `MappingVariesByDestIP: true`。
+
+舊的文件常用「Full cone、Restricted cone、Port-restricted cone、Symmetric」來分類 NAT。這套分類混在一起描述「怎麼對應位址」和「怎麼過濾封包」兩件事，現在比較常用的是上面這種分法：symmetric NAT 大致就是 hard NAT，三種 cone NAT 都屬於 easy NAT，差別在過濾規則；而有狀態防火牆加上同時送封包，可以處理過濾規則的問題。
+
+### 兩邊都是 hard NAT
+
+只有一邊是 hard NAT 時，通常還有辦法：easy NAT 那一邊的位址是固定的，hard NAT 那一邊主動送過去，對方的防火牆就會記下 hard NAT 實際用的埠，再回覆到那個埠。
+
+兩邊都是 hard NAT 時，誰都不知道對方下一次會用哪個埠。官方部落格介紹過一種「生日悖論」的做法：一邊開很多個埠，另一邊對很多個隨機的埠送封包，靠機率讓兩邊碰上。這需要送出大量封包，在目前版本的原始碼中沒有找到這個做法的實作。實務上，兩邊都是 hard NAT 時通常就只能走中繼，也就是 [Peer Relay](/features/peer-relay/) 或 DERP。
+
+## 讓 NAT 變簡單的方法
+
+### 自動開埠：UPnP、NAT-PMP、PCP
+
+很多家用路由器支援自動開埠協定，讓內部的程式要求「請把對外的某個埠轉送給我」：
+
+- **UPnP IGD**：最常見，很多家用路由器支援。
+- **NAT-PMP**：Apple 提出的協定。
+- **PCP**：NAT-PMP 的後繼版本。
+
+Tailscale 偵測到路由器支援其中之一時，會自動要求一個對外的埠，有了它，就算路由器本身是 hard NAT，對方也有一個固定的位址可以連。`tailscale netcheck` 的 `PortMapping` 欄位會列出偵測到的協定。
+
+### 固定埠與手動轉送
+
+在路由器上手動把一個 UDP 埠（預設 `41641`）轉送給裝置，效果和自動開埠一樣，對方就有固定的位址可以連。如果裝置在 hard NAT 後面，又用 `--port` 指定了固定的埠，Tailscale 也會把「STUN 問到的公開 IP + 這個固定埠」當成一個候選位址，猜測你可能在路由器上設了對應的轉送。做法見 [直連與 DERP 中繼](/troubleshooting/direct-vs-derp/)。
+
+## 更麻煩的網路
+
+### 多層 NAT 與 CGNAT
+
+家裡用「業者的數據機兼路由器」後面再接自己的路由器，就是兩層 NAT。有些業者使用 **CGNAT**（carrier-grade NAT），在業者那一端再做一次 NAT，用戶拿到的「公開 IP」其實是 `100.64.0.0/10` 這段共享位址。
+
+STUN 問到的永遠是最外層 NAT 的位址，所以多層 NAT 本身不會讓打洞失敗；真正影響結果的是最外層 NAT 是 easy 還是 hard。但自動開埠協定只能控制你自己那一層，外層的 NAT 不受影響，所以在 CGNAT 後面，UPnP 等協定通常幫不上忙。
+
+### Hairpinning：同一個 NAT 後面的兩台
+
+兩台裝置在同一個 NAT 後面時，其中一台用 STUN 問到的公開位址連另一台，封包要先出到路由器、再「繞回」同一個內網，這叫 hairpinning。很多路由器不支援。
+
+Tailscale 避開了這個問題：每台裝置除了公開位址，也會回報自己網路介面上的區網位址。同一個區網裡的兩台裝置會直接用區網位址連線，不需要路由器幫忙繞回來。
+
+### IPv6
+
+IPv6 位址夠多，裝置通常直接拿到公開位址，不需要 NAT，但路由器上的有狀態防火牆仍然存在，所以還是要打洞，只是不必再猜連接埠，成功率比 IPv4 高。兩條路徑延遲差不多時，Tailscale 會稍微偏好 IPv6。
+
+只有 IPv6、靠 NAT64 上 IPv4 網站的網路（部分行動網路是這樣），遇到只有 IPv4 的對方時，直連的選擇比較少，比較容易走中繼。
+
+## Tailscale 怎麼把這些整合起來
+
+上面這些方法沒有哪一個每次都能成功，所以 Tailscale 的做法是全部一起試，再挑最好的。思路類似 WebRTC 用的 ICE，但 Tailscale 用的是自己的 **disco** 協定。
+
+### 1. 收集候選位址
+
+每台裝置持續收集自己可能被連到的位址：
+
+| 來源                      | 例子                                         |
+| ------------------------- | -------------------------------------------- |
+| 本機網路介面的位址        | `192.168.1.10:41641`，讓同一個區網的裝置直連 |
+| STUN 問到的公開位址       | `203.0.113.5:61234`                          |
+| 自動開埠要到的位址        | 路由器透過 UPnP／NAT-PMP／PCP 給的對外埠     |
+| hard NAT 加上固定埠的猜測 | STUN 問到的公開 IP + 用 `--port` 指定的埠    |
+| 雲端主機的公開 IP         | 在雲端執行時，從雲端平台查到的公開位址       |
+
+這些位址會回報給協調伺服器，再發給 tailnet 裡獲准和它連線的裝置。
+
+### 2. 透過 DERP 協調，兩邊同時打洞
+
+A 要和 B 連線時：
+
+1. A 對 B 的**每一個**候選位址送出 disco ping。
+2. 同時，A 經由 DERP 送一則 **CallMeMaybe** 訊息給 B，裡面附上 A 自己的候選位址。
+3. B 收到 CallMeMaybe 後，也對 A 的每一個候選位址送出 disco ping。
+4. 兩邊幾乎同時往對方送封包，就是前面「有狀態防火牆」一節的打洞過程。哪一條路徑收到 pong，就代表那條路徑通了。
+
+在打洞完成之前，資料先經過 DERP 傳送，所以連線一開始就能用，不必等打洞結果。
+
+### 3. 選出最好的路徑
+
+可能同時有好幾條路徑通了，例如區網位址和公開位址都能連。Tailscale 依照量到的延遲比較，延遲差不多時，偏好區網位址和 IPv6。直連的路徑一律優先於 Peer Relay，DERP 則是最後的選擇。
+
+選定之後，Tailscale 仍會持續檢查：
+
+- 使用中的路徑每 3 秒送一次 ping，維持 NAT 與防火牆的紀錄。
+- 大約 6.5 秒沒收到回應，就不再只信任這條路徑，資料會同時經過 DERP 送出。
+- 就算已經有可用的直連，延遲超過 5 毫秒時，每分鐘也會再試一次，看有沒有更好的路徑。
+
+所以換了網路（例如筆電從家裡的 Wi-Fi 換到手機熱點）時，連線會先退回 DERP，再重新打洞，通常不會中斷。
+
+## 對照 `tailscale netcheck`
+
+`tailscale netcheck` 顯示的就是這台裝置打洞的條件：
+
+| 欄位                    | 對應的概念                                        |
+| ----------------------- | ------------------------------------------------- |
+| `UDP`                   | 能不能送 UDP。`false` 就只能走 DERP               |
+| `IPv4`、`IPv6`          | STUN 問到的公開位址                               |
+| `MappingVariesByDestIP` | `true` 代表 hard NAT                              |
+| `PortMapping`           | 偵測到的自動開埠協定                              |
+| `Nearest DERP`          | 打洞失敗時會用的中繼，也是 CallMeMaybe 經過的地方 |
+
+完整的輸出說明見 [用 tailscale netcheck 與 tailscale ping 診斷連線](/troubleshooting/netcheck-and-ping/)，連線只能走中繼時的改善方法見 [直連與 DERP 中繼](/troubleshooting/direct-vs-derp/)。
+
+## 參考資料
+
+- [How NAT traversal works（Tailscale 官方部落格）](https://tailscale.com/blog/how-nat-traversal-works)
+- [How Tailscale works（Tailscale 官方部落格）](https://tailscale.com/blog/how-tailscale-works)
+- [Connection types（官方）](https://tailscale.com/docs/reference/connection-types)
+- [Troubleshoot hard NAT issues（官方）](https://tailscale.com/docs/reference/troubleshooting/network-configuration/hard-nat-issues)
+- [wgengine/magicsock 原始碼](https://github.com/tailscale/tailscale/tree/main/wgengine/magicsock)
+- [Tailscale 是什麼：tailnet、WireGuard 與控制平面的基本觀念](/getting-started/what-is-tailscale/)
