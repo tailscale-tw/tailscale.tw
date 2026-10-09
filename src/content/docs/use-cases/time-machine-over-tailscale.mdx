@@ -1,0 +1,173 @@
+---
+title: 透過 Tailscale 在外面也能用 Time Machine 備份到家裡的 NAS
+description: 讓 Mac 的「時光機」經由 Tailscale 用 SMB 備份到家裡的 Synology NAS，不論在家或在外面都用同一個備份目的地。說明 DSM 的共用資料夾與 SMB 設定、Mac 端用 MagicDNS 名稱加入備份磁碟、存取規則、速度與疑難排解
+sidebar:
+  order: 2
+  label: Time Machine 遠端備份
+---
+
+Mac 內建的 Time Machine（台灣版 macOS 介面稱為「時光機」）通常是備份到外接硬碟，或在家裡、辦公室的區網內備份到 NAS。筆電一帶出門，就要等回到家才會備份。
+
+只要 Mac 和 NAS 都加入同一個 tailnet，就可以讓 Time Machine 經由 Tailscale 用 SMB 備份到家裡的 NAS：在家時走區網，在外面時走網際網路，用的是同一個備份目的地，不需要開任何連接埠。這篇以 Synology NAS 為例，其他 SMB 伺服器的做法附在最後。
+
+> 本文依 2026 年 10 月的 Tailscale 與 Synology 官方文件整理，以 DSM 7.2、macOS 15 以上、Tailscale v1.104 為準。
+
+## 先想清楚：適合誰
+
+- **適合**：筆電常常不在家、又想讓 Time Machine 持續自動備份的人。第一次完整備份之後，每次只傳有變動的檔案，通常量不大。
+- **要注意**：在外面時，備份速度受限於你所在網路的**上傳**頻寬和家裡網路的下載頻寬；從 NAS 回復檔案時，則受限於家裡網路的上傳頻寬。手機熱點、計量網路上的大量備份會吃掉流量。
+- **不能取代異地備份**：NAS 和 Mac 是兩份資料，但 NAS 放在家裡，遇到火災、竊盜還是會一起不見。
+
+## NAS 端：Synology DSM
+
+以下步驟依 [Synology 知識中心的 Time Machine 教學](https://kb.synology.com/zh-tw/DSM/tutorial/How_to_back_up_files_from_Mac_to_Synology_NAS_with_Time_Machine) 整理，選單名稱以 DSM 7.2 的中文介面為準。
+
+### 1. 建立共用資料夾
+
+1. 用管理員帳號登入 DSM，前往 **控制台 → 共用資料夾**，按 **新增**。
+2. 輸入名稱，例如 `TimeMachine`。
+3. **不要**啟用資源回收筒，也不要用加密共用資料夾。要加密備份的話，用 Mac 端 Time Machine 的加密選項。
+
+### 2. 建立專用帳號並設定配額
+
+1. 前往 **控制台 → 使用者 & 群組 → 使用者帳號**，按 **新增**，建立一個只給 Time Machine 用的帳號，例如 `timemachine`，不要加入 `administrators` 群組。
+2. 在 **指派共用資料夾權限** 頁面，給它 `TimeMachine` 共用資料夾的**可讀寫**權限，其他共用資料夾不給權限。
+3. 在 **指派使用者空間配額** 頁面，替 `TimeMachine` 設定配額，避免備份把 NAS 塞滿。Synology 建議配額至少是 Mac 硬碟容量或備份資料量的兩到三倍。
+4. 在 **指派應用程式權限** 頁面，**SMB** 勾選允許。
+
+也可以改在共用資料夾的 **編輯 → 進階** 啟用共用資料夾空間配額，見 [如何限制 Time Machine 備份資料占用的容量](https://kb.synology.com/zh-tw/DSM/tutorial/How_can_I_limit_space_taken_up_by_Time_Machine_backup)。這兩種配額都需要 Btrfs 檔案系統。
+
+### 3. 啟用 SMB
+
+1. 前往 **控制台 → 檔案服務 → SMB**，勾選 **啟用 SMB 服務**。
+2. 按 **進階設定**，確認：
+   - **最大 SMB 通訊協定**：SMB3
+   - 勾選 **啟用 Opportunistic Locking**
+   - 勾選 **啟用 SMB2 租用**
+   - 勾選 **啟用 SMB 耐久控制代碼**
+3. 回到 **檔案服務**，在 **進階設定** 頁籤勾選 **啟動 Bonjour 服務探索** 與 **啟用透過 SMB 進行 Bonjour Time Machine 廣播**，按 **設定 Time Machine 資料夾**，選 `TimeMachine`。
+
+第 3 步讓 NAS 在區網內自動出現在 Time Machine 的清單裡。經由 Tailscale 時 Bonjour 不會生效（見下一節），但這個設定也會把共用資料夾標記為 Time Machine 用途，建議打開。
+
+### 4. 安裝 Tailscale
+
+從 **套件中心** 安裝 Tailscale，依畫面指示登入你的 tailnet。DSM 7 上的 Tailscale 預設就接受從 tailnet 連進 NAS 的連線，SMB 不需要額外設定。
+
+如果你曾經依官方文件執行 `tailscale configure-host` 讓 NAS 可以**主動連出**到 tailnet，又開了 DSM 的防火牆，要在防火牆規則放行來源 `100.64.0.0/10`，否則 Tailscale 的連線會被擋。
+
+在 Admin console 的 [Machines](https://console.tailscale.com/admin/machines) 頁面記下 NAS 的 MagicDNS 名稱，例如 `nas.tail1234.ts.net`。
+
+## Mac 端
+
+Mac 上要安裝 Tailscale 並登入同一個 tailnet，而且要讓它開機後自動連線，Time Machine 才能在背景備份。
+
+### 為什麼要手動連線
+
+在家裡的區網，NAS 會透過 Bonjour（mDNS）廣播自己，Time Machine 的清單會自動出現它。Bonjour 是區網內的多點廣播，Tailscale 不會轉送，所以在外面時 Mac 找不到 NAS，要**用名稱手動指定**。
+
+重點是：**在家時也用 Tailscale 的名稱加入**，不要用區網裡 Bonjour 找到的那一個。這樣不論在哪裡，Time Machine 都連同一個位址；在家時，Tailscale 會發現兩台在同一個區網，直接走區網連線，速度接近一般的區網備份。
+
+### 1. 先連上共用資料夾
+
+在 Finder 選 **前往 → 連接伺服器**，輸入：
+
+```text
+smb://nas.tail1234.ts.net/TimeMachine
+```
+
+以 `timemachine` 帳號登入，勾選 **在我的鑰匙圈中記住此密碼**。Time Machine 之後會用鑰匙圈裡的密碼自動掛載。
+
+建議用完整的 MagicDNS 名稱。也可以用 NAS 的 Tailscale IP（例如 `smb://100.101.102.103/TimeMachine`），IP 不受 DNS 設定影響，但比較難記。
+
+### 2. 加入備份磁碟
+
+1. 前往 **系統設定 → 一般 → 時光機**，按 **加入備份磁碟**。
+2. 選擇剛才掛載的 `TimeMachine`，按 **設定磁碟**。
+3. 選擇是否加密備份。NAS 在家裡也建議加密，密碼要另外保存好，遺失就無法回復。
+
+也可以用指令設定（終端機要在 **系統設定 → 隱私權與安全性 → 完整磁碟取用權限** 裡打開）：
+
+```bash
+sudo tmutil setdestination -a -p smb://timemachine@nas.tail1234.ts.net/TimeMachine
+```
+
+- `-p` 用互動方式輸入密碼，避免密碼出現在指令列。
+- `-a` 是「加入」而不是「取代」。原本已經有外接硬碟當備份磁碟時，Time Machine 會輪流備份到兩個目的地，多一份備份。
+
+用 `tmutil destinationinfo` 確認設定，`URL` 應該是你輸入的 MagicDNS 名稱。
+
+### 3. 第一次備份
+
+第一次是完整備份，資料量最大。**建議在家裡進行**：這時 Tailscale 會走區網，比從外面經由網際網路快得多。
+
+```bash
+tmutil startbackup --block
+```
+
+之後 Time Machine 會照排程自動備份，不需要手動操作。筆電的話，**系統設定 → 一般 → 時光機 → 選項** 裡可以調整備份頻率，以及是否在使用電池時備份。
+
+## 存取規則：只開放 SMB 給自己的 Mac
+
+如果 tailnet 還是預設的「所有裝置互通」規則，tailnet 裡的任何裝置都連得到 NAS 的所有服務。建議替 NAS 加上 tag，只開放需要的連接埠：
+
+```json
+{
+  "tagOwners": {
+    "tag:nas": ["autogroup:admin"]
+  },
+  "grants": [
+    {
+      "src": ["alice@example.com"],
+      "dst": ["tag:nas"],
+      "ip": ["tcp:445"]
+    }
+  ]
+}
+```
+
+- `tcp:445` 是 SMB。還要從外面管理 DSM 的話，另外加上 DSM 的管理埠（預設 `tcp:5000`、`tcp:5001`）。
+- `src` 寫你自己的帳號，或只放你的 Mac。
+
+Tag 的設定見 [Tags 與 auth key](/admin/tags-auth-keys/)，規則的寫法見 [ACL / Grants 入門](/admin/acl-grants/)。
+
+## 速度與穩定性
+
+- **先確認是直連**：在 Mac 上執行 `tailscale ping nas`。看到 `via DERP(...)` 代表走中繼，大量備份會很慢。原因與改善方法見 [直連與 DERP 中繼](/troubleshooting/direct-vs-derp/)。
+- **頻寬**：在外面備份時，瓶頸通常是你所在網路的上傳頻寬；家裡如果是上下行不對稱的寬頻，從 NAS 回復大量檔案時則會受家裡的上傳頻寬限制。
+- **網路中斷**：備份到一半網路斷線、筆電闔上或換網路時，這次備份會失敗，Time Machine 會在下次排程時再試。它每次備份都會自己掛載網路磁碟，不需要手動連線。
+
+## 疑難排解
+
+- **Time Machine 說找不到備份磁碟**：
+  - 確認 Mac 上的 Tailscale 已連線，`tailscale status` 看得到 NAS。
+  - 在 Finder 用 `smb://nas.tail1234.ts.net/TimeMachine` 手動連一次，看是名稱解析、連線還是登入的問題。
+  - 名稱解析不到的話，見 [MagicDNS](/features/magicdns/)；連不上的話，檢查上面的存取規則有沒有開 `tcp:445`。
+- **驗證失敗**：確認帳號密碼，以及這個帳號對共用資料夾有讀寫權限。到 Mac 的「鑰匙圈存取」刪掉舊的 NAS 密碼後重新登入。
+- **備份一直停在「正在準備備份」**：大量檔案變動後的第一次備份會準備比較久。經由網際網路時更明顯，可以先回家裡讓它在區網完成。
+- **Time Machine 說需要建立新的備份**：Time Machine 驗證備份時發現網路備份（sparsebundle）有問題，會要求重新建立。經常在備份途中斷線會增加這種機率，重要的話保留另一份備份（例如外接硬碟）。
+- 其他 Synology 端的問題，見 [如何解決使用 Time Machine 連線到 Synology NAS 時發生的問題](https://kb.synology.com/zh-tw/DSM/tutorial/What_should_I_do_to_fix_the_problem_when_connecting_to_Synology_NAS_using_Time_Machine)。
+
+## 不是 Synology 的話
+
+任何支援 Time Machine 的 SMB 伺服器都可以用同樣的方式，例如 Linux 上的 Samba，在共用資料夾設定加上 `vfs_fruit` 模組：
+
+```ini
+[TimeMachine]
+  path = /srv/timemachine
+  valid users = timemachine
+  read only = no
+  vfs objects = catia fruit streams_xattr
+  fruit:time machine = yes
+  fruit:time machine max size = 1T
+```
+
+`fruit:time machine max size` 限制 Time Machine 可以用的空間。伺服器加入 tailnet 後，Mac 端的設定和上面相同。
+
+## 參考資料
+
+- [如何使用 Time Machine 將資料從 Mac 備份 Synology 系統？（Synology）](https://kb.synology.com/zh-tw/DSM/tutorial/How_to_back_up_files_from_Mac_to_Synology_NAS_with_Time_Machine)
+- [使用「時光機」備份 Mac（Apple 支援）](https://support.apple.com/zh-tw/104984)
+- [Access Synology NAS from anywhere（Tailscale 官方）](https://tailscale.com/docs/integrations/synology)
+- [vfs_fruit（Samba 官方手冊）](https://www.samba.org/samba/docs/current/man-html/vfs_fruit.8.html)
+- [Backup Your MacOS Device To Your Synology NAS From Anywhere Through Tailscale（Digital Aloha，2022）](https://www.youtube.com/watch?v=oqp3cJgHdNI)
+- [MagicDNS](/features/magicdns/)
