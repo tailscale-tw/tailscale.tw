@@ -1,0 +1,179 @@
+---
+title: 用自架的 Pi-hole 替整個 tailnet 擋廣告
+description: 在家裡的 Raspberry Pi 或伺服器上跑 Pi-hole，設為 tailnet 的 global nameserver，讓手機、筆電在外面也經由 Tailscale 用它擋廣告與追蹤器。說明 Pi-hole v6 的監聽設定、Pi-hole 主機上的 --accept-dns=false、存取規則、Exit Node 與備援
+sidebar:
+  order: 4
+  label: Pi-hole
+---
+
+[Pi-hole](https://pi-hole.net/) 是自架的 DNS 伺服器，依封鎖清單擋掉廣告、追蹤器和惡意網域。一般是放在家裡，把路由器的 DNS 指向它，家裡所有裝置都受惠；但手機、筆電一離開家，就用不到了。
+
+把 Pi-hole 主機加入 tailnet，再設為 tailnet 的 global nameserver，裝置不論在哪裡，只要 Tailscale 連線中，DNS 查詢都會經由 Tailscale 送回家裡的 Pi-hole。
+
+> 本文依 2026 年 10 月的 Tailscale 與 Pi-hole 官方文件整理，以 Pi-hole v6、Tailscale v1.104 為準。
+
+不想自己維護伺服器的話，NextDNS、Control D 這類雲端服務也做得到，見 [用 NextDNS 或 Control D 過濾整個 tailnet 的 DNS](/use-cases/nextdns-control-d/)。
+
+## 架構
+
+- **Pi-hole 主機**：家裡一台常開的 Linux，例如 Raspberry Pi。上面裝 Pi-hole 和 Tailscale。
+- **Admin console**：把 Pi-hole 主機的 Tailscale IP 設為 global nameserver，打開 **Override DNS servers**。
+- **其他裝置**：照常連 Tailscale。查詢先到本機的 `100.100.100.100`，MagicDNS 名稱就地回答，其他網域經由 Tailscale 轉給 Pi-hole。
+
+Pi-hole 在家裡，所以裝置在外面時，每次 DNS 查詢都要回家一趟。如果和 Pi-hole 之間[走 DERP 中繼](/troubleshooting/direct-vs-derp/)，網頁開起來會明顯變慢。
+
+## 1. 安裝 Pi-hole
+
+在 Raspberry Pi OS 或 Debian、Ubuntu 上：
+
+```bash
+sudo apt update && sudo apt upgrade -y
+curl -sSL https://install.pi-hole.net | bash
+```
+
+安裝前可以先用瀏覽器打開 `https://install.pi-hole.net` 看過腳本內容，或改用 Pi-hole 文件裡的其他安裝方式。安裝程式會依序詢問：
+
+- **Static IP**：讓這台主機在區網有固定 IP（也可以在路由器的 DHCP 設定保留位址）。經由 Tailscale 使用時用的是 Tailscale IP，不受影響，但家裡的路由器要指向它的話，區網 IP 必須固定。
+- **Upstream DNS**：Pi-hole 沒擋下的查詢要轉給誰，例如 Cloudflare 或 Quad9。
+- **Blocklists**、**Web 管理介面**、**查詢紀錄**：依需要選擇。
+
+裝完後設定管理介面的密碼：
+
+```bash
+pihole setpassword
+```
+
+管理介面在 `http://<Pi-hole 主機 IP>/admin`。
+
+## 2. 讓 Pi-hole 接受 tailnet 的查詢
+
+這是最容易漏掉的一步。Pi-hole v6 預設的監聽模式是 **Allow only local requests**（`LOCAL`）：只回答來源位址和 Pi-hole 主機某個網路介面在同一個子網路的查詢。Tailscale 的 `tailscale0` 介面只有主機自己的一個 `100.x.y.z` 位址，其他 tailnet 裝置不算同一個子網路，查詢會被拒絕。
+
+改成 **Permit all origins**（`ALL`）：
+
+- **管理介面**：**Settings → DNS**，右上角從 **Basic** 切到 **Expert**，在 **Interface settings** 選 **Permit all origins**，儲存。
+- **指令**：
+
+  ```bash
+  sudo pihole-FTL --config dns.listeningMode ALL
+  ```
+
+`ALL` 會回答所有來源的查詢，所以 Pi-hole 主機**不能直接暴露在網際網路上**：要放在家裡路由器後面，路由器不要把 53 埠轉送進來，管理介面也要設強密碼。如果主機有公開 IP（例如 VPS），用防火牆只允許區網和 `tailscale0` 的 53 埠。
+
+Pi-hole 的監聽模式還有 `SINGLE`（只接受指定介面的查詢），但它只能指定一個介面，設成 `tailscale0` 的話，家裡區網的裝置就用不到了，所以一般用 `ALL`。
+
+## 3. 在 Pi-hole 主機安裝 Tailscale
+
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up --accept-dns=false
+```
+
+`--accept-dns=false` 很重要：Pi-hole 主機自己就是 tailnet 的 DNS，不要讓它再套用 tailnet 的 DNS 設定，否則它自己的查詢會繞一圈回到自己。代價是這台主機上不能用 MagicDNS 名稱，要連其他裝置時用 Tailscale IP。
+
+接著：
+
+- 在 Admin console 的 [Machines](https://console.tailscale.com/admin/machines) 頁面記下它的 Tailscale IP，例如 `100.101.102.103`。
+- 這台要一直在線，建議替它加上 tag（例如 `tag:dns`），tag 裝置預設不會金鑰過期；或在 Machines 頁面替它 **Disable key expiry**。見 [Tags 與 auth key](/admin/tags-auth-keys/)。
+
+## 4. 設為 global nameserver
+
+1. 到 Admin console 的 [DNS](https://console.tailscale.com/admin/dns) 頁面，在 **Nameservers** 選 **Add nameserver → Custom**。
+2. 填入 Pi-hole 主機的 **Tailscale IP**，儲存。
+3. 打開 **Override DNS servers**。
+
+用 Tailscale IP 而不是區網 IP（例如 `192.168.1.53`）：區網 IP 只有在家裡連得到，在外面就要另外設定 [Subnet Router](/features/subnet-router/)；Tailscale IP 不論在哪裡都連得到。
+
+**不要再加其他公開 DNS 當 global nameserver**。Tailscale 會同時問所有 global nameserver、用最快的回應，被 Pi-hole 擋掉的網域可能從其他 nameserver 查到，就擋不住了。
+
+## 5. 存取規則
+
+Tailnet 的存取規則如果不是預設的全部互通，要允許裝置連到 Pi-hole 的 53 埠，否則 DNS 查詢會被擋掉，裝置就**完全解析不了網域**：
+
+```json
+{
+  "tagOwners": {
+    "tag:dns": ["autogroup:admin"]
+  },
+  "grants": [
+    {
+      "src": ["autogroup:member"],
+      "dst": ["tag:dns"],
+      "ip": ["udp:53", "tcp:53"]
+    },
+    {
+      "src": ["autogroup:admin"],
+      "dst": ["tag:dns"],
+      "ip": ["tcp:80", "tcp:443"]
+    }
+  ]
+}
+```
+
+- 第一條讓所有成員的裝置都能用 Pi-hole 查詢 DNS。tailnet 裡有 tag 裝置（例如伺服器）也要用的話，把那些 tag 加進 `src`。
+- 第二條只讓管理員從 tailnet 打開 Pi-hole 的管理介面。
+
+規則的寫法見 [ACL / Grants 入門](/admin/acl-grants/)。
+
+## 確認生效
+
+在任一台裝置上：
+
+```bash
+tailscale dns status
+```
+
+**Resolvers** 應該出現 Pi-hole 主機的 Tailscale IP。接著查一個在封鎖清單裡的網域：
+
+```bash
+tailscale dns query doubleclick.net
+```
+
+被擋下時 Pi-hole v6 預設回答 `0.0.0.0`（IPv6 為 `::`）。最後到 Pi-hole 管理介面的 **Query Log**，查詢的來源會是裝置的 Tailscale IP。
+
+想在 Pi-hole 的紀錄裡看到裝置名稱，可以在 **Settings → Local DNS Records** 替 Tailscale IP 加上名稱，或在 **Group Management → Clients** 替每個 Tailscale IP 加上註解。
+
+## 開了 Exit Node 時
+
+裝置使用 [Exit Node](/features/exit-node/) 時，**預設改用 Exit Node 解析所有網域**，不會經過 Pi-hole。要讓使用 Exit Node 時也擋廣告，在 DNS 頁面編輯 Pi-hole 這台 nameserver，打開 **Use with exit node**。詳細說明見 [MagicDNS](/features/magicdns/) 的「使用 Exit Node 時的 DNS」。
+
+Pi-hole 主機本身也可以兼做 Exit Node 或 Subnet Router，例如在家裡的 Raspberry Pi 上同時執行 `tailscale set --advertise-exit-node`。
+
+## Pi-hole 停機時
+
+Pi-hole 是 tailnet 唯一的 global nameserver，它停機、斷網或家裡停電時，**所有開了 Tailscale 的裝置都會查不到 DNS**，看起來像整個網路斷掉。幾個做法：
+
+- **暫時關掉 Override DNS servers**：裝置會回到原本的 DNS，適合臨時處理。
+- **在手機或筆電上暫時停用 Tailscale 的 DNS**：`tailscale set --accept-dns=false`，或在 App 裡關掉 **Use Tailscale DNS settings**。
+- **架第二台 Pi-hole**：兩台都設為 global nameserver，用 Pi-hole 的 Teleporter 或同步工具保持封鎖清單一致。兩台都是 Pi-hole，就沒有「從另一台查到」的問題。
+
+## 用 Docker 跑 Pi-hole
+
+Pi-hole 官方的 Docker 映像檔用環境變數設定監聽模式：
+
+```yaml
+services:
+  pihole:
+    image: pihole/pihole:latest
+    ports:
+      - "53:53/tcp"
+      - "53:53/udp"
+      - "80:80/tcp"
+    environment:
+      TZ: "Asia/Taipei"
+      FTLCONF_webserver_api_password: "請改成強密碼"
+      FTLCONF_dns_listeningMode: "ALL"
+    volumes:
+      - "./etc-pihole:/etc/pihole"
+    restart: unless-stopped
+```
+
+Tailscale 裝在宿主機上（同樣加上 `--accept-dns=false`），從 tailnet 連到宿主機 Tailscale IP 的 53 埠，就會轉進容器。Docker 的 bridge 網路下，查詢在容器看來不是來自同一個子網路，所以必須用 `ALL`。
+
+## 參考資料
+
+- [Block ads on all your devices from anywhere using a Raspberry Pi（官方）](https://tailscale.com/docs/solutions/block-ads-all-devices-anywhere-using-raspberry-pi)
+- [DNS in Tailscale（官方）](https://tailscale.com/docs/reference/dns-in-tailscale)
+- [Pi-hole FTL 設定：dns.listeningMode（Pi-hole 官方）](https://docs.pi-hole.net/ftldns/configfile/#listeningmode)
+- [Pi-hole Docker（Pi-hole 官方）](https://docs.pi-hole.net/docker/)
+- [MagicDNS：用名稱連到 tailnet 裡的裝置](/features/magicdns/)
