@@ -82,6 +82,7 @@ MagicDNS 不能新增任意的 DNS 紀錄（例如替某個服務多取一個名
 - 多台 nameserver 不保證依你排列的順序查詢。Tailscale 自己代理查詢時會**同時**問所有 nameserver，用最快的回應。如果某台 DNS 會回答其他台沒有的內網名稱，不要把它和公開 DNS 一起當 global nameserver，改用 split DNS。
 - 開 Override 前確認所有裝置都連得到這些 nameserver。用 Tailscale IP 或內網 IP 的 DNS 伺服器，要被存取規則允許，內網 IP 還需要 [Subnet Router](/features/subnet-router/)。連不到的話，整台裝置都會解析不了網域。
 - 用 NextDNS 時不要再加其他 global nameserver，否則被 NextDNS 擋下的查詢可能被其他 nameserver 回答，過濾就失效了。NextDNS 也不能當 split DNS 用。要對不同裝置套用不同 NextDNS 設定檔，在 policy 的 `nodeAttrs` 加上 `nextdns:<設定檔 ID>`。完整步驟（包括 Control D）見 [用 NextDNS 或 Control D 過濾整個 tailnet 的 DNS](/use-cases/nextdns-control-d/)。
+- 自架 Pi-hole 當 global nameserver 的完整步驟見 [用自架的 Pi-hole 替整個 tailnet 擋廣告](/use-cases/pi-hole/)。
 
 ### Split DNS：指定網域交給特定 DNS
 
