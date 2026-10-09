@@ -1,0 +1,188 @@
+---
+title: 用 NextDNS 或 Control D 過濾整個 tailnet 的 DNS
+description: 把 NextDNS 或 Control D 設為 tailnet 的 global nameserver，讓每台裝置不論在哪個網路都經由加密 DNS 套用同一套過濾規則。說明設定步驟、用 nodeAttrs 替不同裝置套用不同設定檔、分享給服務商的資料、Exit Node 的行為，以及兩家怎麼選
+sidebar:
+  order: 3
+  label: NextDNS 與 Control D
+---
+
+[NextDNS](https://nextdns.io/) 和 [Control D](https://controld.com/) 是可以自訂規則的雲端 DNS 服務：擋廣告、追蹤器、惡意網域，或依分類限制網站。一般的用法是在每台裝置或路由器上各自設定。
+
+Tailscale 和這兩家都有整合：在 Admin console 設定一次，tailnet 裡所有裝置的 DNS 查詢都會經由加密的 DNS-over-HTTPS（DoH）送到你的 NextDNS 或 Control D 設定檔。裝置不論在家裡、公司還是咖啡廳的 Wi-Fi，都套用同一套規則；還可以讓不同的使用者或裝置用不同的設定檔。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件整理，以 Tailscale v1.104 為準。
+
+## 和一般的 global nameserver 有什麼不同
+
+[MagicDNS](/features/magicdns/) 一文說明過 global nameserver：在 Admin console 加入一台 DNS 伺服器，打開 **Override DNS servers**，所有裝置就改用它。NextDNS 和 Control D 也是用這個機制，但多了幾件事：
+
+- **一律用 DoH**：Tailscale 會把查詢送到該設定檔的 DoH 網址，查詢內容在路上是加密的。
+- **認得出是哪台裝置**：服務商的查詢紀錄可以顯示裝置名稱，方便知道是誰在查什麼。
+- **每台裝置可以用不同設定檔**：用存取規則的 `nodeAttrs` 指定。
+
+## 共通的注意事項
+
+兩家都一樣：
+
+- **只設這一個 global nameserver**。Tailscale 會同時問所有 global nameserver、用最快的回應，如果另外加了 Cloudflare 之類的公開 DNS，被過濾掉的網域可能從那邊查到，過濾就失效了。
+- **不能當 split DNS（restricted nameserver）用**。要把特定網域交給家裡或公司的 DNS，另外加 split DNS 就好，兩者可以並存。
+- **要打開 Override DNS servers**，否則裝置還是用自己原本的 DNS 查一般網域。
+- 裝置要允許 Tailscale 管理 DNS（`--accept-dns`，預設開啟）。
+
+## NextDNS
+
+需要 Tailscale v1.32 以上，以及一個 NextDNS 設定檔（NextDNS 免費方案每月 30 萬次查詢，超過要付費）。
+
+### 加入 global nameserver
+
+1. 在 NextDNS 的管理頁面打開你的設定檔，在 **Setup** 頁的 **Endpoints** 找到這個設定檔的 **IPv6** 位址。
+2. 到 Admin console 的 [DNS](https://console.tailscale.com/admin/dns) 頁面，在 **Nameservers** 的 **Add nameserver** 選單選 **NextDNS**。
+3. 貼上剛才的 IPv6 位址，儲存。Tailscale 會自動加入這個設定檔的所有位址。
+4. 打開 **Override DNS servers**。
+
+### 不同裝置用不同設定檔
+
+例如小孩的平板用比較嚴格的設定檔，伺服器用只擋惡意網域的設定檔。在存取規則加上 `nodeAttrs`，`nextdns:` 後面接 NextDNS 的設定檔 ID：
+
+```json
+{
+  "nodeAttrs": [
+    {
+      "target": ["group:kids"],
+      "attr": ["nextdns:abc123"]
+    },
+    {
+      "target": ["tag:server"],
+      "attr": ["nextdns:def456"]
+    }
+  ]
+}
+```
+
+- `target` 可以是使用者、群組、tag 或 `*`。
+- 沒有符合任何 `nodeAttrs` 的裝置，用 global nameserver 設定的那個設定檔。
+- 前提是 NextDNS 已經設為 global nameserver。
+
+### 分享給 NextDNS 的資料
+
+預設會把**裝置名稱、作業系統、Tailscale IP 和 Tailscale 的節點 ID** 送到 NextDNS 的查詢紀錄，讓你在 NextDNS 的分析頁面分辨裝置。不想分享的話，加上 `nextdns:no-device-info`：
+
+```json
+{
+  "nodeAttrs": [
+    {
+      "target": ["*"],
+      "attr": ["nextdns:no-device-info"]
+    }
+  ]
+}
+```
+
+## Control D
+
+需要 Tailscale v1.70 以上，以及一個 Control D 的 endpoint（裝置端點）。Control D 目前只會收到裝置的主機名稱。
+
+### 加入 global nameserver
+
+1. 在 Control D 的管理頁面找到 endpoint 的 **resolver ID**。
+2. 到 Admin console 的 [DNS](https://console.tailscale.com/admin/dns) 頁面，在 **Nameservers** 選 **Add nameserver → Control D**。
+3. 輸入 resolver ID，儲存。
+4. 打開 **Override DNS servers**。
+
+### 不同裝置用不同設定檔
+
+和 NextDNS 一樣用 `nodeAttrs`，屬性寫成 `controld:<resolver ID>`：
+
+```json
+{
+  "nodeAttrs": [
+    {
+      "target": ["group:employees"],
+      "attr": ["controld:abc123xyz"]
+    }
+  ]
+}
+```
+
+`nodeAttrs` 是疊加的，一台裝置可能同時符合好幾條。例如某台伺服器同時有 `tag:server` 和 `tag:secure-server`，兩條各指定了不同的 Control D 設定檔。這時在屬性後面加上 `?priority=<數字>`，數字大的優先：
+
+```json
+{
+  "nodeAttrs": [
+    {
+      "target": ["tag:server"],
+      "attr": ["controld:abc123xyz?priority=1"]
+    },
+    {
+      "target": ["tag:secure-server"],
+      "attr": ["controld:def456uvw?priority=2"]
+    }
+  ]
+}
+```
+
+只有 `tag:server` 的裝置用第一個設定檔；兩個 tag 都有的裝置用第二個。`?priority=` 只用來決定優先順序，Tailscale 送給 Control D 之前會拿掉。官方文件只替 Control D 說明了這個寫法。
+
+### 向 Tailscale 購買
+
+2026 年 8 月起，企業可以直接向 Tailscale 的業務購買 Control D 的 DNS 過濾，依需要過濾的**使用者人數**計費，不用另外跟 Control D 簽約。過濾規則仍然在 Control D 的管理頁面設定。個人使用的話，直接向 Control D 購買即可。
+
+## 開了 Exit Node 時
+
+這點容易忽略：裝置使用 [Exit Node](/features/exit-node/) 時，**預設會改用 Exit Node 當 DNS**，不管你設定了什麼 global nameserver（見 [MagicDNS](/features/magicdns/) 的「使用 Exit Node 時的 DNS」）。也就是說，連上 Exit Node 的筆電，DNS 過濾預設不會生效。
+
+要讓 NextDNS 或 Control D 在使用 Exit Node 時也生效：
+
+1. 在 Admin console 的 [DNS](https://console.tailscale.com/admin/dns) 頁面，點 nameserver 旁的 **⋯** 開啟編輯選項。
+2. 打開 **Use with exit node**，儲存。
+
+## 確認生效
+
+在裝置上查看 Tailscale 實際拿到的 DNS 設定：
+
+```bash
+tailscale dns status
+```
+
+**Resolvers** 應該出現 `https://dns.nextdns.io/<設定檔 ID>` 或 `https://dns.controld.com/<resolver ID>` 這類 DoH 網址。
+
+接著查一個應該被擋的網域，看回應是不是被擋下（通常是 `0.0.0.0` 或沒有結果），以及查詢被送到哪裡：
+
+```bash
+tailscale dns query ads.example.com
+```
+
+最後到 NextDNS 或 Control D 的查詢紀錄，確認看得到這台裝置的查詢。NextDNS 也可以用瀏覽器打開 [test.nextdns.io](https://test.nextdns.io/)，確認目前用的是哪個設定檔、是否經由 DoH。
+
+兩個指令的輸出說明見 [MagicDNS](/features/magicdns/) 的「確認與除錯」一節。
+
+## NextDNS 還是 Control D
+
+兩家的核心功能差不多：封鎖清單、分類過濾、自訂允許／封鎖規則、查詢紀錄與分析。選擇的參考：
+
+|                   | NextDNS                                     | Control D                                        |
+| ----------------- | ------------------------------------------- | ------------------------------------------------ |
+| 免費使用          | 有，每月 30 萬次查詢                        | 免費的公開 resolver 不能自訂規則；自訂要付費方案 |
+| 分享給服務商      | 裝置名稱、OS、Tailscale IP、節點 ID，可關閉 | 只有主機名稱                                     |
+| 多台裝置不同規則  | `nodeAttrs` 的 `nextdns:`                   | `nodeAttrs` 的 `controld:`，支援 `?priority=`    |
+| 向 Tailscale 購買 | 不行                                        | 企業可以，依使用者計費                           |
+| 適合              | 個人、家庭，免費額度通常夠用                | 團隊與企業，或需要依群組管理規則                 |
+
+價格與方案以兩家官網為準。
+
+## 疑難排解
+
+- **Tailscale 的網站或 Admin console 打不開**：封鎖清單可能誤擋了 Tailscale 的網域。在設定檔的允許清單加入 `*.tailscale.com` 和 `*.tailscale.io`，見 [常見問題](/troubleshooting/common-issues/)。
+- **某台裝置沒有被過濾**：確認它有接受 Tailscale 的 DNS 設定（`tailscale dns status` 的第一段），以及有沒有開 Exit Node。
+- **規則沒有套用到指定的裝置**：確認 `nodeAttrs` 的 `target` 有包含它，Control D 再檢查多條規則之間的 `?priority=`。
+- **所有網站都打不開**：global nameserver 設定錯誤或服務商故障時，所有裝置都會查不到 DNS。暫時關掉 Override DNS servers 可以讓裝置回到原本的 DNS。
+
+## 參考資料
+
+- [Use NextDNS（官方）](https://tailscale.com/docs/integrations/nextdns)
+- [Use Control D（官方）](https://tailscale.com/docs/integrations/control-d)
+- [DNS in Tailscale（官方）](https://tailscale.com/docs/reference/dns-in-tailscale)
+- [Enhanced DNS Control and Security: Use NextDNS with Tailscale（官方部落格）](https://tailscale.com/blog/nextdns)
+- [How to Use Tailscale with Control D for Enhanced DNS Protection（官方部落格）](https://tailscale.com/blog/controld)
+- [Tailscale and Control D: DNS filtering for your tailnet（官方部落格）](https://tailscale.com/blog/dns-filtering-by-control-d)
+- [MagicDNS：用名稱連到 tailnet 裡的裝置](/features/magicdns/)
