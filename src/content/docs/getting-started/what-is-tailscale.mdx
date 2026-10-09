@@ -77,7 +77,7 @@ Tailscale 的 coordination server（協調伺服器）是控制平面的核心�
 2. 發起連線的節點先透過協調伺服器取得對方的連線資訊；DERP 可能會先協助傳遞探索與協調封包。
 3. 兩台節點執行 NAT traversal，嘗試在兩邊的網路之間建立直接的 UDP 通道。
 4. NAT 穿透成功時，後續的 WireGuard 加密資料直接在兩台節點之間傳送。這通常是延遲最低、吞吐量最高的路徑。
-5. 如果無法直連，Tailscale 會先嘗試已設定且雙方都能使用的 [Peer Relay](https://tailscale.com/docs/features/peer-relay)。Peer Relay 是 tailnet 中預先設定、替其他節點轉送流量的裝置；沒有可用的 Peer Relay 時，才以 DERP 作為加密中繼。
+5. 如果無法直連，Tailscale 會先嘗試已設定且雙方都能使用的 [Peer Relay](/features/peer-relay/)。Peer Relay 是 tailnet 中預先設定、替其他節點轉送流量的裝置；沒有可用的 Peer Relay 時，才以 DERP 作為加密中繼。
 
 所以「控制平面是中心的」和「資料平面是點對點的」並不矛盾：前者負責把連線需要的資訊送到節點，後者決定封包實際要走哪一條路。網路條件改變時，Tailscale 也會重新檢查是否能從中繼升級成直連，或在直連失效時退回中繼。
 
@@ -93,7 +93,9 @@ NAT 讓內部裝置可以主動連出網際網路，卻通常不接受外部未�
 
 DERP 中繼的是已經由 WireGuard 加密的封包，不是應用程式的明文。DERP server 看得到自己正在轉送資料，但沒有節點私密金鑰，不能解密資料內容；它比較像一個只負責轉發密文的網路中繼。代價是多了一個網路 hop，所以通常會比直連有更高延遲、較低吞吐量。
 
-所有連線一開始可能先經過 DERP 進行協調，之後再切換到直連。用 `tailscale ping` 判斷單次探測的路徑時，可能看到 `via DERP(...)`，直連時則會顯示 `via <ip>:<port>`；`tailscale status` 是另一種摘要格式，會在 peer 的狀態欄顯示 `direct`、`relay "<region>"` 或 `peer-relay`。兩個指令的輸出格式不同，判讀方式也不同。
+所有連線一開始可能先經過 DERP 進行協調，之後再切換到直連。用 `tailscale ping` 判斷單次探測的路徑時，可能看到 `via DERP(...)`，直連時則會顯示 `via <ip>:<port>`；`tailscale status` 是另一種摘要格式，會在 peer 的狀態欄顯示 `direct`、`relay "<region>"` 或 `peer-relay`。兩個指令的輸出格式不同，判讀方式也不同，詳見 [用 tailscale netcheck 與 tailscale ping 診斷連線](/troubleshooting/netcheck-and-ping/)。
+
+連線常常走 DERP、速度不理想時，可以參考 [直連與 DERP 中繼：為什麼連線變慢、怎麼改善](/troubleshooting/direct-vs-derp/)；想用自己的裝置或伺服器當中繼，見 [Peer Relay](/features/peer-relay/) 與 [自架 DERP 伺服器](/features/custom-derp/)。
 
 ## 和傳統 hub-and-spoke VPN 的差異
 
@@ -115,7 +117,8 @@ DERP 中繼的是已經由 WireGuard 加密的封包，不是應用程式的明�
 - **網路路由**：[Subnet Router：存取整個區網內沒裝 Tailscale 的設備](/features/subnet-router/) 讓不能安裝 Tailscale 的設備透過閘道加入可存取範圍；[Exit Node：讓所有流量經由指定裝置出去](/features/exit-node/) 則把上網流量導向指定節點。
 - **效能調校**：[效能調校](/performance/) 整理 Subnet Router 與 Exit Node 的轉送效能，以及 UDP GRO forwarding、BBR 的適用範圍。
 - **各平台**：[macOS 上安裝 Tailscale 的三種方法](/platforms/macos-install/) 比較 Mac App Store、Standalone 與開源 `tailscaled` 版本。
-- **存取控制**：本站尚未整理專文；之後會再說明如何用 tailnet policy 決定使用者與節點可以連到哪些服務。
+- **存取控制**：[ACL / Grants 入門：限制誰能連到哪裡](/admin/acl-grants/) 說明如何用 tailnet policy 決定使用者與節點可以連到哪些服務。
+- **疑難排解**：[疑難排解](/troubleshooting/) 整理連線診斷、直連與 DERP 中繼，以及 DNS、IP 衝突、防火牆等常見問題。
 
 ## 參考資料
 
