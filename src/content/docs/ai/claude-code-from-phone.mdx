@@ -48,7 +48,7 @@ mosh 也解決了手機輸入的延遲問題——它會先在本地預測你打
 
 ### mosh 的坑：不轉送 SSH agent
 
-mosh 不是 SSH 的透明替代品。它**不支援 SSH agent forwarding**，也不支援 port forwarding、X forwarding（mosh 手冊明寫，agent forwarding 至今還是 open issue）。實際後果是：**在 mosh session 裡 `git push`／`git pull` 走 SSH 會失敗**，因為那台主機拿不到你轉送過去的 SSH 金鑰。
+mosh 不是 SSH 的透明替代品。mosh(1) 手冊明寫它不支援 X forwarding 與 SSH 的非互動用途（含 port forwarding、sshfs）；**SSH agent forwarding 也一樣不支援**，這點多年來只有未合併的社群 patch（GitHub issue [#696](https://github.com/mobile-shell/mosh/issues/696)、[#1297](https://github.com/mobile-shell/mosh/issues/1297) 至今 open）。實際後果是：**在 mosh session 裡 `git push`／`git pull` 走 SSH 會失敗**，因為那台主機拿不到你轉送過去的 SSH 金鑰。
 
 幾個解法：
 
@@ -86,7 +86,7 @@ claude --remote-control "專案"   # 一般互動 session，同時開 Remote Con
 
 Remote Control 的限制比 DIY 路線多，官方文件寫得很清楚：
 
-- **要 claude.ai 訂閱**：Pro、Max、Team、Enterprise 方案才能用；用 API key 登入、或走 Amazon Bedrock／Google Cloud／Microsoft Foundry、或把 `ANTHROPIC_BASE_URL` 指向 LLM gateway／proxy，都不能用。**如果你平常是用 API key 或 Bedrock 跑 Claude Code，Remote Control 直接不可用**，這條路就走不通。
+- **要 claude.ai 訂閱**：Pro、Max、Team、Enterprise 方案才能用；用 API key 登入、或走 Amazon Bedrock／Google Cloud／Microsoft Foundry、或把 `ANTHROPIC_BASE_URL` 指向 LLM gateway／proxy，都不能用。**如果你平常是用 API key 或 Bedrock 跑 Claude Code，Remote Control 直接不可用**，這條路就走不通。另外，Team、Enterprise 上 Remote Control 預設是**關閉**的，要 Owner 先在 admin settings 打開 toggle，成員才能用。
 - **一個互動 session 一個遠端連線**：非 server 模式時，每個 Claude Code 行程一次只對應一個 remote session。要一次開多個，得用 server 模式（`--capacity` 預設 32 個並行 session）。
 - **transcript 會存到 Anthropic**：連線期間，你的訊息、Claude 的回覆、tool 活動都會存到 Anthropic 伺服器，用來保持多裝置同步與斷線重連。開啟 Zero Data Retention 的組織不能用 Remote Control。
 - **有些指令只能在本機**：`/plugin`、`/resume` 這類只有終端機介面才有的指令，在手機或網頁上用不了。
@@ -97,20 +97,20 @@ Remote Control 內建手機推播：Claude 會在長時間任務跑完、或需�
 
 ### 安全上的提醒
 
-session URL 和 QR code 就是直接接進那個工作階段的入口，別在公開場合展示。另外它雖然不開入站埠，但連線期間 transcript 會存到 Anthropic 伺服器，這和 DIY 路線「一切都留在自己機器上」是兩種不同的信任模型。
+session URL 和 QR code 是接進那個工作階段的入口，別在公開場合展示。不過官方文件也說明，Remote Control 的連線用的是**多把短期、各自限用途的憑證**（各自獨立到期），而且要登入同一個 claude.ai 帳號才看得到 session，不是「拿到 URL 就等於拿到 session」。另外它雖然不開入站埠，但連線期間 transcript 會存到 Anthropic 伺服器，這和 DIY 路線「一切都留在自己機器上」是兩種不同的信任模型。
 
 ## 兩條路線怎麼選
 
-|                 | Tailscale + SSH + tmux                   | Remote Control                             |
-| --------------- | ---------------------------------------- | ------------------------------------------ |
-| 連線方式        | SSH（經 Tailscale），私人網路            | 對外 HTTPS，經 Anthropic 伺服器            |
-| 要裝什麼        | Tailscale、終端機 App、tmux（可選 mosh） | 什麼都不用，Claude Code 內建               |
-| 帳號要求        | 沒有限制，API key／Bedrock 都能用        | 一定要 claude.ai 訂閱（Pro 以上）          |
-| 多個 session    | tmux 開幾個都行                          | 非 server 模式一次一個；server 模式最多 32 |
-| 推播通知        | 自己用 hook 接 ntfy／Pushover            | 內建                                       |
-| transcript 去向 | 留在自己機器上                           | 連線期間存到 Anthropic                     |
-| 完整終端        | 有，所有 `/` 指令都能用                  | 部分指令只在本機                           |
-| 耐斷線          | 靠 mosh（UDP）                           | 靠 Claude Code 自動重連                    |
+|                 | Tailscale + SSH + tmux                   | Remote Control                                                           |
+| --------------- | ---------------------------------------- | ------------------------------------------------------------------------ |
+| 連線方式        | SSH（經 Tailscale），私人網路            | 對外 HTTPS，經 Anthropic 伺服器                                          |
+| 要裝什麼        | Tailscale、終端機 App、tmux（可選 mosh） | 什麼都不用，Claude Code 內建                                             |
+| 帳號要求        | 沒有限制，API key／Bedrock 都能用        | 一定要 claude.ai 訂閱（Pro 以上）                                        |
+| 多個 session    | tmux 開幾個都行                          | 非 server 模式一次一個；server 模式預設上限 32（可用 `--capacity` 調整） |
+| 推播通知        | 自己用 hook 接 ntfy／Pushover            | 內建                                                                     |
+| transcript 去向 | 留在自己機器上                           | 連線期間存到 Anthropic                                                   |
+| 完整終端        | 有，所有 `/` 指令都能用                  | 部分指令只在本機                                                         |
+| 耐斷線          | 靠 mosh（UDP）                           | 靠 Claude Code 自動重連                                                  |
 
 大方向是這樣：
 
