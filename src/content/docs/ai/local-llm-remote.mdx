@@ -8,29 +8,29 @@ sidebar:
 
 在家裡跑本地 LLM（大型語言模型），出門在外用同一套，是「不把資料送上雲」的常見做法。三個常見的選擇是：**Ollama**（CLI + API）、**LM Studio**（桌面 App，內建 OpenAI 相容 API server）和 **Open WebUI**（網頁介面，可以接前兩者當後端）。
 
-問題是這三樣東西預設都只聽 `127.0.0.1`——在家裡用沒問題，出了門就連不到。多數教學的解法是把它改成綁 `0.0.0.0`，但那就是把一個沒有驗證的 LLM API 直接開給整個網路。這篇講正確的做法：後端保持 loopback，用 Tailscale 把它只開給 tailnet 裡的自己。
+問題是，要安全地從外面用並不容易。Ollama 和 LM Studio 預設只聽 `127.0.0.1`，出了門連不到，多數教學的解法是改綁 `0.0.0.0`，但那等於把沒有驗證的 LLM API 直接開給整個網路；Open WebUI 更要注意——它預設就綁 `0.0.0.0`。這篇講正確的做法：讓後端只對 loopback，再用 Tailscale 把它只開給 tailnet 裡的自己。
 
-> 本文依 2026 年 10 月的 Tailscale、Ollama、LM Studio 與 Open WebUI 官方文件整理，以 Tailscale v1.104、Ollama v0.40.x 為準；LM Studio 與 Open WebUI 官方文件未綁定特定版本（Open WebUI 官方映像檔採 `:main` 滾動發行）。「175,000 台暴露 Ollama」出自 SentinelOne 與 Censys 2026 年 1 月的聯合研究報告。本文未在實機跑過整套設定，屬文件整理。
+> 本文依 2026 年 10 月的 Tailscale、Ollama、LM Studio 與 Open WebUI 官方文件整理，以 Tailscale v1.104、Ollama v0.40.x 為準；LM Studio 的 API token 驗證需 0.4.0 以上（其餘設定未綁定版本），Open WebUI 官方映像檔採 `:main` 滾動發行。「175,000 台暴露 Ollama」出自 SentinelOne 與 Censys 2026 年 1 月的聯合研究報告。本文未在實機跑過整套設定，屬文件整理。
 
 ## 反面教材：175,000 台暴露在公網的 Ollama
 
-2026 年 1 月，SentinelOne 旗下 SentinelLABS 與 Censys 發布聯合研究，掃到網路上有 **175,000 台 Ollama 主機直接暴露在公網**，分布在 130 個國家；研究期間 293 天共記錄 723 萬次觀測，其中約 23,000 台主機貢獻了絕大多數活動。超過 48% 的主機經由 API 回報自己具備 tool-calling 能力，還有至少 201 台跑著明確移除安全護欄的 prompt 樣板。
+2026 年 1 月，SentinelOne 旗下 SentinelLABS 與 Censys 發布聯合研究，掃到網路上有 **175,000 台 Ollama 主機直接暴露在公網**，分布在 130 個國家；研究期間 293 天共記錄 723 萬次觀測，其中約 23,000 台主機貢獻了多數活動（觀察中 13% 的主機產出約 76% 的觀測）。超過 48% 的主機經由 API 回報自己具備 tool-calling 能力，還有至少 201 台跑著明確移除安全護欄的 prompt 樣板。
 
-重點是，這不是什麼高深攻擊——Ollama 預設綁 `127.0.0.1:11434`，要暴露到公網**只需要改一個環境變數**（`OLLAMA_HOST` 設成 `0.0.0.0` 或公網介面）。而 Ollama 的 API **本身沒有內建驗證**，任何連得到的人都等於能免費借用你的 GPU／CPU 算力（研究稱之為 LLMjacking：攻擊者用你的機器跑推理、你付電費），甚至透過 prompt 誘導模型吐出不該說的東西。
+重點是，這不是什麼高深攻擊——Ollama 預設綁 `127.0.0.1:11434`，要暴露到公網**只需要改一個環境變數**（`OLLAMA_HOST` 設成 `0.0.0.0` 或公網介面）。而 Ollama 的 API **本身沒有內建驗證**，任何連得到的人都等於能免費借用你的 GPU／CPU 算力（SentinelOne 報告稱之為 resource hijacking，社群一般叫這類行為 LLMjacking：攻擊者用你的機器跑推理、你付電費），甚至透過 prompt 誘導模型吐出不該說的東西。
 
 這和 [OpenClaw／Hermes Agent](/ai/openclaw-hermes/) 一文裡的 CVE-2026-25253 是同一種病：預設的「方便」不等於安全。對本地 LLM 來說，防線就是一條：**別讓它直接見公網，甚至別讓它見區網**。
 
-## 三樣東西的預設，其實都對
+## 三樣東西的預設：兩樣綁 loopback，一樣要動手
 
-好消息是，這三樣東西的預設姿態都是安全的——綁 loopback，只是外面連不到：
+Ollama 和 LM Studio 預設綁 loopback，安全但外面連不到；Open WebUI 是例外——裸機跑 `open-webui serve` 預設綁 `0.0.0.0:8080`，Docker 映像檔在容器內也是（否則 `-p` 埠映射不會生效），所以它預設就會出現在區網：
 
 | 工具       | 預設監聽                | 對應的「暴露」設定                                                       |
 | ---------- | ----------------------- | ------------------------------------------------------------------------ |
 | Ollama     | `127.0.0.1:11434`       | `OLLAMA_HOST=0.0.0.0`（或綁公網介面）                                    |
 | LM Studio  | `127.0.0.1:1234`（API） | 「Serve on Local Network」開關，或 CLI `lms server start --bind 0.0.0.0` |
-| Open WebUI | `127.0.0.1:8080`        | 反代到公網、或 `tailscale funnel`                                        |
+| Open WebUI | `0.0.0.0:8080`          | 反代到公網、`tailscale funnel`，或 Docker 忘了把埠綁回 loopback          |
 
-所以「在外面用家裡的 LLM」要做的不是把它綁出去，而是**維持 loopback，用 Tailscale Serve 從 tailnet 裡轉發進來**。Serve 幫你處理 HTTPS 憑證，還會加上身分標頭，讓後端認得連進來的是誰。機制見 [Serve 的身分標頭](/features/serve-identity-headers/)。
+所以「在外面用家裡的 LLM」要做的不是把它綁出去，而是**讓後端只聽 loopback，再用 Tailscale Serve 從 tailnet 裡轉發進來**。Serve 幫你處理 HTTPS 憑證，還會加上身分標頭，讓後端認得連進來的是誰。機制見 [Serve 的身分標頭](/features/serve-identity-headers/)。
 
 ## Ollama：保持 loopback，用 Serve 轉發
 
@@ -42,7 +42,7 @@ Ollama 有兩個相關的環境變數：
 要從外面用，**不要動 `OLLAMA_HOST`**，讓它繼續綁 loopback，再用 Serve 轉發：
 
 ```bash
-tailscale serve --bg https / http://127.0.0.1:11434
+tailscale serve --bg http://127.0.0.1:11434
 ```
 
 之後 tailnet 上的裝置就能用 `https://<你的主機>.tailxxxxx.ts.net` 存取 Ollama 的 API，走 HTTPS，而且是 tailnet 內限定。這比 `OLLAMA_HOST=0.0.0.0` 好在三點：只對 tailnet 開放、有 TLS、會帶身分標頭（雖然 Ollama 本身不會讀身分標頭做授權，但至少請求是經由已驗證的 tailnet 身分進來）。
@@ -53,11 +53,15 @@ tailscale serve --bg https / http://127.0.0.1:11434
 
 Open WebUI 是這三樣裡最適合「人在外面」的一個：它有網頁介面，而且官方文件有完整的 Tailscale 整合頁。兩步：
 
-**1. 用 Serve 給 HTTPS。** Open WebUI 預設跑在 `127.0.0.1:8080`：
+**1. 先讓它只聽 loopback，再用 Serve 給 HTTPS。** Open WebUI 預設綁 `0.0.0.0:8080`。用 Docker 直接跑時，把主機埠綁回 loopback，不要讓它出現在區網：
 
 ```bash
-tailscale serve https / http://localhost:8080
+# 主機埠只綁 loopback，區網上其他人連不到 8080
+docker run -p 127.0.0.1:8080:8080 ghcr.io/open-webui/open-webui:main
+tailscale serve --bg http://localhost:8080
 ```
+
+若照官方 Tailscale 整合頁用 sidecar 部署，Open WebUI 容器本身不發布 8080 埠，一樣不會暴露到區網。
 
 **2. 用信任標頭做 SSO。** Open WebUI 可以信任 `Tailscale-User-Login` 當登入身分，設定兩個環境變數：
 
@@ -73,7 +77,7 @@ environment:
 - CORS_ALLOW_ORIGIN=https://<你的主機>.tailxxxxx.ts.net
 ```
 
-官方文件特別提醒：**如果 Open WebUI 和 tailscaled 跑在同一個網路環境，使用者可能繞過 Serve、直接連後端的 8080 埠**，跳過信任標頭驗證。解法是讓後端只聽 loopback（Docker 的 Open WebUI 預設即如此），或用 [grants](/admin/acl-grants/) 只放行 443。這個「後端只聽 localhost」的原則，以及「不能直接信身分標頭」的理由，見 [Serve 的身分標頭](/features/serve-identity-headers/)。
+官方文件特別提醒：**如果 Open WebUI 和 tailscaled 跑在同一個網路環境，使用者可能繞過 Serve、直接連後端的 8080 埠**，跳過信任標頭驗證。解法是讓後端只聽 loopback（Docker 用 `-p 127.0.0.1:8080:8080`，或 sidecar 不發布埠），或用 [grants](/admin/acl-grants/) 只放行 443。這個「後端只聽 localhost」的原則，以及「不能直接信身分標頭」的理由，見 [Serve 的身分標頭](/features/serve-identity-headers/)。
 
 ## LM Studio：別開「Serve on Local Network」
 
@@ -82,7 +86,7 @@ LM Studio 的 API server 在 **Developer 分頁**啟用，預設 `http://localho
 所以從外面用 LM Studio，一樣是保持 localhost，用 Serve 轉發：
 
 ```bash
-tailscale serve --bg https / http://127.0.0.1:1234
+tailscale serve --bg http://127.0.0.1:1234
 ```
 
 LM Studio 沒有像 Open WebUI 那樣的信任標頭 SSO，它的驗證是另一套：**Require Authentication** 開關，開了之後 API client 要帶 API token 走 `Authorization` 標頭。如果你真的需要把 LM Studio 綁到非 loopback（例如同一台機器上有別的需求），至少把這個驗證開起來，不要用無驗證的裸 API。對「人在外面」的情境，Serve + loopback 是最省事也最安全的組合。
@@ -119,13 +123,13 @@ grants 管的是 tailnet 內部連線，不影響這台主機自己連出去（�
 
 ## 小結
 
-| 工具       | 外面怎麼連                                       | 身分驗證                                  |
-| ---------- | ------------------------------------------------ | ----------------------------------------- |
-| Ollama     | `tailscale serve https / http://127.0.0.1:11434` | 無內建；靠 Serve + grants 擋在 tailnet 外 |
-| LM Studio  | `tailscale serve https / http://127.0.0.1:1234`  | 無信任標頭；可開 API token 驗證           |
-| Open WebUI | `tailscale serve https / http://localhost:8080`  | 信任標頭 SSO（`Tailscale-User-Login`）    |
+| 工具       | 外面怎麼連                                    | 身分驗證                                  |
+| ---------- | --------------------------------------------- | ----------------------------------------- |
+| Ollama     | `tailscale serve --bg http://127.0.0.1:11434` | 無內建；靠 Serve + grants 擋在 tailnet 外 |
+| LM Studio  | `tailscale serve --bg http://127.0.0.1:1234`  | 無信任標頭；可開 API token 驗證           |
+| Open WebUI | `tailscale serve --bg http://localhost:8080`  | 信任標頭 SSO（`Tailscale-User-Login`）    |
 
-三樣東西的結論一樣：**別改綁定位址，讓它們繼續聽 loopback，用 Tailscale Serve 把 HTTPS 轉發進 tailnet**。真要直接聽網路介面時，綁 Tailscale IP 而不是 `0.0.0.0`，並確保驗證與 grants 都到位。175,000 台暴露的 Ollama 已經證明，一個「綁 `0.0.0.0` 比較方便」的決定，會變成別人的免費算力。
+三樣東西的結論一樣：**讓後端只聽 loopback，用 Tailscale Serve 把 HTTPS 轉發進 tailnet**。Ollama 和 LM Studio 預設就是 loopback，別去動它；Open WebUI 則要主動把埠綁回 loopback（`-p 127.0.0.1:8080:8080` 或 sidecar 不發布埠）。真要直接聽網路介面時，綁 Tailscale IP 而不是 `0.0.0.0`，並確保驗證與 grants 都到位。175,000 台暴露的 Ollama 已經證明，一個「綁 `0.0.0.0` 比較方便」的決定，會變成別人的免費算力。
 
 ## 參考資料
 
@@ -134,6 +138,7 @@ grants 管的是 tailnet 內部連線，不影響這台主機自己連出去（�
 - [Ollama FAQ 原始檔（GitHub）](https://github.com/ollama/ollama/blob/main/docs/faq.mdx)
 - [LM Studio 官方文件：Server Settings](https://lmstudio.ai/docs/developer/core/server/settings)
 - [LM Studio 官方文件：Serve on Local Network](https://lmstudio.ai/docs/developer/core/server/serve-on-network)
+- [LM Studio 官方文件：Authentication（API token 驗證需 0.4.0 以上）](https://lmstudio.ai/docs/developer/core/authentication)
 - [Open WebUI 官方文件：Tailscale Integration](https://docs.openwebui.com/tutorials/auth-sso/tailscale)
 - [Open WebUI 官方文件：HTTPS using Tailscale](https://docs.openwebui.com/reference/https/tailscale)
 - [Serve 的身分標頭：讓自架服務直接認得 tailnet 使用者](/features/serve-identity-headers/)
