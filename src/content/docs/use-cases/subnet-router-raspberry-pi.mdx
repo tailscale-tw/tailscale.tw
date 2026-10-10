@@ -18,7 +18,7 @@ Subnet router 要「一直在線」，否則網段路由會跟著失效。Pi 的
 - **有線網路**。路由器要用有線乙太網路才穩，Wi-Fi 打洞與轉送都不穩定。
 - **Linux**，IP forwarding、`ethtool` 調校、系統服務都齊全。
 
-Pi 3（含）以前的機型是 100 Mbps 乙太網路、Pi 4 與 Pi 5 是 Gigabit，但實際上 WireGuard 的吞吐通常先卡在 CPU 而不是網路線，所以別期待一台小 Pi 跑滿 Gigabit。要衝轉送效能，照站內 [UDP GRO forwarding](/performance/udp-gro-forwarding/) 那篇調校，數字都以該文為準。
+Pi 3 Model B 與更早的機型是 100 Mbps 乙太網路；Pi 3 Model B+ 有 Gigabit 晶片但卡在 USB 2.0（上限約 300 Mbps）；Pi 4 與 Pi 5 是 Gigabit。實際上 WireGuard 的吞吐通常先卡在 CPU 而不是網路線，所以別期待一台小 Pi 跑滿 Gigabit。要衝轉送效能，照站內 [UDP GRO forwarding](/performance/udp-gro-forwarding/) 那篇調校，數字都以該文為準。
 
 ## 1. 安裝 Raspberry Pi OS Lite
 
@@ -73,7 +73,6 @@ sudo tailscale set --advertise-routes=192.168.1.0/24
 
 ```bash
 sudo tailscale set --advertise-exit-node
-sudo tailscale up
 ```
 
 接著到管理後台的 **Machines → Edit route settings** 核准網段與 exit node（或設 `autoApprovers` 免手動）。核准、用戶端接受路由的完整流程見 [Subnet Router](/features/subnet-router/) 與 [Exit Node](/features/exit-node/)。
@@ -108,9 +107,9 @@ sudo etherwake -i eth0 AA:BB:CC:DD:EE:FF
 ## 小結
 
 | 步驟                | 指令／動作                                                   |
-| ------------------- | ------------------------------------------------------------ | --- |
+| ------------------- | ------------------------------------------------------------ |
 | 安裝 Pi OS          | Raspberry Pi Imager 寫入 Lite 映像、開 SSH                   |
-| 裝 Tailscale        | `curl -fsSL https://tailscale.com/install.sh                 | sh` |
+| 裝 Tailscale        | 官方 Linux 安裝器（見步驟 2，設好 systemd 開機自啟）         |
 | 開 IP forwarding    | `net.ipv4.ip_forward = 1`（寫進 `99-tailscale.conf`）        |
 | 廣告路由／exit node | `tailscale set --advertise-routes=... --advertise-exit-node` |
 | 核准                | 管理後台 Edit route settings（或 `autoApprovers`）           |
