@@ -1,0 +1,107 @@
+---
+title: QuickConnect 與 Tailscale：什麼時候用哪一個
+description: 比較 Synology QuickConnect 與 Tailscale 兩種遠端存取 NAS 的方式：中繼與直連的差別、只限群暉自家 App 還是全部服務、安全性怎麼看，以及 Synology Photos／Drive 手機 App 要怎麼設定
+sidebar:
+  order: 6
+  label: QuickConnect 與 Tailscale
+---
+
+要從外面連回家裡的 Synology NAS，有兩條常見的路：**QuickConnect**（群暉內建、免設定）和 **Tailscale**（把 NAS 變成一個 VPN 節點）。很多人以為它們是二選一，其實不是——兩者可以並存，只是擅長的事不同。這篇把它們的運作方式、差別和適用情境講清楚。
+
+> 本文依 2026 年 10 月的 Synology 官方 QuickConnect 白皮書（2023 年 6 月版）與 Tailscale 官方文件整理，以 Tailscale v1.104、DSM 7.2 為準。本文未在實機逐一驗證兩種連線，屬文件整理。
+
+## 本質上的差別：連回 NAS，還是把 NAS 變成節點
+
+兩者解決的其實是不同的問題：
+
+- **QuickConnect** 的目標是「讓外面的裝置連回 NAS，開啟群暉自家的服務」（DSM、File Station、Photos、Drive、Surveillance Station 等）。它負責把連線導到 NAS，但**只服務群暉自家 App 和 DSM 介面**。
+- **Tailscale** 把整台 NAS 加入一個私有的 mesh VPN（tailnet），NAS 變成 tailnet 上的一個節點。之後**任何** TCP／UDP 服務都能走——不只是群暉 App，SMB、SSH、Docker 容器裡的服務、甚至是區網裡的其他設備（透過 subnet router）都行。
+
+一句話：QuickConnect 是「群暉服務的遠端入口」，Tailscale 是「整台 NAS 的私有網路」。
+
+## QuickConnect 怎麼連：先打洞，打不通才中繼
+
+QuickConnect 白皮書把連線流程寫得很清楚，依序試三種方式：
+
+1. **LAN／WAN 偵測**：用 QuickConnect Server 上登記的公開 IP、區網 IP、NAT 型態，判斷能不能直接連。
+2. **Hole punching（打洞）**：NAS 和客戶端各自在 NAT 上打出一個洞，經 QuickConnect Server 交換洞的位置，然後建立點對點的虛擬通道。成功的話就是**直連**，不經過任何中繼。
+3. **Relay service（中繼）**：打洞失敗時的最後手段，連線改走 **Synology 的 Relay Server** 中轉。白皮書明說這會「造成明顯延遲」，所以是「最後才會用的方式」。
+
+所以 QuickConnect 也不是每次都走中繼——NAT 條件好的時候它一樣能直連。但關鍵差別在下一節。
+
+## Tailscale 怎麼連：WireGuard 加 DERP
+
+Tailscale 的原理站內已經講過（見 [NAT 穿透原理](/getting-started/nat-traversal/)），這裡只提對比的要點：
+
+- 資料平面是 **WireGuard**，端到端加密。
+- 一樣有 NAT 穿透（打洞），打不通時走 **DERP 中繼**（Tailscale 營運的伺服器）。
+- 和 QuickConnect 的關鍵差別：**DERP 中繼看不到內容**——它轉送的只是 WireGuard 加密後的封包；而 QuickConnect 的 relay 是 Synology 的伺服器，流量要經過它的服務（白皮書聲稱有端到端加密，但中繼仍是 Synology 控制的一跳）。
+
+兩者都會優先直連、中繼是備援；差別在中繼「那一跳」由誰控制、以及加密的邊界在哪裡。
+
+## 比較
+
+|                     | QuickConnect                             | Tailscale                                   |
+| ------------------- | ---------------------------------------- | ------------------------------------------- |
+| 本質                | 群暉服務的遠端入口                       | 把 NAS 變成 tailnet 節點                    |
+| 連得上的服務        | 只限群暉自家 App 與 DSM 介面             | **全部** TCP／UDP 服務（SMB、SSH、Docker…） |
+| 直連 vs 中繼        | 先打洞直連，失敗走 Synology Relay Server | 先打洞直連，失敗走 DERP（加密中繼）         |
+| 中繼那一跳          | Synology 控制的 Relay Server             | Tailscale 的 DERP，只看得到加密封包         |
+| 要不要裝 VPN 用戶端 | 不用，App 直接登入                       | 每台裝置要裝 Tailscale 並登入同一個 tailnet |
+| 額外能力            | 無（僅遠端存取）                         | subnet router、exit node、分享給其他人      |
+| 設定難度            | 最簡單（開個 QuickConnect ID 就好）      | 稍多（每台裝置裝用戶端）                    |
+
+## 安全性怎麼看
+
+QuickConnect 白皮書列出它的安全措施：伺服器資訊與憑證保護、NAS 與客戶端之間的端到端加密、網頁入口的受信任憑證、以及高安全性的資料中心。就「傳輸」這層來說，Synology 聲稱是加密的。
+
+真正要留意的，其實不是 QuickConnect 本身的加密，而是**「把 NAS 暴露到網際網路」這件事**。2019 年那波也打到 Synology NAS 的勒索軟體（官方聲明提到同一波同時鎖定多家廠商的 NAS 機型），Synology 官方調查後聲明：原因是**字典攻擊**（弱密碼），**不是特定系統漏洞**——換句話說，是「開在公網 + 密碼太弱」的組合，而不是 QuickConnect 有洞。之後 2021 年的 eCh0raix 也是鎖定暴露在網路上、用預設或弱憑證的 NAS。
+
+從這個角度看，QuickConnect 與 Tailscale 的安全差異主要在一點：
+
+- **QuickConnect** 需要把 NAS（或其中繼入口）暴露到網際網路，攻擊面是「所有能連到 QuickConnect 入口的人」。安全性很大程度取決於你的密碼強度與 DSM 本身有沒有準時更新。
+- **Tailscale** 預設不把任何埠開到公網，只有同一個 tailnet 裡的裝置連得到。攻擊面小很多，而且可以做 [grants](/admin/acl-grants/) 最小權限。
+
+兩邊都不是「絕對安全／不安全」，但 Tailscale 的預設姿勢（不開埠、只對 tailnet）通常比 QuickConnect（需對公網可達）來得小。若 NAS 上放的是重要資料，這點值得考慮。
+
+## 什麼時候用哪一個
+
+- **只想在手機上看照片、傳檔案、開 DSM**，而且不想在每台裝置裝東西：用 **QuickConnect**。它最簡單，群暉自家 App 開箱即用。
+- **要用群暉 App 以外的服務**（SMB 掛載、SSH、Docker、自架服務），或想當 subnet router／exit node：用 **Tailscale**。
+- **給家人、朋友用，對方不想裝 VPN**：QuickConnect 的分享連結比較省事；Tailscale 的 node sharing 也能做，但對方要裝用戶端。
+- **兩者並存**：完全沒問題。QuickConnect 留給群暉 App 的簡單情境，Tailscale 留給進階用途，互不影響。
+
+## Synology Photos／Drive 手機 App 的設定
+
+群暉的手機 App（Photos、Drive、DS file 等）登入時，欄位是「**位址或 QuickConnect ID**」。這個欄位決定了走哪條路：
+
+- **用 QuickConnect**：填你的 QuickConnect ID（例如 `mynas`），App 就會走 QuickConnect 的連線流程。
+- **用 Tailscale**：手機先裝 Tailscale 並連上同一個 tailnet，然後在同一個欄位填 NAS 的 **MagicDNS 名稱**（例如 `mynas.tailxxxxx.ts.net`）或 **Tailscale IP**（`100.x.y.z`）。App 就會走 Tailscale 的加密通道。
+
+用 Tailscale 時有兩個要注意的點：
+
+- 走 MagicDNS 名稱時，App 通常會用 HTTPS 連線，需要 NAS 上有對應名稱的憑證，做法見 [在 Synology NAS 上安裝 Tailscale 憑證方法](/synology/install-tailscale-certificate-on-synology/)。
+- 手機在外面時，記得先讓 Tailscale 連上（VPN On Demand 或手動），App 才連得到。
+
+另外，Tailscale 在 DSM 7 上預設只能「被連入」；如果 NAS 上的服務（例如 Docker）要主動連出到 tailnet 的其他裝置，需要另外開 TUN，見 [DSM 7 讓 NAS 上的其他服務也能連出去：TUN 與 configure-host](/synology/dsm7-outbound-tun/)。
+
+## 小結
+
+| 你的需求                                 | 選哪個         |
+| ---------------------------------------- | -------------- |
+| 只看照片／傳檔案／開 DSM，不想裝東西     | QuickConnect   |
+| 要用群暉以外的服務、當 VPN、要最小攻擊面 | Tailscale      |
+| 兩個都要                                 | 並存，各司其職 |
+
+兩者不是競爭關係，而是互補：QuickConnect 贏在簡單，Tailscale 贏在範圍廣、預設更收斂。資料重要的話，用 Tailscale 把 NAS 收進 tailnet、再把 QuickConnect 留給偶爾的方便情境，是常見的搭配。
+
+## 參考資料
+
+- [Synology QuickConnect White Paper（Synology 官方，2023 年 6 月）](https://global.download.synology.com/download/Document/Software/WhitePaper/Os/DSM/All/enu/Synology_QuickConnect_White_Paper_enu.pdf)
+- [Synology QuickConnect White Paper（Synology 知識中心）](https://kb.synology.com/en-sg/WP/Synology_QuickConnect_White_Paper/4)
+- [Synology® Urges All Users to Take Immediate Action to Protect Data from Ransomware Attack（Synology 官方，2019）](https://www.synology.com/en-us/company/news/article/2019JulyRansomware/Synology%C2%AE%20Urges%20All%20Users%20to%20Take%20Immediate%20Action%20to%20Protect%20Data%20from%20Ransomware%20Attack)
+- [Synology NAS Devices Targeted in Large-Scale Brute-Force Attack（Bitdefender，2021，eCh0raix）](https://www.bitdefender.com/en-us/blog/hotforsecurity/synology-nas-devices-targeted-in-large-scale-brute-force-attack)
+- [NAT 穿透原理：Tailscale 怎麼在兩個 NAT 之間打通連線](/getting-started/nat-traversal/)
+- [直連與 DERP 中繼：為什麼連線變慢、怎麼改善](/troubleshooting/direct-vs-derp/)
+- [DSM 7 讓 NAS 上的其他服務也能連出去：TUN 與 configure-host](/synology/dsm7-outbound-tun/)
+- [在 Synology NAS 上安裝 Tailscale 憑證方法](/synology/install-tailscale-certificate-on-synology/)
