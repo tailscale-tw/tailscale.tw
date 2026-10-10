@@ -1,0 +1,181 @@
+---
+title: Docker 官方映像檔：環境變數、userspace 與 Serve 設定檔
+description: 用 tailscale/tailscale 官方 Docker 映像檔把容器或 sidecar 接進 tailnet：TS_AUTHKEY、TS_STATE_DIR、TS_USERSPACE、TS_SERVE_CONFIG、TS_EXTRA_ARGS 等環境變數、userspace 與 kernel 模式的差別、state volume 與版本釘選
+sidebar:
+  order: 0.5
+  label: Docker 官方映像檔
+---
+
+想把 Docker 容器接進 tailnet——不管是跑一個獨立容器，還是用 **sidecar** 讓另一個服務（nginx、Grafana、自架 App）共享它的網路——用 Tailscale 官方映像檔 `tailscale/tailscale` 最省事。它的行為靠**環境變數**控制，這篇把常用的幾個講清楚，並給一份能實際跑起來的 compose。
+
+> 本文依 2026 年 10 月的 Tailscale 官方 Docker 文件與原始碼（`cmd/containerboot`）整理，以 Tailscale v1.104 為準。本文未在實機跑過下述 compose，屬文件整理；環境變數的名稱與預設值均對照官方文件與 `containerboot/settings.go`。
+
+## 映像檔怎麼運作
+
+官方映像檔的進入點是 **containerboot**：一個小程式，讀環境變數、跑起 `tailscaled`、登入、再依設定把服務接進來。所以 Docker 版不是「手動 `tailscale up`」，而是「填對環境變數，剩下的它自己來」。
+
+最簡單的 `docker run`：
+
+```bash
+docker run -d \
+  --name tailscale \
+  -e TS_AUTHKEY=tskey-auth-xxxx \
+  -e TS_STATE_DIR=/var/lib/tailscale \
+  -v tailscale-state:/var/lib/tailscale \
+  --network host \
+  tailscale/tailscale:v1.104.0
+```
+
+跑起來後，到 [Machines](https://console.tailscale.com/admin/machines) 頁面就能看到它。上面的 `--network host` 是最簡單的接法（直接共享宿主機的網路）；不想用 host 網路時就改用 `cap_add` 或 userspace 模式，見下面。
+
+## 常用環境變數
+
+| 變數                       | 用途                                                                            |
+| -------------------------- | ------------------------------------------------------------------------------- |
+| `TS_AUTHKEY`               | 驗證用的 auth key（或 OAuth client secret），等同 `tailscale login --auth-key=` |
+| `TS_STATE_DIR`             | `tailscaled` 的 state 存放路徑，一定要掛成 volume（見下）                       |
+| `TS_USERSPACE`             | 是否用 userspace networking，**預設 `true`**（設 `false` 走 kernel 模式）       |
+| `TS_SERVE_CONFIG`          | 設定 Serve／Funnel 的 JSON 檔（見下）                                           |
+| `TS_EXTRA_ARGS`            | 額外傳給 `tailscale up` 的旗標，例如 `--advertise-exit-node --ssh`              |
+| `TS_TAILSCALED_EXTRA_ARGS` | 額外傳給 `tailscaled` 的旗標，例如 `--verbose=2`                                |
+| `TS_HOSTNAME`              | 自訂在 tailnet 上的主機名稱                                                     |
+| `TS_ROUTES`                | 廣告 subnet routes，等同 `--advertise-routes=`，例如 `192.168.1.0/24`           |
+| `TS_ACCEPT_DNS`            | 接受管理後台的 DNS 設定（MagicDNS），預設不接受                                 |
+| `TS_AUTH_ONCE`             | 已登入就不再重登（預設 `false`，每次啟動都登入）                                |
+
+## 最關鍵的一點：state volume
+
+`TS_STATE_DIR` 是這套裡面**最常漏掉**的設定。看 `containerboot` 原始碼（`cmd/containerboot/tailscaled.go`）：沒設 `TS_STATE_DIR` 時，它用 `--state=mem:`、`--statedir=/tmp`——也就是**記憶體裡的暫時身分**。結果就是：每次重啟容器，管理後台就多一台新節點，舊的變成孤兒。
+
+解法是指定一個持久化的 state 目錄並掛成 volume：
+
+```yaml
+environment:
+  - TS_STATE_DIR=/var/lib/tailscale
+volumes:
+  - tailscale-state:/var/lib/tailscale
+```
+
+`TS_AUTHKEY` 搭配 `TS_AUTH_ONCE=true` 會更順：第一次用 auth key 登入、之後重啟就直接沿用既有身分，不用每次重新認證。
+
+## userspace 與 kernel 模式
+
+`TS_USERSPACE` 控制網路層怎麼實作，預設是 **userspace networking**（`true`）：
+
+- **userspace（預設）**：在任何環境都能跑，不需要 `/dev/net/tun`，也不用額外權限；缺點是效能較低。
+- **kernel（`TS_USERSPACE=false`）**：用 Linux 的 TUN 裝置，效能較好，但要掛 `/dev/net/tun` 並加 `cap_add`。
+
+要走 kernel 模式，compose 要補上：
+
+```yaml
+environment:
+  - TS_USERSPACE=false
+devices:
+  - /dev/net/tun:/dev/net/tun
+cap_add:
+  - net_admin
+  - net_raw
+```
+
+一般 sidecar 情境（讓一個 Web 服務進 tailnet）userspace 就夠了；需要轉送大量流量、當 subnet router 或 exit node 時再開 kernel 模式。userspace networking 的定位見 [官方文件](https://tailscale.com/kb/1112/userspace-networking)。
+
+## Serve 設定檔：TS_SERVE_CONFIG
+
+`TS_SERVE_CONFIG` 指向一個 JSON 檔，內容就是 [Tailscale Serve](/features/serve/) 的設定——省得你進容器手動跑 `tailscale serve`。JSON 的格式可以用 `tailscale serve status --json` 匯出。
+
+一個把 HTTPS 轉到容器內 8080 埠的範例（存成 `serve.json`）：
+
+```json
+{
+  "TCP": {
+    "443": {
+      "HTTPS": true
+    }
+  },
+  "Web": {
+    "${TS_CERT_DOMAIN}:443": {
+      "Handlers": {
+        "/": {
+          "Proxy": "http://127.0.0.1:8080"
+        }
+      }
+    }
+  }
+}
+```
+
+掛載時**要掛成目錄、不是單一檔案**（官方文件特別提醒，這樣 Tailscale 才偵測得到設定更新）：
+
+```yaml
+environment:
+  - TS_SERVE_CONFIG=/config/serve.json
+volumes:
+  - ./config:/config
+```
+
+Serve 的身分標頭、後端只聽 loopback 的原則，見 [Serve 的身分標頭](/features/serve-identity-headers/)。
+
+## 一個可實際運作的 compose（sidecar）
+
+下面把 Tailscale 當 sidecar，讓同一個 compose 裡的 nginx 走它的網路，並用 Serve 給 HTTPS（照官方範例改寫、補上版本釘選）：
+
+```yaml
+services:
+  tailscale:
+    image: tailscale/tailscale:v1.104.0
+    hostname: tailscale-nginx
+    environment:
+      - TS_AUTHKEY=tskey-auth-xxxx
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_AUTH_ONCE=true
+      - TS_SERVE_CONFIG=/config/serve.json
+      - TS_USERSPACE=false
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+      - ./config:/config
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - net_admin
+      - net_raw
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:latest
+    depends_on:
+      - tailscale
+    network_mode: service:tailscale
+    restart: unless-stopped
+
+volumes:
+  tailscale-state:
+```
+
+幾個重點：
+
+- `image: tailscale/tailscale:v1.104.0` 用**具體版本 tag**釘選，不要用 `latest`——`latest` 會半夜自己升版，行為可能變。
+- `network_mode: service:tailscale` 讓 nginx 共享 tailscale 容器的網路，nginx 自己不用開任何對外埠。
+- `TS_AUTHKEY=tskey-auth-xxxx` 換成你在管理後台產生的 key（放進 secret 管理、不要 commit 到 repo）。
+- 這個範例開了 kernel 模式（`TS_USERSPACE=false` + tun + cap_add）；只想最小化就刪掉那三行，改用預設的 userspace。
+
+若要在同一個 compose 裡接更多服務，讓每個服務各自用一個 Tailscale sidecar（或共用一個），做法見 [Docker 官方範例](https://github.com/tailscale-dev/docker-guide-code-examples)。以 sidecar 分享服務給家人的情境，站內會陸續補齊（Jellyfin、Immich、Vaultwarden 等）。
+
+## 小結
+
+| 你要做的事                          | 環境變數                              |
+| ----------------------------------- | ------------------------------------- |
+| 驗證並登入                          | `TS_AUTHKEY`（+ `TS_AUTH_ONCE`）      |
+| 別讓它每次重啟都變新節點            | `TS_STATE_DIR` + 掛 volume            |
+| 要效能、當 subnet router／exit node | `TS_USERSPACE=false` + tun + cap_add  |
+| 用 Serve 給 HTTPS                   | `TS_SERVE_CONFIG`（掛成目錄）         |
+| 廣告路由、當 exit node、開 SSH      | `TS_EXTRA_ARGS`                       |
+| 版本釘選                            | `image: tailscale/tailscale:v1.104.0` |
+
+## 參考資料
+
+- [Docker configuration parameters（Tailscale 官方，環境變數參考）](https://tailscale.com/docs/features/containers/docker/docker-params)
+- [Connect a Docker container to your tailnet with Docker Compose（Tailscale 官方）](https://tailscale.com/docs/features/containers/docker/how-to/connect-docker-container)
+- [Tailscale 原始碼：`cmd/containerboot/settings.go`](https://github.com/tailscale/tailscale/blob/main/cmd/containerboot/settings.go)
+- [Userspace networking（Tailscale 官方）](https://tailscale.com/kb/1112/userspace-networking)
+- [Tailscale Serve：在 tailnet 內分享本機服務](/features/serve/)
+- [Serve 的身分標頭：讓自架服務直接認得 tailnet 使用者](/features/serve-identity-headers/)
