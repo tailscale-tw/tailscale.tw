@@ -1,0 +1,171 @@
+---
+title: 華碩路由器裝 Tailscale：Asuswrt-Merlin + Entware
+description: 在華碩路由器（Asuswrt-Merlin 韌體）上用 amtm 裝 Entware、opkg 裝 Tailscale，當 subnet router 或 exit node：kernel vs userspace 模式、開機腳本、DNS 覆寫問題與 Entware 版本過舊的處理
+sidebar:
+  order: 3
+  label: Asuswrt-Merlin + Entware
+---
+
+把 Tailscale 裝在路由器上，整條區網的裝置（印表機、NAS、監視器、IoT）就能一起進 tailnet，不用每台都裝。華碩路由器的原廠韌體沒有套件管理員，裝不了 Tailscale，要刷 **Asuswrt-Merlin** 第三方韌體、再用 **Entware** 套件庫來裝。這篇講這條路的完整做法，以及幾個常見的坑。
+
+> 本文依 2026 年 10 月的 Asuswrt-Merlin 官方 wiki（Installing Tailscale through Entware）、Entware 套件清單與 Tailscale 官方文件整理。以 Tailscale v1.104、Asuswrt-Merlin 3004.388.x／3006.102.x 為準；Entware 的 `tailscale` 套件在 aarch64-k3.10（較新的 HND 路由器）為 1.96.1-1，舊的 2.6 核心路由器（如 RT-AC68U）停在 1.46.1-1。本文未在實機刷機與安裝，屬文件整理。
+
+## 為什麼一定要 Merlin + Entware
+
+華碩**原廠韌體**基於封閉的 Asuswrt，沒有套件管理員，也不開放安裝第三方服務，所以裝不了 Tailscale（有少數機型原廠內建 WireGuard 伺服器，但那是另一回事，不是 Tailscale）。[Asuswrt-Merlin](https://www.asuswrt-merlin.net/) 是原廠韌體的第三方改良版，保留原廠介面、加上 JFFS 自訂腳本、SSH 與 Entware 支援，才有辦法裝 Tailscale。
+
+先確認兩件事：
+
+1. **你的機型有 Merlin 韌體**。支援清單見 Merlin 的 [Supported Devices](https://www.asuswrt-merlin.net/download) 頁面。目前主力分支是 `3004.388.x`（Wi-Fi 6 的 HND 機型，如 GT-AX11000、RT-AX86U）與 `3006.102.x`（Wi-Fi 7 的 HND 機型，如 RT-BE86U、RT-AX86U Pro）。老機型（RT-AC68U 等）只到 `386.x`，而且核心是 2.6，後面會講這會影響 Tailscale 的版本。
+2. **有一個 USB 儲存**。Entware 裝在 USB 隨身碟或外接硬碟上，路由器的內建儲存放不下。
+
+刷機步驟不在這篇範圍，Merlin 官網有每台機型的韌體與說明；刷完進 Web 介面開啟 **SSH**（LAN only）、開啟 **JFFS custom scripts**。
+
+## 用 amtm 裝 Entware
+
+Entware 是嵌入式裝置的套件庫（類似 OpenWrt 的 opkg）。裝它最省事的方法是 **amtm**（Asuswrt-Merlin Terminal Menu），Merlin 已內建：
+
+```bash
+# SSH 進路由器後執行
+amtm
+```
+
+照著選單選 **Entware**，它會引導你格式化 USB、掛載並安裝 Entware。裝完後 `opkg` 就可以用了：
+
+```bash
+opkg update
+opkg list-upgradable
+```
+
+Entware 的完整說明見 Merlin wiki 的 [Entware](https://github.com/RMerl/asuswrt-merlin.ng/wiki/Entware) 頁。
+
+## 安裝 Tailscale
+
+```bash
+opkg install tailscale
+```
+
+較新的 HND 路由器（aarch64-k3.10）會裝到 `tailscale` **1.96.1-1**。**舊的 2.6 核心路由器（RT-AC68U 等 armv7sf-k2.6）要改裝 `tailscale_nohf`**，而且版本停在 1.46.1-1——這已經很舊、有已知漏洞，Entware 對 2.6 核心也停止維護了（見後面「版本過舊」一節）。
+
+## kernel 還是 userspace 模式
+
+裝完之後要決定跑在哪種模式。差別在網路層：kernel 模式用 Linux 的 TUN 裝置，效能較好但可能和 Merlin 某些功能衝突；userspace 模式用 Tailscale 自己的 userspace networking，設定簡單、相容性好但較慢。兩者都要改 Entware 的啟動腳本 `/opt/etc/init.d/S06tailscaled`。
+
+**kernel 模式**：
+
+```text
+PRECMD="modprobe tun"
+ARGS="--state=/opt/var/tailscaled.state --statedir=/opt/var/lib/tailscale"
+PREARGS="nohup"
+```
+
+kernel 模式還要在 `/jffs/scripts/firewall-start` 加一段使用者腳本（沒有就建立、記得 `chmod +x`），因為 Merlin 的防火牆在各種事件後會重啟，把 Tailscale 的規則洗掉，要重新 `tailscale up` 補回去：
+
+```sh
+#!/bin/sh
+if [ -x /opt/bin/tailscale ]; then tailscale down; tailscale up; fi
+```
+
+**userspace 模式**：只差一個旗標，而且不需要改防火牆：
+
+```text
+ARGS="--state=/opt/var/tailscaled.state --statedir=/opt/var/lib/tailscale --tun=userspace-networking"
+PREARGS="nohup"
+```
+
+官方對 userspace networking 的定位與限制，見 [Userspace networking（官方）](https://tailscale.com/kb/1112/userspace-networking)。多數家用情境、不想跟防火牆腳本糾纏，用 userspace 就夠了；在意效能、要當 subnet router 轉送大量流量，再考慮 kernel 模式。
+
+## 啟動與開機自動執行
+
+改完腳本後啟動：
+
+```bash
+/opt/etc/init.d/S06tailscaled start
+```
+
+Entware 的 `S06tailscaled` 開頭就是 `S`，會隨 Entware 的啟動流程在重開機後自動帶起來。用 `tailscale status` 確認它在線。
+
+## 設成 subnet router 或 exit node
+
+裝在路由器上最常見的兩個用途，是一次帶整條區網：
+
+```bash
+# 把區網 192.168.50.0/24（Asus 預設）宣告進 tailnet，當 subnet router
+tailscale up --advertise-routes=192.168.50.0/24
+
+# 再讓它也能當 exit node（出外時把流量導回家）
+tailscale up --advertise-exit-node --advertise-routes=192.168.50.0/24
+```
+
+第一次會印出認證網址，用瀏覽器登入完成認證。接著到 [Admin console](https://console.tailscale.com/admin/machines) 找到這台路由器：
+
+- 點 `...` → **Disable key expiry**（路由器要常開，避免金鑰過期後失聯）。
+- 點 `...` → **Edit route settings** → 啟用你要的 subnet routes 與 exit node。
+
+LAN 網段不是 `192.168.50.0/24` 的話，把指令換成你實際的網段。觀念與設定細節見 [Subnet Router](/features/subnet-router/) 與 [Exit Node](/features/exit-node/)。
+
+誰能用你的 subnet router／exit node，由 [ACL / Grants](/admin/acl-grants/) 決定——預設全開。最小權限的做法是只開給自己或特定成員，以 exit node 為例（`dst` 用 `autogroup:internet` 表示「經由它上網」）：
+
+```json
+"grants": [
+  {
+    "src": ["autogroup:admin"],
+    "dst": ["autogroup:internet"],
+    "ip": ["*"],
+  },
+],
+```
+
+subnet route 的範例（`dst` 放區網網段）與完整語法見 [ACL / Grants 入門](/admin/acl-grants/)、[Subnet Router](/features/subnet-router/) 與 [Exit Node](/features/exit-node/)。
+
+## DNS 覆寫問題
+
+Tailscale 在 router 上預設會啟用 MagicDNS（`--accept-dns`），而 router 上沒有一般的 DNS 管理程式，Tailscale 就會**直接覆寫 `/etc/resolv.conf`**，和負責區網 DNS 的 `dnsmasq` 打架，可能讓區網裝置的 DNS 查詢亂掉。
+
+路由器自己是 subnet router／exit node，不需要當 tailnet 的 DNS client，所以關掉它：
+
+```bash
+tailscale set --accept-dns=false
+```
+
+關掉之後 MagicDNS 伺服器（`100.100.100.100`）仍然在 tailnet 上運作，只是這台 router 不再把自己的 DNS 指過去。區網裡的裝置如果要解析 MagicDNS 名稱，是各裝置自己的事，與 router 無關。詳細說明見官方 [Why is resolv.conf being overwritten?](https://tailscale.com/docs/reference/faq/dns-resolv-conf)。
+
+## 更新與「Entware 版本過舊」
+
+Entware 的 `tailscale` 套件更新不如上游快：較新的 HND 路由器是 1.96.1-1，而 Tailscale 上游穩定版已經到 v1.104。更新方式：
+
+```bash
+opkg update
+opkg upgrade tailscale
+```
+
+兩個要注意的點：
+
+- **`opkg upgrade` 會把你改過的 `/opt/etc/init.d/S06tailscaled` 覆寫掉**，升級後要重新套用 kernel／userspace 模式的修改再重啟。
+- Merlin wiki 明確建議**不要**用 `tailscale update` 直接從 Tailscale 官方自更新，它可能和 asuswrt-merlin 不完全相容；用 Entware 的套件更新就好。
+
+**舊的 2.6 核心路由器（RT-AC68U 等）是最麻煩的**：Entware 的套件停在 1.46.1-1（有已知漏洞），且 Entware 已停止維護 2.6 核心。這種情況沒有好解——要嘛接受停留在有漏洞的舊版、要嘛換一台較新的 HND 機型。不要指望靠 `opkg upgrade` 拿到新版，這個平台的套件就是停更了。
+
+## 小結
+
+| 步驟                     | 做什麼                                                                        |
+| ------------------------ | ----------------------------------------------------------------------------- |
+| 刷 Merlin                | 原廠韌體裝不了，需 `3004.388.x` 或 `3006.102.x`                               |
+| amtm → Entware           | USB 上裝套件庫，`opkg` 可用                                                   |
+| `opkg install tailscale` | HND 機型 1.96.1-1；舊 2.6 核心機型改 `tailscale_nohf`（停更）                 |
+| 選模式                   | kernel（改 TUN + firewall-start）或 userspace（`--tun=userspace-networking`） |
+| 宣告路由                 | `tailscale up --advertise-exit-node --advertise-routes=...`                   |
+| 收尾                     | 關 MagicDNS（`--accept-dns=false`）、disable key expiry                       |
+
+最常見的坑就三個：kernel 模式忘了 `firewall-start` 腳本、`--accept-dns` 沒關導致 DNS 打架、升級後啟動腳本被覆寫。把這三個顧好，路由器當 subnet router／exit node 就穩了。
+
+## 參考資料
+
+- [Installing Tailscale through Entware（Asuswrt-Merlin 官方 wiki）](https://github.com/RMerl/asuswrt-merlin.ng/wiki/Installing-Tailscale-through-Entware)
+- [Entware（Asuswrt-Merlin 官方 wiki）](https://github.com/RMerl/asuswrt-merlin.ng/wiki/Entware)
+- [Asuswrt-Merlin 下載與支援裝置](https://www.asuswrt-merlin.net/download)
+- [Entware 套件清單（aarch64-k3.10）](https://bin.entware.net/aarch64-k3.10/Packages.html)
+- [Userspace networking（Tailscale 官方）](https://tailscale.com/kb/1112/userspace-networking)
+- [Why is resolv.conf being overwritten?（Tailscale 官方）](https://tailscale.com/docs/reference/faq/dns-resolv-conf)
+- [Subnet Router：讓區網裡裝不了 Tailscale 的裝置也能進 tailnet](/features/subnet-router/)
+- [Exit Node：用家裡的網路當出口](/features/exit-node/)
