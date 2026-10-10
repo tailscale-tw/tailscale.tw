@@ -1,0 +1,98 @@
+---
+title: Home Assistant 不開埠遠端存取：官方 add-on、Serve 與 Funnel
+description: 用 Home Assistant 的 Tailscale add-on（hassio-addons/app-tailscale）把 HA 接進 tailnet：安裝、關閉 key expiry、share_homeassistant 的 Serve／Funnel、HA 的 reverse proxy 設定（trusted_proxies、X-Forwarded-For），以及 userspace_networking 等選項
+sidebar:
+  order: 1.5
+  label: Home Assistant
+---
+
+Home Assistant 通常放在家裡，出門在外要用 App 控制或看儀表板，最安全的做法不是開埠或買訂閱，而是把它接進 tailnet。Home Assistant 社群有現成的 **Tailscale add-on**（`hassio-addons/app-tailscale`），裝了之後 HA 就是 tailnet 上的一個節點，還能在 tailnet 內（Serve）或網際網路（Funnel）用 HTTPS 存取，全程不開任何對外埠。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件、Home Assistant 官方文件與 add-on 原始 repo（`hassio-addons/app-tailscale` 的 `tailscale/DOCS.md`、`config.yaml`）整理，以 Tailscale v1.104、Home Assistant 2026.8 以上為準。本文未在實機跑過 add-on 的整套設定，屬文件整理。
+
+## 安裝 add-on
+
+Home Assistant OS／Supervisor 使用者可以從社群 repo 安裝：
+
+1. 用 [My 按鈕](https://my.home-assistant.io/redirect/supervisor_addon/?addon=a0d7b954_tailscale&repository_url=https%3A%2F%2Fgithub.com%2Fhassio-addons%2Frepository) 直接開啟，或手動把 repo `https://github.com/hassio-addons/repository` 加進 **Settings → Add-ons → Add-on Store → ⋮ → Repositories**。
+2. 找到 **Tailscale**，安裝並啟動。
+3. 打開 add-on 的 **Web UI** 完成登入（官方建議用桌機的 Chrome 瀏覽器）。
+4. 到 Tailscale [Machines](https://console.tailscale.com/admin/machines) 頁面確認 HA 已上線。
+
+## 最關鍵的一步：關閉 key expiry
+
+裝好之後第一件事，是到 Machines 頁面找到 Home Assistant 這台，點 `...` → **Disable key expiry**。
+
+原因很簡單：add-on 登入建立的那個節點有**金鑰到期（key expiry）**，到期後 HA 就會從 tailnet 失聯，你得重新登入。add-on 文件開頭就提醒「Consider disabling key expiry to avoid losing connection」。HA 是要長期常開的裝置，把 key expiry 關掉才不會某天突然連不上。
+
+## 用 Serve 給 HTTPS（share_homeassistant: serve）
+
+預設你可以在 tailnet 內用 `http://<ha 的 tailnet IP>:8123` 或 MagicDNS 名稱直接連 HA，但那不是 HTTPS，瀏覽器會一直警告。add-on 的 **`share_homeassistant`** 選項可以讓它用 [Tailscale Serve](/features/serve/)（或 Funnel）掛上有效的 TLS 憑證：
+
+```yaml
+share_homeassistant: serve
+share_on_port: 443
+```
+
+- `serve`：只對 tailnet 開放，網址是 `https://<主機名稱>.tailxxxxx.ts.net`。
+- `funnel`：連網際網路也能連（見下一節）。
+- `share_on_port` 只能是 `443`、`8443`、`10000`（Funnel 的限制，Serve 本可任意埠但這裡一起套用）。
+
+接著要在 Home Assistant 端做兩件事（add-on 文件與 HA 官方文件的共同要求）：
+
+1. **關閉 HA 的 SSL／TLS**（保持 HTTP，讓 Serve 在外面終止 TLS）。位置：**Settings → System → Network → HTTP server → SSL/TLS**。
+2. **讓 HA 信任 Serve 這個反向代理**。位置：**Settings → System → Network → HTTP server → Reverse proxy**：
+   - 開啟 **Trust X-Forwarded-For**。
+   - 在 **Trusted proxies** 加上 `127.0.0.1`。
+
+為什麼是 `127.0.0.1`：add-on 以 host 網路跑，Serve 在 add-on 內把流量轉到本機的 HA（`127.0.0.1:8123`），所以 HA 看到的來源是 `127.0.0.1`。這兩項不設，HA 會擋掉來自反向代理的請求。
+
+> 從 HA 2026.8 開始，HTTP 設定從 `configuration.yaml` 的 `http:` 區塊移到 **Settings → System → Network** 的 UI（舊的 YAML 會在升級時自動匯入、並在 Repairs 提醒移除）。所以不要再跑去改 YAML 了。
+
+### 什麼時候 trusted_proxies 要含 100.64.0.0/10
+
+上面 `127.0.0.1` 是「經 add-on 自己的 Serve」的情境。如果你**不走 Serve**，而是讓 HA 被 tailnet 上的**另一台反向代理**轉發（例如一台跑 Caddy／nginx 的節點，或用 subnet router 連進來），那 HA 看到的來源就是 tailnet 的位址——屬於 `100.64.0.0/10` 這整段。這種情況 `Trusted proxies` 就該填 `100.64.0.0/10`（HA 官方文件提醒，用 CIDR 時要寫**網路位址**，例如 `100.64.0.0/10`，不是主機位址）。換句話說：**代理是哪個來源，就信任哪個來源**——add-on 的 Serve 是 `127.0.0.1`，tailnet 上的其他代理是 `100.64.0.0/10`。
+
+## 什麼時候用 Funnel
+
+`share_homeassistant: funnel` 會把 HA 經 [Tailscale Funnel](/features/funnel/) 公開到**整個網際網路**，網址一樣是 `https://<主機名稱>.tailxxxxx.ts.net`，但任何上得了網的人都能連。
+
+要用的話，前提是：
+
+- tailnet 啟用 MagicDNS 與 HTTPS 憑證。
+- 在 tailnet policy 給這台裝置加 **funnel node attribute**（Funnel 需要這個屬性才開得起來）。
+
+什麼時候才需要 Funnel？**只有當你想從「沒裝 Tailscale 的裝置」連 HA**（例如別人的手機、平板）。如果你所有會用 HA 的裝置都裝得了 Tailscale，用 `serve` 就好——Funnel 把整個 HA 登入頁暴露到公網，攻擊面大得多，等於把你上一節才收斂好的東西又打開。兩者的取捨見 [Tailscale Funnel](/features/funnel/)。
+
+## 其他常用選項
+
+| 選項                   | 預設    | 說明                                                       |
+| ---------------------- | ------- | ---------------------------------------------------------- |
+| `userspace_networking` | `false` | 設 `true` 時不建 `tailscale0`，只有單向（tailnet 連進 HA） |
+| `accept_dns`           | `true`  | 接受 tailnet 的 DNS 設定                                   |
+| `advertise_exit_node`  | `false` | 把 HA 廣告成 exit node                                     |
+| `advertise_routes`     | `[]`    | 廣告 subnet routes（HA 兼 subnet router）                  |
+| `advertise_tags`       | `[]`    | 指定 tag（例如 `tag:homeassistant`）                       |
+| `taildrop`             | `false` | 開啟後可從其他裝置用 Taildrop 丟檔案到 HA                  |
+| `snat_subnet_routes`   | `true`  | subnet router 的 SNAT                                      |
+
+`userspace_networking: true` 適用於「只想從外面連進 HA、不讓 HA 主動連 tailnet 上其他節點」的情境；預設的 `false`（kernel 模式）需要 `/dev/net/tun`，add-on 的 `config.yaml` 已經宣告好，不用另外管。
+
+## 小結
+
+| 步驟                         | 做什麼                                                       |
+| ---------------------------- | ------------------------------------------------------------ |
+| 裝 add-on 並登入             | 從社群 repo 安裝，Web UI 登入                                |
+| Disable key expiry           | 關掉金鑰到期，避免 HA 失聯                                   |
+| `share_homeassistant: serve` | tailnet 內用 HTTPS 連 HA                                     |
+| HA reverse proxy 設定        | 開 `Trust X-Forwarded-For`、`Trusted proxies` 加 `127.0.0.1` |
+| 需要公網再開 Funnel          | 加 funnel node attribute，只給裝不了 Tailscale 的裝置        |
+
+核心概念就一句：**用 Serve 把 HA 關在 tailnet 裡，Funnel 只在不得已時才開**。這跟站內 [Tailscale Serve](/features/serve/) 與 [Tailscale Funnel](/features/funnel/) 的原則完全一致。
+
+## 參考資料
+
+- [Home Assistant Community App: Tailscale（hassio-addons/app-tailscale，DOCS 與 config.yaml）](https://github.com/hassio-addons/app-tailscale/blob/main/tailscale/DOCS.md)
+- [HTTP integration（Home Assistant 官方文件，trusted_proxies／X-Forwarded-For）](https://www.home-assistant.io/integrations/http/)
+- [Tailscale Serve：在 tailnet 內分享本機服務](/features/serve/)
+- [Tailscale Funnel：把服務公開到網際網路](/features/funnel/)
