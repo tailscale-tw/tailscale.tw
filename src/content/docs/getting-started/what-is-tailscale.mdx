@@ -38,7 +38,7 @@ tailnet 橫跨現實中的家用網路、公司網路、雲端 VPC 與行動網�
 
 ### Tailscale IP
 
-每個節點都會取得一個 Tailscale IP，最常見的 IPv4 格式是 `100.x.y.z`；Tailscale 的 IPv6 位址則從 `fd7a:115c:a1e0::/48` 配發。這些 IPv4 位址來自 RFC 6598 定義的 Carrier-Grade NAT（CGNAT）範圍 `100.64.0.0/10`，不是直接暴露在公共網際網路上的 IP。
+每個節點都會取得一個 Tailscale IP，最常見的 IPv4 格式是 `100.x.y.z`；Tailscale 的 IPv6 位址則從 `fd7a:115c:a1e0::/48` 配發。這些 IPv4 位址來自 RFC 6598 定義的 Carrier-Grade NAT（CGNAT）範圍 `100.64.0.0/10`，不是直接暴露在公共網際網路上的 IP。為什麼選這一段、它和私有位址有什麼不同，見 [Tailscale IP 為什麼是 100.x](/getting-started/tailscale-ip-addresses/)。
 
 Tailscale IP 的用途是提供一個和實體位置無關的節點位址：筆電從家裡 Wi-Fi 換到咖啡廳或行動網路時，只要節點仍在 tailnet 中，通常仍可用同一個 Tailscale IP 連線。它不是家裡路由器拿到的公共 IP，也不需要拿來做 port forwarding。
 

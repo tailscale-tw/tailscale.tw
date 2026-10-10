@@ -1,0 +1,114 @@
+---
+title: Tailscale IP 為什麼是 100.x：IPv4 保留網段與 CGNAT
+description: 整理 IPv4 的特殊用途網段（私有、loopback、link-local、多播、文件用、保留），說明 CGNAT 共享位址空間 100.64.0.0/10 的由來與用途，以及 Tailscale 為什麼拿它當裝置 IP、會和什麼衝突、IPv6 用哪一段
+sidebar:
+  order: 1.25
+  label: Tailscale IP 與保留網段
+---
+
+裝了 Tailscale 之後，每台裝置都多了一個 `100.x.y.z` 的位址。它看起來不像家裡常見的 `192.168.x.x`，也不是公開 IP。這篇先整理 IPv4 有哪些「特殊用途」的網段，再說明 `100.64.0.0/10` 這段 CGNAT 位址原本是做什麼的，以及 Tailscale 為什麼選它。
+
+> 本文依 2026 年 10 月 11 日的 IANA IPv4 Special-Purpose Address Registry、RFC 1918／6598 與 Tailscale 官方文件整理，以 Tailscale v1.104 為準。
+
+## IPv4 的特殊用途網段
+
+IPv4 一共約 43 億個位址（2³²），其中一部分被 IETF 保留做特殊用途，不能當成一般的公開位址使用。IANA 把這些網段列在〈IPv4 Special-Purpose Address Registry〉，常會碰到的有這些：
+
+| 網段                                                        | 名稱                     | 定義          | 用途                                                              |
+| ----------------------------------------------------------- | ------------------------ | ------------- | ----------------------------------------------------------------- |
+| `10.0.0.0/8`<br />`172.16.0.0/12`<br />`192.168.0.0/16`     | 私有位址（Private-Use）  | RFC 1918      | 家裡、公司內部網路自由使用，不在網際網路上路由                    |
+| `100.64.0.0/10`                                             | 共享位址空間（CGNAT）    | RFC 6598      | 電信業者在 CGNAT 和用戶設備之間使用，下面詳述                     |
+| `127.0.0.0/8`                                               | Loopback                 | RFC 1122      | 本機自己（最常用的是 `127.0.0.1`），封包不會離開這台機器          |
+| `169.254.0.0/16`                                            | Link-local               | RFC 3927      | 拿不到 DHCP 時自動配發，只在同一個網段內有效                      |
+| `224.0.0.0/4`                                               | 多播（Multicast）        | RFC 5771      | 一對多傳送，例如 mDNS 的 `224.0.0.251`、SSDP 的 `239.255.255.250` |
+| `0.0.0.0/8`                                                 | 「這個網路」             | RFC 791／1122 | `0.0.0.0` 常用來代表「所有介面」或「還沒有位址」                  |
+| `192.0.2.0/24`<br />`198.51.100.0/24`<br />`203.0.113.0/24` | 文件用（TEST-NET-1～3）  | RFC 5737      | 只給書和文件當範例，不會出現在真實網路                            |
+| `198.18.0.0/15`                                             | 效能測試（Benchmarking） | RFC 2544      | 網路設備的效能測試                                                |
+| `240.0.0.0/4`                                               | 保留                     | RFC 1112      | 保留給未來使用，實務上不可用                                      |
+| `255.255.255.255/32`                                        | 有限廣播                 | RFC 919／8190 | 送給同一個網段的所有裝置                                          |
+
+完整清單還有 `192.0.0.0/24`（IETF 協定用）、AS112 等少見的項目，見參考資料的 IANA 註冊表。**除了這些特殊用途網段之外的位址，就是公開位址**，由 IANA 分給各區域網際網路註冊管理機構（RIR，亞太地區是 APNIC），再分配給業者和組織，在網際網路上可以被路由到。
+
+幾個和 Tailscale 有關的重點：
+
+- **私有位址**是 [Subnet Router](/features/subnet-router/) 最常廣告的網段。因為大家都在用，兩個地方都用 `192.168.1.0/24` 時就會撞在一起，處理方式見 [常見問題：Subnet Router 的網段和本地區網重疊](/troubleshooting/common-issues/#subnet-router-的網段和本地區網重疊)。
+- **Loopback** 是 [Tailscale Serve](/features/serve/) 最常見的後端：服務只聽 `127.0.0.1`，由 Serve 對 tailnet 提供。
+- **多播與廣播**不會經過 tailnet。Tailscale 是第 3 層的點對點網路，不轉送多播和廣播封包，所以 mDNS／Bonjour、SSDP 這類「在區網裡自動找裝置」的功能無法跨 tailnet 運作（官方 issue [#1013](https://github.com/tailscale/tailscale/issues/1013)、[#11134](https://github.com/tailscale/tailscale/issues/11134) 仍在開啟中）。要連其他裝置，請直接用 [MagicDNS](/features/magicdns/) 名稱或 Tailscale IP。
+
+## CGNAT 的由來
+
+### IPv4 不夠用了
+
+IANA 在 2011 年 2 月把最後一批 IPv4 位址分給各 RIR，APNIC 也在同年 4 月進入最後階段的配發。新用戶越來越多，業者手上的公開 IPv4 卻幾乎拿不到新的，只好讓很多用戶**共用**一個公開 IP，也就是 **CGNAT**（Carrier-Grade NAT，電信級 NAT）：業者在自己的網路裡再做一次 NAT，用戶的路由器或手機拿到的是一個內部位址，出網際網路時才換成共用的公開 IP。
+
+### 為什麼不用 RFC 1918 私有位址
+
+業者的 CGNAT 和用戶設備之間，需要一段位址來編號。直覺上可以用 RFC 1918 的私有位址，但問題是**用戶家裡也在用**：如果業者配給路由器 WAN 端 `192.168.1.x`，而用戶家裡的 LAN 也是 `192.168.1.0/24`，路由器兩邊就是同一個網段，封包不知道該往哪送。業者沒辦法控制每個用戶家裡用哪一段，所以 RFC 1918 不安全。
+
+用公開位址也不行：公開 IPv4 本來就是缺的東西；拿別人的公開網段來「借用」（俗稱 squat space），一旦路由外洩，會影響真正的持有者。
+
+### RFC 6598：一段給所有業者共用的 /10
+
+所以 IETF 在 2012 年 4 月發布 RFC 6598，從 ARIN 的位址中劃出 `100.64.0.0/10`（`100.64.0.0`～`100.127.255.255`，約 419 萬個位址）作為「共享位址空間」：
+
+- **所有業者都可以重複使用**，所以叫「共享」。RFC 說明 `/10` 是讓業者能以區域為單位部署 CGNAT、又不必做多層 CGNAT 的最小大小。
+- **只在業者網路內部使用**：來源或目的地是這段位址的封包，不得轉送到其他業者，路由也不能對外廣告。
+- **和 RFC 1918 分開**：用戶家裡用私有位址，業者用共享位址，兩邊不會撞在一起。
+
+RFC 6598 也提醒：把這段位址拿去做 CGNAT 以外的用途，等哪天網路要接 CGNAT 服務時就可能衝突。這一點和 Tailscale 有關，後面會講到。
+
+### 台灣的情況
+
+台灣的 4G／5G 行動網路幾乎都在 CGNAT 後面；HiNet 光世代則是 PPPoE 撥接拿到公開 IP。怎麼判斷自己是不是在 CGNAT 後面：看路由器管理頁面的 WAN 端 IP，如果是 `100.64.x.x`～`100.127.x.x`，就是業者的 CGNAT。各業者的情況與對直連率的影響，見 [台灣 ISP 與 NAT](/troubleshooting/taiwan-isp-nat/)；CGNAT 為什麼讓打洞變難，見 [NAT 穿透原理](/getting-started/nat-traversal/#多層-nat-與-cgnat)。
+
+## Tailscale 為什麼選 100.64.0.0/10
+
+Tailscale 的官方說明是：這段位址**不會和常見的私有網段衝突**。理由可以拆成幾點：
+
+1. **避開 RFC 1918**：Tailscale 裝在筆電、手機上，會跟著你連到各種家裡、公司、咖啡廳的網路，這些網路幾乎都用 `10.x`、`172.16`～`172.31`、`192.168.x`。如果 Tailscale 也用私有位址，換一個網路就可能和本地網段撞在一起；用 Subnet Router 廣告家裡網段時，更需要 tailnet 自己的位址和這些網段分開。
+2. **終端網路很少用它**：RFC 6598 規定這段只給業者內部使用，一般家庭和公司的 LAN 不會拿它來配位址。即使你在 CGNAT 後面，`100.64.x.x` 通常是配在業者給的路由器 WAN 端，家裡電腦拿到的還是 `192.168.x.x`。
+3. **不是公開位址**：這段位址不會在網際網路上路由，Tailscale IP 不會和任何公開服務的 IP 重疊，也不會被外面直接連到。
+4. **夠大**：`/10` 有約 419 萬個位址，足夠讓一個 tailnet 的每台裝置都有一個固定、不重複的位址。
+
+換句話說，Tailscale 借用了「本來就不會出現在用戶網路裡」的一段位址。代價是它違反了 RFC 6598「只給業者 CGNAT 用」的本意，所以在少數情況下還是會衝突（見下一節）。
+
+### Tailscale IP 的特性
+
+- **每台裝置一個，位置無關**：同一台裝置從家裡 Wi-Fi 換到行動網路，Tailscale IP 不變。管理員也可以在 Admin console 手動修改某台裝置的 IPv4 位址。
+- **只在 tailnet 裡有意義**：同一個位址在別人的 tailnet 可能是另一台裝置。它不是公開 IP，也不需要（也不能）拿來做連接埠轉送。
+- **IPv6 用 `fd7a:115c:a1e0::/48`**：這是 RFC 4193 的唯一本地位址（ULA，`fc00::/7` 底下），和 IPv4 的道理一樣：不是公開位址，也不容易和其他網路撞在一起。
+
+### Tailscale 自己保留的位址
+
+`100.64.0.0/10` 裡有幾段是 Tailscale 自己用的，不會配給裝置，也不能放進 IP pool：
+
+| 位址                                     | 用途                                                                                                             |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `100.100.100.100`                        | Quad100：每台裝置本機的 DNS 轉發器與管理介面，見 [MagicDNS](/features/magicdns/#100100100100裝置上的-dns-轉發器) |
+| `fd7a:115c:a1e0::53`                     | Quad100 的 IPv6 位址                                                                                             |
+| `100.100.0.0/24`<br />`100.100.100.0/24` | Tailscale 內部使用                                                                                               |
+| `100.115.92.0/23`                        | ChromeOS 用來連接主系統與容器、虛擬機的網段，Tailscale 避開不配發                                                |
+
+## 會和什麼衝突
+
+雖然一般 LAN 不會用 `100.64.0.0/10`，但這幾種情況還是會撞到：
+
+- **ISP 的 CGNAT**：你需要連到業者 CGNAT 網段裡的某些位址（例如業者的設備或服務）。
+- **其他 VPN**：有些 VPN 也選了這段位址。
+- **Kubernetes、雲端或公司內部服務**：有些環境把這段當成「不會撞到 RFC 1918」的內部網段使用。
+
+在 Linux 上還有一條額外規則：Tailscale 會丟掉這段範圍內**不是從 Tailscale 介面進來**的封包，用來擋偽造來源 IP 的流量。所以 Linux 開著 Tailscale 時，連不到用這段位址的本地服務。
+
+解法有用 IP pool 只使用其中一小段、關掉 IPv4 只用 IPv6、在 Linux 關掉那條丟封包規則等，詳細比較與設定範例見 [常見問題：IP 衝突](/troubleshooting/common-issues/#ip-衝突)。
+
+## 參考資料
+
+- [IANA IPv4 Special-Purpose Address Registry](https://www.iana.org/assignments/iana-ipv4-special-registry/iana-ipv4-special-registry.xhtml)
+- [RFC 1918：Address Allocation for Private Internets](https://www.rfc-editor.org/rfc/rfc1918)
+- [RFC 6598：IANA-Reserved IPv4 Prefix for Shared Address Space](https://www.rfc-editor.org/rfc/rfc6598)
+- [RFC 4193：Unique Local IPv6 Unicast Addresses](https://www.rfc-editor.org/rfc/rfc4193)
+- [What are these 100.x.y.z addresses?（官方）](https://tailscale.com/docs/concepts/tailscale-ip-addresses)
+- [Reserved IP addresses（官方）](https://tailscale.com/docs/reference/reserved-ip-addresses)
+- [IP pool（官方）](https://tailscale.com/docs/reference/ip-pool)
+- [CGNAT interoperability（官方）](https://tailscale.com/docs/reference/cgnat-interoperability)
+- [Tailscale 是什麼：tailnet、WireGuard 與控制平面的基本觀念](/getting-started/what-is-tailscale/)
