@@ -91,7 +91,7 @@ Press Ctrl+C to exit.
 Funnel 等於把服務**直接放上網際網路**，任何知道網址的人都連得到——而 `*.ts.net` 的網域會出現在公開的憑證透明度（Certificate Transparency）紀錄裡，網址實際上不是祕密，掃描器很快就會找上門。
 
 - **驗證要自己做**：Funnel 不幫你擋人。後台、管理介面、沒有登入機制的開發伺服器都不要直接公開。
-- **沒有身份標頭**：Serve 會帶 `Tailscale-User-Login` 等標頭告訴後端是誰連進來，Funnel 的請求**不帶**這些標頭（公開流量本來就沒有 Tailscale 身份），改帶 `Tailscale-Funnel-Request: ?1`。後端可以用它識別請求是從網際網路來的，例如對 Funnel 流量要求登入、對 tailnet 流量放行。Tailscale 轉發前會先清掉請求裡偽造的同名標頭。
+- **沒有身份標頭**：Serve 會帶 `Tailscale-User-Login` 等標頭告訴後端是誰連進來，Funnel 的請求**不帶**這些標頭（公開流量本來就沒有 Tailscale 身份），改帶 `Tailscale-Funnel-Request: ?1`。後端可以用它識別請求是從網際網路來的，例如對 Funnel 流量要求登入、對 tailnet 流量放行。Tailscale 轉發前會先清掉請求裡偽造的同名標頭。標頭的完整說明與用法見 [Serve 的身分標頭](/features/serve-identity-headers/)。
 - **用完就關**：臨時 demo 用前景執行，結束時 `Ctrl+C`；用 `--bg` 開的記得用 `tailscale funnel status` 檢查還有哪些公開中。
 - **用 policy 管住誰能開**：`funnel` 屬性只給需要的裝置或 tag，不要整個 `autogroup:member` 都開。
 

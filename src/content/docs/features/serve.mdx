@@ -28,7 +28,7 @@ https://my-dev-machine.tailxxxxx.ts.net
 https://my-dev-machine.tailxxxxx.ts.net:8443
 ```
 
-Serve 收到 tailnet 來的請求時，會在轉給本機服務前加上身份標頭（`Tailscale-User-Login`、`Tailscale-User-Name` 等），後端可以用它識別是誰連進來的。例外：來自 tagged 裝置的請求不會帶這些標頭，只靠標頭做授權時要記得處理這個缺口。基於安全，後端服務建議只聽 `127.0.0.1`，避免有人繞過 Serve 直接偽造這些標頭。
+Serve 收到 tailnet 來的請求時，會在轉給本機服務前加上身份標頭（`Tailscale-User-Login`、`Tailscale-User-Name` 等），後端可以用它識別是誰連進來的。例外：來自 tagged 裝置的請求不會帶這些標頭，只靠標頭做授權時要記得處理這個缺口。基於安全，後端服務建議只聽 `127.0.0.1`，避免有人繞過 Serve 直接偽造這些標頭。標頭的完整說明、剝除行為與 Grafana／Open WebUI／Dashy 範例，見 [Serve 的身分標頭](/features/serve-identity-headers/)。
 
 ## 前置條件
 

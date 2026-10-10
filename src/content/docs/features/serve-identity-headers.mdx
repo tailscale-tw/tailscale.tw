@@ -1,0 +1,152 @@
+---
+title: Serve 的身分標頭：讓自架服務直接認得 tailnet 使用者
+description: 用 Tailscale-User-Login、-Name、-Profile-Pic 三個身分標頭，讓 Grafana、Open WebUI、Dashy 這類自架服務直接認得連進來的 tailnet 使用者，以及標頭剝除、tagged 裝置與只聽 localhost 的安全要點
+sidebar:
+  order: 1.5
+  label: Serve 身分標頭
+---
+
+用 [Tailscale Serve](/features/serve/) 分享自架服務時，你的後端其實可以**不用自己再做一次登入**：Serve 會在轉發請求前，把「是誰連進來的」寫進幾個 HTTP 標頭。後端只要信任這幾個標頭，就能直接用 tailnet 身分做單一登入（SSO）——Grafana、Open WebUI、Dashy 這類支援「信任標頭」或 auth proxy 的服務都能接。這篇講這幾個標頭是什麼、Serve 怎麼保護它們不被偽造，以及實際怎麼接。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件與原始碼（`ipn/ipnlocal/serve.go`）整理，以 Tailscale v1.104 為準。Grafana、Open WebUI、Dashy 的範例依各自 2026 年 10 月的官方文件整理，未實機跑過整套設定，屬文件整理。
+
+## 三個身分標頭
+
+Serve 把 tailnet 流量轉給本機服務時，會加上三個標頭（名稱與內容都寫在 `serve.go` 的 `addTailscaleIdentityHeaders`）：
+
+| 標頭                         | 內容                                                       |
+| ---------------------------- | ---------------------------------------------------------- |
+| `Tailscale-User-Login`       | 使用者的登入名稱，通常是 email（例如 `alice@example.com`） |
+| `Tailscale-User-Name`        | 使用者的顯示名稱（例如 `Alice Architect`）                 |
+| `Tailscale-User-Profile-Pic` | 使用者的頭像 URL（身分提供者有提供才會有）                 |
+
+另外 Serve 還會帶一個 `Tailscale-Headers-Info` 標頭，值是指向官方文件的網址，方便你查到這些標頭的說明。
+
+名字、顯示名稱含非 ASCII 字元時（例如中文名），Tailscale 會用 RFC 2047 的 Q-encoding 編碼，後端讀到的是 `=?utf-8?q?Ferris_B=C3=BCller?=` 這種形式，要記得解碼。
+
+## Serve 怎麼保護這些標頭不被偽造
+
+這些標頭能拿來當身分，前提是「客戶端不能自己亂填」。Serve 的處理方式很直接：**轉發前先把請求裡同名的標頭全部刪掉，再寫入自己查到的值**（`serve.go` 裡是先 `Header.Del` 再 `Header.Set`）。所以就算有人故意在請求裡塞了偽造的 `Tailscale-User-Login`，也會被清掉、換成真正的身分。
+
+但有兩個例外要特別記住：
+
+- **tagged 裝置的請求不帶這些標頭**。tag 身分的裝置（伺服器、容器）沒有「使用者」可言，Serve 不會幫它填標頭。官方文件明寫、原始碼裡也有註解（`node.IsTagged()` 就跳過）。所以你的後端如果**只靠標頭做授權，tagged 裝置等於登不進去**——需要讓 tag 裝置也存取的話，得另外處理（例如用 `Tailscale-App-Capabilities`，那是另一套機制）。
+- **Funnel 的請求不帶這些標頭**。公開流量本來就沒有 tailnet 身分，Serve 只會改帶 `Tailscale-Funnel-Request: ?1` 讓後端辨識「這是從網際網路來的」。靠身分標頭登入的後台，用 Funnel 公開後等於任何人都進不來（而不是任何人都進得來）。
+
+反向的例外是**分享節點**：如果你把裝置分享給 tailnet 以外的人，對方連你的 Serve 網址時，**一樣會帶標頭**——帶的是對方自己的身分（他接受的分享帳號），不是你。官方文件特別點出這點。所以「看得到標頭 = 是自己人」的判斷，在分享情境下要記得：標頭對應的是外部使用者的身分。
+
+## 後端一定要只聽 localhost
+
+官方文件的建議很明確：**用身分標頭做驗證時，後端最好只聽 `127.0.0.1`**。理由是，如果後端聽在 `0.0.0.0`，那 tailnet 上任何裝置都能**繞過 Serve、直接連後端的原始連接埠**，自己填一個 `Tailscale-User-Login` 假裝成任何人——Serve 的標頭剝除只發生在「經 Serve 轉發」的請求上，直接連後端根本不會經過 Serve。
+
+只聽 localhost 之後，能直接碰到後端的就只剩同一台主機上的服務，tailnet 上的其他人都得乖乖走 Serve。下面三個範例都遵循這個原則：後端聽 `127.0.0.1`，再各自用「只信任特定來源 IP」的方式，確保標頭是 Serve 加的、不是客戶端塞的。
+
+## 範例一：Grafana auth proxy
+
+Grafana 內建 [auth proxy](https://grafana.com/docs/grafana/latest/setup-grafana/configure-security/configure-authentication/auth-proxy/) 模式，信任一個反向代理注入的使用者標頭。在 Grafana 設定檔（`grafana.ini`／`custom.ini`）裡：
+
+```ini
+[auth.proxy]
+enabled = true
+# 預設是 X-WEBAUTH-USER，改成 Serve 的身分標頭
+header_name = Tailscale-User-Login
+header_property = email
+auto_sign_up = true
+# 只信任本機（Serve 轉發過來的請求）
+whitelist = 127.0.0.1
+```
+
+三個重點：`header_name` 改成 `Tailscale-User-Login`；`header_property = email` 因為這個標頭帶的是 email；`whitelist` 一定要設，否則任何人連到 Grafana 都能自己塞標頭登入。
+
+前端用 Serve 把 Grafana 分享出去：
+
+```bash
+tailscale serve --bg 3000   # Grafana 聽在 127.0.0.1:3000
+```
+
+之後 tailnet 上的人開 `https://你的主機.tailxxxxx.ts.net`，就會以各自的 tailnet 帳號自動登入 Grafana，不用再打一組帳密。
+
+## 範例二：Open WebUI
+
+Open WebUI 內建對 Tailscale 的 SSO 支援，官方教學就是透過信任標頭。只要設兩個環境變數，讓它認得 Serve 的標頭：
+
+```yaml
+environment:
+  - WEBUI_AUTH_TRUSTED_EMAIL_HEADER=Tailscale-User-Login
+  - WEBUI_AUTH_TRUSTED_NAME_HEADER=Tailscale-User-Name
+```
+
+Open WebUI 讀到 `Tailscale-User-Login` 後，會把使用者自動註冊並登入，第一次造訪就免密碼。Serve 那段用 Docker sidecar 或本機 `tailscale serve` 轉到 `127.0.0.1:8080` 即可。
+
+Open WebUI 的官方教學特別提醒：**如果 Open WebUI 和 tailscaled 跑在同一個網路環境，使用者可能繞過 Serve 直連後端**，跳過信任標頭驗證。解法是用 [ACL](/admin/acl-grants/) 只放行 443，或確保後端只聽 loopback（見上面「只聽 localhost」一節）。
+
+## 範例三：Dashy
+
+Dashy 的 header auth 模式同樣是「信任反向代理注入的身分標頭」。在 `conf.yml` 裡：
+
+```yaml
+appConfig:
+  auth:
+    enableHeaderAuth: true
+    users:
+      - user: alice@example.com
+        hash: "0000000000000000000000000000000000000000000000000000000000000000"
+        type: admin
+    headerAuth:
+      userHeader: Tailscale-User-Login
+      proxyWhitelist:
+        - 127.0.0.1
+```
+
+- `userHeader` 設成 `Tailscale-User-Login`（Dashy 預設是 `Remote-User`）。
+- `users[].user` 要填 tailnet 使用者的 email，`type` 決定他在 Dashy 是 admin 還是普通使用者。
+- `proxyWhitelist` 只放 `127.0.0.1`：Dashy 只接受「從 Serve 轉發過來」的請求，客戶端直接連進來的會被 401 擋掉。這和 Grafana 的 `whitelist` 是同一招。
+
+Dashy 官方還有一段 Tailscale 專屬指南，做法就是 Tailscale 容器和 Dashy 共用 network namespace，讓請求在 Dashy 看來都來自 localhost。
+
+## 三個範例的共通點
+
+三個服務各自的設定不同，但都靠同一個模式：
+
+1. 後端**只聽 localhost**（`127.0.0.1`），tailnet 上沒人能直連。
+2. 把身分標頭設成 `Tailscale-User-Login`。
+3. 用**白名單**（`whitelist`／`proxyWhitelist`）確保只接受來自本機 Serve 的請求。
+
+只要這三點都做到，tailnet 上的使用者就會自動以各自的身分登入，而你不用在每個服務各維護一套帳密。
+
+如果後端因為部署方式（例如獨立容器）沒辦法只聽 loopback，就用 ACL 把 tailnet 只開到 Serve 的連接埠，不開後端的原始連接埠：
+
+```json
+"tagOwners": {
+  "tag:webapp": ["autogroup:admin"],
+},
+"grants": [
+  // tailnet 使用者只能連到 443（Serve），碰不到後端直連的原始連接埠
+  {
+    "src": ["autogroup:member"],
+    "dst": ["tag:webapp"],
+    "ip": ["tcp:443"],
+  },
+],
+```
+
+後端的原始連接埠不寫進 grants，tailnet 上就沒人連得到，只能走 Serve。規則寫法見 [ACL / Grants 入門](/admin/acl-grants/)。
+
+## 常見問題
+
+- **後端讀到的名字是亂碼？** 非 ASCII 的顯示名稱會用 RFC 2047 Q-encoding 編碼，後端要解碼（例如 `=?utf-8?q?...?=`）。email 通常是純 ASCII，不會有這個問題。
+- **伺服器／容器連不上後台？** 很可能是後端只靠身分標頭做授權，而 tagged 裝置的請求不帶標頭，等於登不進去。給 tag 裝置用的後端不要只靠這三個標頭。
+- **分享給朋友，對方卻以我的身分登入？** 不會。分享節點的外部使用者帶的是**他自己**的身分標頭，不是你的。如果後台出現陌生帳號，那是分享對象的帳號。
+- **用 Funnel 公開後，大家都進不來？** 正常。Funnel 不帶身分標頭，靠標頭登入的後台對 Funnel 流量一律無法驗證。要公開請另做登入機制。
+
+## 參考資料
+
+- [Tailscale Serve：Identity headers（官方文件）](https://tailscale.com/docs/features/tailscale-serve#identity-headers)
+- [Tailscale Serve（官方文件）](https://tailscale.com/docs/features/tailscale-serve)
+- [Tailscale 原始碼：`ipn/ipnlocal/serve.go`（身分標頭的剝除與注入）](https://github.com/tailscale/tailscale/blob/main/ipn/ipnlocal/serve.go)
+- [Grafana auth proxy（官方文件）](https://grafana.com/docs/grafana/latest/setup-grafana/configure-security/configure-authentication/auth-proxy/)
+- [Open WebUI：Tailscale Integration（官方文件）](https://docs.openwebui.com/tutorials/auth-sso/tailscale)
+- [Dashy：Header Authentication（官方文件）](https://github.com/Lissy93/dashy/blob/master/docs/authentication/header-auth.md)
+- [Dashy：Tailscale 指南（官方文件）](https://github.com/Lissy93/dashy/blob/master/docs/authentication/tailscale.md)
+- [Tailscale Serve：在 tailnet 內分享本機服務](/features/serve/)
+- [Tailscale Funnel：把服務公開到網際網路](/features/funnel/)
