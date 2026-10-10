@@ -27,7 +27,7 @@ Home Assistant OS／Supervisor 使用者可以從社群 repo 安裝：
 
 ## 用 Serve 給 HTTPS（share_homeassistant: serve）
 
-預設你可以在 tailnet 內用 `http://<ha 的 tailnet IP>:8123` 或 MagicDNS 名稱直接連 HA，但那不是 HTTPS，瀏覽器會一直警告。add-on 的 **`share_homeassistant`** 選項可以讓它用 [Tailscale Serve](/features/serve/)（或 Funnel）掛上有效的 TLS 憑證：
+預設你可以在 tailnet 內用 `http://<ha 的 tailnet IP>:<HA 的 HTTP 埠>` 或 MagicDNS 名稱直接連 HA，但那不是 HTTPS，瀏覽器會一直警告。HA 的 HTTP 埠依安裝方式而定：HAOS 自 Home Assistant 2026.8 起預設是 `80`，Container 版仍是 `8123`，以你實際的設定為準。add-on 的 **`share_homeassistant`** 選項可以讓它用 [Tailscale Serve](/features/serve/)（或 Funnel）掛上有效的 TLS 憑證：
 
 ```yaml
 share_homeassistant: serve
@@ -45,7 +45,7 @@ share_on_port: 443
    - 開啟 **Trust X-Forwarded-For**。
    - 在 **Trusted proxies** 加上 `127.0.0.1`。
 
-為什麼是 `127.0.0.1`：add-on 以 host 網路跑，Serve 在 add-on 內把流量轉到本機的 HA（`127.0.0.1:8123`），所以 HA 看到的來源是 `127.0.0.1`。這兩項不設，HA 會擋掉來自反向代理的請求。
+為什麼是 `127.0.0.1`：add-on 以 host 網路跑，Serve 在 add-on 內把流量轉到本機的 HA（`127.0.0.1:<HA 的 HTTP 埠>`，即 HA 當下的設定埠），所以 HA 看到的來源是 `127.0.0.1`。這兩項不設，HA 會擋掉來自反向代理的請求。
 
 > 從 HA 2026.8 開始，HTTP 設定從 `configuration.yaml` 的 `http:` 區塊移到 **Settings → System → Network** 的 UI（舊的 YAML 會在升級時自動匯入、並在 Repairs 提醒移除）。所以不要再跑去改 YAML 了。
 
