@@ -1,0 +1,131 @@
+---
+title: 從手機接回家裡的 Claude Code：Tailscale + SSH + tmux，與 Remote Control 的比較
+description: 兩條從手機接回家裡 Claude Code 的路線：Tailscale + SSH + tmux（或 mosh）的 DIY 做法，與 Anthropic Remote Control 官方做法，各自的限制與取捨
+sidebar:
+  order: 2
+  label: 從手機接回 Claude Code
+---
+
+Claude Code 是終端機程式，但你人不會一直坐在終端機前面。想在通勤、開會、躺床上的時候接回那台常開主機上的 Claude Code，有兩條路線：一條是自己動手，用 Tailscale + SSH + tmux（或 mosh）從手機 SSH 進去；另一條是官方的 Remote Control，讓 claude.ai 或 Claude App 直接接上本機的 session。這篇把兩條路線講清楚，以及各自卡在哪裡。
+
+> 本文依 2026 年 10 月的 Tailscale、Anthropic（code.claude.com）與 mosh 官方文件整理，以 Tailscale v1.104、mosh 1.4.0 為準。Claude Code 的 Remote Control 是官方功能，細節以 Anthropic 文件為準；本文未在 iOS + macOS 實機跑過這些流程，屬文件整理。
+
+## 先決條件：一台常開、能 SSH 的主機
+
+兩條路線都需要一台「一直在線、開著 Claude Code」的主機。Mac mini 最常見，也可以是家裡的 Linux 小主機或一台 VPS。要先把這台機器調成不會睡、能 SSH、走 Tailscale、用金鑰登入，見 [家裡一台常開主機跑 agent：Mac mini 的無頭設定](/ai/always-on-agent-host/)。這篇假設你已經有這樣一台主機，直接講「從手機怎麼接」。
+
+## 路線一：Tailscale + SSH + tmux（DIY）
+
+這是最直白的一條：**從手機 SSH 進那台主機，在 tmux 裡跑 Claude Code**。沒有額外的服務，一切都握在你手上。
+
+### 手機上的終端機 App
+
+先在手機裝一個 SSH 終端機。iOS 上常用的是 **Termius** 或 **Blink Shell**，兩者都支援 mosh（下面會講）。裝好後把主機的 Tailscale IP 或 MagicDNS 名稱設成一個 host，用金鑰登入。
+
+- **Blink Shell**：mosh 官方列出的 iOS 客戶端，開啟來就是一個 shell，比較 geek。
+- **Termius**：有圖形介面、host 管理，也支援 mosh。
+
+### 用 tmux 讓工作階段「活著」
+
+如果直接 SSH 進去就 `claude`，手機一鎖屏、SSH 一斷，session 就跟著沒了。解法是先在主機上開一個 tmux session，在裡面跑 Claude Code：
+
+```bash
+tmux new -s claude
+claude
+```
+
+手機斷線後重新連回去，`tmux attach -t claude` 就接回原本的畫面。tmux 是這條路線的關鍵：**它讓 Claude Code 的行程持續跑著，和你的 SSH 連線無關**。Anthropic 官方文件在講遠端跑 Claude Code 時，也是建議「用 tmux 或 screen 把 session 留在連線斷掉之後」。
+
+### 用 mosh 讓連線「耐斷」
+
+SSH 走 TCP，手機從 Wi-Fi 換到行動網路、或進隧道沒訊號，SSH 就會斷。**mosh** 走 UDP，專為這種「會漫遊、會間歇斷線」的場景設計：換 IP、鎖屏再喚醒，連線會自己接回來，不用重連。用法和 SSH 幾乎一樣：
+
+```bash
+mosh <主機的 Tailscale IP>
+```
+
+mosh 也解決了手機輸入的延遲問題——它會先在本地預測你打的字，畫面不用等伺服器回應才出現。
+
+### mosh 的坑：不轉送 SSH agent
+
+mosh 不是 SSH 的透明替代品。它**不支援 SSH agent forwarding**，也不支援 port forwarding、X forwarding（mosh 手冊明寫，agent forwarding 至今還是 open issue）。實際後果是：**在 mosh session 裡 `git push`／`git pull` 走 SSH 會失敗**，因為那台主機拿不到你轉送過去的 SSH 金鑰。
+
+幾個解法：
+
+- 在主機上放一把它自己的金鑰（不要靠 agent forwarding），git 直接用主機的 key。
+- 把 repository 的 remote 改成 HTTPS，改用 token 認證。
+- 需要用 agent forwarding 時，另外開一條普通 SSH 連線去做 git，mosh 只拿來操作 Claude Code。
+
+這是這條 DIY 路線最常絆倒人的地方，先知道就省很多時間。
+
+### 推播通知：用 hook 補上
+
+DIY 路線沒有內建推播。想讓 Claude 卡住要你決定、或跑完通知你，得自己接：Claude Code 有官方的 **hook** 機制，會在特定事件（`Notification`、`Stop` 等）觸發你寫的 script。常見做法是掛一支 `Notification`／`Stop` hook，把通知轉到 ntfy、Pushover 這類推播服務，手機就會收到。hook 機制是官方功能，但「轉到哪個推播服務」是社群各自接的，沒有官方範本。
+
+## 路線二：Anthropic Remote Control（官方）
+
+Remote Control 是 Claude Code 內建的官方功能：**claude.ai 網頁或 Claude 手機 App 變成你本機 session 的一扇窗**。程式和檔案存取都留在你的主機上，手機只是操作介面。
+
+### 怎麼運作
+
+啟動時，主機上的 Claude Code 會**只發起對外的 HTTPS 連線**（不開任何入站埠），註冊到 Anthropic API 並持續輪詢。你從手機連上時，訊息經由 Anthropic 的伺服器轉送到你本機的 session，全程走 TLS。換句話說，它不需要 Tailscale、不需要 SSH、也不需要開埠。
+
+### 怎麼啟用
+
+三種方式，選一個：
+
+```bash
+claude remote-control            # server 模式，等遠端連入
+claude --remote-control "專案"   # 一般互動 session，同時開 Remote Control
+/remote-control                  # 在已開的 session 裡啟用
+```
+
+啟動後 terminal 會顯示一個 **session URL** 和 **QR code**：在瀏覽器開 URL、或用手機 App 掃 QR code，就直接接上。沒有裝 App 的話，在 Claude Code 裡打 `/mobile` 會跳出對應的 App Store 下載 QR code。
+
+### 限制：不是每個人都能用
+
+Remote Control 的限制比 DIY 路線多，官方文件寫得很清楚：
+
+- **要 claude.ai 訂閱**：Pro、Max、Team、Enterprise 方案才能用；用 API key 登入、或走 Amazon Bedrock／Google Cloud／Microsoft Foundry、或把 `ANTHROPIC_BASE_URL` 指向 LLM gateway／proxy，都不能用。**如果你平常是用 API key 或 Bedrock 跑 Claude Code，Remote Control 直接不可用**，這條路就走不通。
+- **一個互動 session 一個遠端連線**：非 server 模式時，每個 Claude Code 行程一次只對應一個 remote session。要一次開多個，得用 server 模式（`--capacity` 預設 32 個並行 session）。
+- **transcript 會存到 Anthropic**：連線期間，你的訊息、Claude 的回覆、tool 活動都會存到 Anthropic 伺服器，用來保持多裝置同步與斷線重連。開啟 Zero Data Retention 的組織不能用 Remote Control。
+- **有些指令只能在本機**：`/plugin`、`/resume` 這類只有終端機介面才有的指令，在手機或網頁上用不了。
+
+### 推播通知是內建的
+
+Remote Control 內建手機推播：Claude 會在長時間任務跑完、或需要你決定時推通知給你，也可以在 prompt 裡要求「跑完通知我」。在 `/config` 開啟即可。這是 DIY 路線沒有的，也是最省事的一點。
+
+### 安全上的提醒
+
+session URL 和 QR code 就是直接接進那個工作階段的入口，別在公開場合展示。另外它雖然不開入站埠，但連線期間 transcript 會存到 Anthropic 伺服器，這和 DIY 路線「一切都留在自己機器上」是兩種不同的信任模型。
+
+## 兩條路線怎麼選
+
+|                 | Tailscale + SSH + tmux                   | Remote Control                             |
+| --------------- | ---------------------------------------- | ------------------------------------------ |
+| 連線方式        | SSH（經 Tailscale），私人網路            | 對外 HTTPS，經 Anthropic 伺服器            |
+| 要裝什麼        | Tailscale、終端機 App、tmux（可選 mosh） | 什麼都不用，Claude Code 內建               |
+| 帳號要求        | 沒有限制，API key／Bedrock 都能用        | 一定要 claude.ai 訂閱（Pro 以上）          |
+| 多個 session    | tmux 開幾個都行                          | 非 server 模式一次一個；server 模式最多 32 |
+| 推播通知        | 自己用 hook 接 ntfy／Pushover            | 內建                                       |
+| transcript 去向 | 留在自己機器上                           | 連線期間存到 Anthropic                     |
+| 完整終端        | 有，所有 `/` 指令都能用                  | 部分指令只在本機                           |
+| 耐斷線          | 靠 mosh（UDP）                           | 靠 Claude Code 自動重連                    |
+
+大方向是這樣：
+
+- **你已經有 claude.ai 訂閱、想要最省事、想要推播通知** → 用 **Remote Control**。開個 QR code 就接上了，不用碰 SSH 和 Tailscale。
+- **你用 API key 或 Bedrock 跑 Claude Code** → Remote Control 不能用，只能走 **DIY**。
+- **你想要完整終端、想讓 transcript 全留在自己機器上、或本來就熟 SSH／Tailscale** → 走 **DIY**。
+- **兩者其實不互斥**：可以先從 Remote Control 上手，需要完整終端時再 SSH 進去。主機上的設定見 [常開 agent 主機](/ai/always-on-agent-host/)。
+
+## 參考資料
+
+- [Continue local sessions from any device with Remote Control（Anthropic 官方文件）](https://code.claude.com/docs/en/remote-control)
+- [Claude Code on mobile（Anthropic 官方文件）](https://code.claude.com/docs/en/mobile)
+- [Hooks reference（Anthropic 官方文件）](https://code.claude.com/docs/en/hooks)
+- [Mosh: the mobile shell（官方）](https://mosh.org/)
+- [mosh(1) 手冊](https://raw.githubusercontent.com/mobile-shell/mosh/master/man/mosh.1)
+- [Remote Claude Code: programing like it was the early 2000s（Harper Reed，2026-01）](https://harper.blog/2026/01/05/claude-code-is-better-on-your-phone/)
+- [Tailscale SSH](/features/tailscale-ssh/)
+- [家裡一台常開主機跑 agent：Mac mini 的無頭設定](/ai/always-on-agent-host/)
