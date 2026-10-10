@@ -1,0 +1,125 @@
+---
+title: AI 與 agent：為什麼要把 agent 關進 tailnet
+description: 從「致命三重奏」（私密資料、不可信內容、對外通訊）解釋為什麼不能讓 AI agent 直接亂跑，以及用 tag 身分、grants 最小權限、ephemeral 節點這三件「無聊的基礎建設」把它關進 tailnet
+sidebar:
+  order: 0.9
+  group:
+    label: AI 與 agent
+---
+
+AI agent（AI 代理）和聊天機器人最大的差別，是它不只回答，還會動手：讀檔案、查資料庫、執行指令、發訊息。這些能力讓它很有用，也讓它很危險——它會接觸你的私密資料、會看到你丟給它的內容、還會往外送東西。這三個特性湊在一起，正好是攻擊者最喜歡的組合，Simon Willison 稱之為「致命三重奏（lethal trifecta）」。
+
+這篇是 `ai/` section 的觀念首篇，解釋這個風險從哪來，以及為什麼 Tailscale 的 tag、grants、ephemeral 這三樣看起來無聊的基礎建設，就是關住 agent 的關鍵。實際怎麼做，見 [Tags 與 auth key](/admin/tags-auth-keys/)、[ACL / Grants 入門](/admin/acl-grants/) 和 [Codex Cloud](/platforms/codex-cloud/)。
+
+> 本文依 2026 年 10 月的 Tailscale 官方部落格與文件整理，以 Tailscale v1.104 為準。文中沒有涉及需要實機驗證的設定，屬文件整理；觀念部分的來源見文末「參考資料」。
+
+## 什麼是 agent
+
+「agent」這個字常被拿來指好幾種不同的東西：有時只是模型本身，有時是寫程式的助手，有時是一套工作流程引擎。Tailscale 官方部落格給了一個比較清楚的定義：**agent 是「模型 + 它周圍的一切」組成的系統**，由五層堆起來：
+
+| 層                      | 做什麼                                                     |
+| ----------------------- | ---------------------------------------------------------- |
+| **Model（模型）**       | 推理與生成文字的大腦，例如 Claude、GPT 這類 LLM            |
+| **Tools（工具）**       | 模型接觸世界的方式：讀檔案、查資料庫、發訊息都是 tool call |
+| **Sandbox（沙箱）**     | 把工具限制在一個範圍內，決定它能看、能做什麼               |
+| **Harness（執行環境）** | 管 prompt、shell、檔案、記憶這些「無聊但重要」的事         |
+| **Model access**        | 模型要怎麼連到 LLM 供應商（本機或雲端）                    |
+
+關鍵在最後一層以前：模型本來「又盲又停留在訓練當下」，是 tools 和 harness 讓它能真正碰到你的世界。而「能碰到世界」，就同時代表「可能被世界利用」。
+
+## 致命三重奏（lethal trifecta）
+
+「lethal trifecta」是 Simon Willison 提出的架構，描述一個 agent 系統會把自己暴露給攻擊者的三個特性：
+
+1. **能存取私密資料（private data）**——你的郵件、檔案、日曆、程式碼。
+2. **會接觸不可信的內容（untrusted content）**——電子郵件、網頁搜尋結果、issue、pull request。這些東西到處都是，幾乎躲不掉。
+3. **能對外通訊（external communication）**——把訊息送出去、呼叫外部服務、把資料上傳到某個地方。
+
+單獨看，任何一項都不致命；問題在於 agent 有用，靠的正是讓這三件事**同時**發生。一個 agent 要幫你整理信箱、看 issue、回訊息，就必然一邊讀不可信的內容、一邊碰到你的資料、一邊有對外送訊息的通道。而 LLM 本質上無法完全忽略藏在不可信輸入裡的惡意指令——攻擊者只要在網頁或郵件裡埋一句話，就有機會誘導 agent 把私密資料傳出去。這正是「三重奏」之所以致命的原因。
+
+## 常見的三種做法，各有各的坑
+
+碰到這個風險，團隊通常有三種反應，Tailscale 部落格形容得很貼切：
+
+1. **完全不防（YOLO）**：讓 agent 放飛自我，代價是資料被刪、個人資料外洩、多出新漏洞。
+2. **鎖到不能用**：限制多到 agent 拿不到任何有用資訊，最後跟基本聊天沒兩樣。
+3. **淹沒在權限確認裡**：每個 tool call 都要按「允許」。一旦確認疲勞上身，就會一路按「是、是、是」，結果和完全不防差不多。
+
+這三種的共同問題，是把防護寄託在「模型夠乖」或「人夠警覺」上。模型行為是非確定性的，再多的 prompt 防線也擋不住每一次越權；人也會疲勞。Tailscale 的思路是：與其盯著模型，不如從**網路層**把 agent 能碰到什麼直接限住。
+
+## Agent 需要的是無聊的基礎建設
+
+談到 agent，大家的注意力都在模型多聰明；但真正決定安不安全的，是三件一點也不性感、卻不能少的事：
+
+- **它是誰**——agent 的身分是什麼，誰在替它背書。
+- **它能碰到什麼**——它能連到 tailnet 裡的哪些服務、哪些連接埠。
+- **它結束之後會怎樣**——任務跑完，那個節點會不會留下來變成後門。
+
+這三件事對應 Tailscale 的三個基本工具：**tag**（身分）、**grants**（存取範圍）、**ephemeral**（生命週期）。它們本來是給伺服器、容器、CI 用的，拿來管 agent 剛剛好。
+
+## 三個原則
+
+### 原則一：用 tag 給 agent 一個身分
+
+用自己的帳號跑 agent，agent 的身分就是「你」——它會拿到你全部的存取權限，你被移出 tailnet 它就跟著斷，帳號登出它也不見了。這跟「伺服器不該用個人帳號登入」是同一回事。
+
+給 agent 的裝置打上 tag（例如 `tag:agent`），讓它以「服務」的身分加入 tailnet：身分不再綁在某個人身上，規則改依 tag 判斷，agent 能碰什麼由你另外寫。tag 的定義與套用方式，見 [Tags 與 auth key](/admin/tags-auth-keys/)。
+
+### 原則二：用 grants 只開放必要的連線
+
+新的 tailnet 預設**全開**：任何裝置都能連到任何裝置的任何連接埠。agent 一進來，就等於能碰到 tailnet 裡幾乎所有東西。
+
+用 [grants](/admin/acl-grants/) 只放行 agent 需要的服務與連接埠，例如只讓它連內部 API 的 443 埠。要注意規則是「只放行、不阻擋」，如果 policy 裡還留著預設的 `*` 到 `*` 全開規則，其他限制都等於沒寫——得先拿掉全開規則，grant 才會生效。
+
+### 原則三：讓節點 ephemeral，用完就消失
+
+雲端 sandbox、CI runner、Codex Cloud 的 VM，都是「跑一次任務就丟」的節點。如果不特別處理，這些用完的節點會留在 Machines 頁面，甚至變成沒人管的後門。
+
+用 **ephemeral** 的 auth key 讓裝置離線後自動移除，任務結束就從 tailnet 消失。reusable、ephemeral、tag 這三個選項怎麼搭配，見 [Tags 與 auth key](/admin/tags-auth-keys/)。
+
+## 一個最小權限的範例
+
+把三個原則合在一起，policy 大概長這樣：
+
+```json
+"tagOwners": {
+  "tag:agent": ["autogroup:admin"],
+  "tag:internal-api": ["autogroup:admin"],
+},
+"grants": [
+  // 你（管理員）可以連到 agent 主機，看它、管理它
+  {
+    "src": ["autogroup:admin"],
+    "dst": ["tag:agent"],
+    "ip": ["*"],
+  },
+  // agent 只能連到它要用的內部 API 的 HTTPS
+  {
+    "src": ["tag:agent"],
+    "dst": ["tag:internal-api"],
+    "ip": ["tcp:443"],
+  },
+  // agent 沒有其他規則 = 連不到其他任何裝置
+],
+```
+
+- `tag:agent` 是 agent 主機（或雲端 sandbox）的身分，`tag:internal-api` 是它要用的服務。
+- agent 只被放行到 `tag:internal-api` 的 `tcp:443`；tailnet 裡其他東西，它連看都看不到。
+- 記得確認 policy 裡**沒有**殘留的全開規則，否則上面的限制形同虛設。規則細節與 `tests` 驗證見 [ACL / Grants 入門](/admin/acl-grants/)。
+
+## 從 Codex Cloud 看這套原則怎麼落地
+
+站內 [Codex Cloud](/platforms/codex-cloud/) 就是三個原則的具體實作：OpenAI 的雲端任務 VM 用一把 **reusable + ephemeral + 帶 tag** 的 auth key 加入 tailnet，任務結束、VM 離線後自動移除；再用 grants 只開放必要的 HTTPS 服務。Tailscale 官方在部落格裡建議的做法也是同一套：AI agent 和它要連的資源都打上 tag、auth key 保留效期、開啟 network flow logs 觀察它實際連到哪裡。
+
+如果 agent 跑在你自己家裡的主機、手機、Docker 或雲端 sandbox，原理完全一樣：先想清楚它是誰、它能碰到什麼、它結束後要不要消失，剩下的就是把這三件事寫進 tag、grants 和 auth key。
+
+## 參考資料
+
+- [How Tailscale mitigates the lethal trifecta（Tailscale 官方部落格）](https://tailscale.com/blog/aperture-lethal-trifecta)
+- [The lethal trifecta for AI agents（Simon Willison）](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/)
+- [A no-nonsense explainer to Agentic AI（Tailscale 官方部落格）](https://tailscale.com/blog/agents-are-coming)
+- [Secure AI agent connectivity（官方）](https://tailscale.com/use-cases/secure-ai-agent-connectivity)
+- [Codex Cloud shipped with Tailscale support. Nobody told us.（Tailscale 官方部落格）](https://tailscale.com/blog/codex-cloud-tailscale)
+- [Tags（官方）](https://tailscale.com/docs/features/tags)
+- [Auth keys（官方）](https://tailscale.com/docs/features/access-control/auth-keys)
+- [Grants（官方）](https://tailscale.com/docs/features/access-control/grants)

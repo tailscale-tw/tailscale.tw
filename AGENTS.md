@@ -53,7 +53,7 @@ The home page is `src/content/docs/index.mdx` (no `src/pages/index.astro`).
 
 - The file path is the URL: `pve/tailscale-on-lxc.mdx` → `/pve/tailscale-on-lxc/`. These URLs match the old MkDocs site — don't rename or move files without adding redirects.
 - Frontmatter: `title` (required; it renders as the H1, so don't repeat it in the body), `description`, `sidebar.order`, `sidebar.label` (shorter sidebar text). There is no central nav file.
-- A section is a directory with an `index.mdx` that sets `sidebar.group.label` and a `sidebar.order` that positions the section among the others (currently features `0`, performance `0.5`, pve `1`, synology `4`, platforms `5`; pick an unused value for a new section). The section `index.mdx` links its child pages manually; when adding a page, add it to that list too.
+- A section is a directory with an `index.mdx` that sets `sidebar.group.label` and a `sidebar.order` that positions the section among the others (currently features `0`, performance `0.5`, ai `0.9`, pve `1`, synology `4`, platforms `5`; pick an unused value for a new section). The section `index.mdx` links its child pages manually; when adding a page, add it to that list too.
 - Write in 台灣正體中文 with Taiwan terminology. Put a space between CJK and Latin/digits (`bun run fix:text` applies it).
 - New articles start with a version note blockquote, e.g. `> 本文以 Tailscale v1.102（2026 年 10 月）為準…`, stating the Tailscale version and date the content was verified against. Older articles under `pve/` and `synology/` don't have one; don't add it when editing them unless the content is re-verified.
 - Internal links are root-relative with a trailing slash: `[Tailscale Serve](/features/serve/)`. `lint:docs` fails on broken ones.

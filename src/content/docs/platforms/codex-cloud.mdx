@@ -12,6 +12,8 @@ OpenAI 的 [Codex Cloud](https://learn.chatgpt.com/docs/cloud) 會在雲端 VM �
 
 > 本文依 2026 年 10 月的 OpenAI Codex Cloud 文件與 Tailscale 官方部落格整理，未在 Codex Cloud 上實際驗證。Codex Cloud 正逐步開放給 ChatGPT 付費帳號（Plus 以上），功能與限制仍可能變動，請以兩邊的官方文件為準。
 
+這篇把重點放在怎麼設定；agent 為什麼需要 tag、grants、ephemeral 這套身分與權限的完整觀念，見 [AI 與 agent](/ai/)。
+
 ## 運作方式
 
 每個 Codex Cloud 任務都在一台新的 VM 上執行。你在環境設定裡填入 Tailscale 的 auth key，每台任務 VM 啟動時就會用這把 key 加入你的 tailnet，任務結束、VM 離線後再由 Tailscale 自動移除。
