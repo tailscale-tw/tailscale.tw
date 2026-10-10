@@ -1,0 +1,73 @@
+---
+title: 一台 Apple TV 就是家裡的 exit node
+description: 用一台常開的 Apple TV 當 Tailscale exit node（也能當 IPv4 subnet router）：tvOS 版 Tailscale 安裝、Run as Exit Node、admin console 核准、home hub 設定與睡眠問題、有線網路的優勢
+sidebar:
+  order: 1.75
+  label: Apple TV 當 exit node
+---
+
+把 Tailscale 裝在 Apple TV 上，就能拿它當一台**常開的 exit node**：出門在外時，讓手機、筆電的全部上網流量經由家裡的 Apple TV 出去，用的是家裡的 IP、走的是家裡的網路。Apple TV 一直插著電、接著有線網路、安靜不吵，比拿一台電腦常開省事得多。
+
+> 本文依 2026 年 10 月的 Tailscale 官方 Apple TV 文件整理，以 Tailscale v1.104、tvOS 17 以上（建議 18 以上）為準。本文未在實機的 Apple TV 上操作，App 內的步驟名稱以官方文件為準，未描述無法查證的介面細節。
+
+## 為什麼是 Apple TV
+
+Exit node 需要「一直開著、一直在線」，Apple TV 天生就符合：
+
+- **常開**：插著電、不關機，家裡的電視櫃就是它的家。
+- **有線網路**：Apple TV 通常接乙太網路，exit node 走有線比走 Wi-Fi 穩定得多。
+- **省電安靜**：功耗低、沒風扇，比拿桌機或舊筆電常開划算。
+
+## 前置條件
+
+官方文件列了兩個前提：
+
+1. **tvOS 17.0 以上**（建議 18.0 以上）。
+2. **Apple TV 設定為 home hub（家庭中樞）**。這點很重要——Apple TV 睡眠時，要當 home hub 才會繼續保持網路連線，否則睡著了 exit node 就跟著斷。通常初次設定時會自動設成 home hub，但換位置、改網路設定、或停在 tvOS 17（17 版會自動挑選其他裝置當 hub）都可能失效。tvOS 18 以後可以手動指定：**設定 → AirPlay 與 HomeKit → HomeKit**，指定房間名稱就會設成 hub。
+
+## 安裝 tvOS 版 Tailscale
+
+1. 在 Apple TV 上打開 **App Store**，搜尋 **Tailscale**，選 **Get**。
+2. 打開 Tailscale App，在歡迎頁選 **Install VPN Configuration**（安裝 VPN 設定），再選 **Allow**。
+3. 選 **Connect**。
+4. 認證：官方建議用**掃 QR code**（用另一台已登入的裝置掃描），或用 **auth key**（在 admin console 產生、用 Apple TV Remote 貼上）。
+
+連上後，Apple TV 會出現在 admin console 的 [Machines](https://console.tailscale.com/admin/machines) 頁面。
+
+## 設成 exit node
+
+1. 在 Apple TV 的 Tailscale App，打開 **Exit Node** 區，先選 **None**。
+2. 選 **Run as Exit Node** 並確認。
+3. 到 admin console 的 Machines 頁面，找到這台 Apple TV，點 `...` → **Edit route settings**，打開 **Use as exit node** 開關。
+
+之後其他裝置就能在各自的 Tailscale 用戶端選這台 Apple TV 當 exit node。使用 exit node 的觀念、各平台怎麼選，見 [Exit Node](/features/exit-node/)。
+
+## 也能當 subnet router（只有 IPv4）
+
+除了 exit node，Apple TV 也能當 **subnet router**，把家裡的網段廣告進 tailnet——例如讓外面的手機存取沒裝 Tailscale 的印表機。設定在 App 的 **Subnet Router** 區，選 **Advertise New Route** 填入網段（CIDR）。
+
+要注意的限制：**Apple TV 當 subnet router 只支援 IPv4，不支援 IPv6**（其他平台都支援兩者）。所以需要 IPv6 網段路由的話，得換用其他裝置。subnet router 的完整說明見 [Subnet Router](/features/subnet-router/)。
+
+## 注意事項
+
+- **睡眠與 home hub**：Apple TV 睡著後要當 home hub 才保持連線，前面「前置條件」那節一定要確認。官方文件的常見故障第一名就是「睡著了、不是 home hub」。
+- **不能遠端 SSH／VNC**：Apple TV 無法用 Tailscale SSH 或遠端桌面連進去管理，只能透過 Apple TV 本身的遙控器／App 操作。所以它適合「放著當出口」的角色，不適合當需要進去的伺服器。
+- **想測延遲**：App 的 **My Other Devices** 裡可以對其他裝置 ping，看連線是直連還是走 DERP，用來確認打洞有沒有成功。
+
+## 小結
+
+| 步驟             | 做什麼                                               |
+| ---------------- | ---------------------------------------------------- |
+| 前置             | tvOS 17+（建議 18+）、設定為 home hub                |
+| 安裝             | App Store 裝 Tailscale、裝 VPN 設定、QR code 認證    |
+| 當 exit node     | Exit Node 區 → Run as Exit Node → admin console 核准 |
+| 當 subnet router | Subnet Router 區 → Advertise New Route（限 IPv4）    |
+
+Apple TV 是「放著不管、專職出口」的好選擇：常開、有線、省電。只要把 home hub 設好、別讓它睡死，就是一台穩定的小 exit node。
+
+## 參考資料
+
+- [Install Tailscale on an Apple TV（Tailscale 官方）](https://tailscale.com/docs/install/appletv)
+- [Subnet routers（Tailscale 官方，Apple TV 僅 IPv4）](https://tailscale.com/docs/features/subnet-routers)
+- [Exit Node：讓所有流量經由指定裝置出去](/features/exit-node/)
+- [Subnet Router：存取整個區網內沒裝 Tailscale 的設備](/features/subnet-router/)
