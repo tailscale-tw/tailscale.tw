@@ -1,0 +1,109 @@
+---
+title: Tailscale、Cloudflare Tunnel、QuickConnect、傳統 VPN 怎麼選
+description: 比較四種從外面連回家裡服務的做法：Tailscale、Cloudflare Tunnel（含 Access／WARP）、QuickConnect、傳統 VPN，各自的免費額度、流量路徑、要不要開埠、身分驗證與適用情境
+sidebar:
+  order: 1.25
+  label: 遠端存取怎麼選
+---
+
+要從外面連回家裡的服務（NAS、自架網站、監視器、Home Assistant），市面上常見四種做法：**Tailscale**（mesh VPN）、**Cloudflare Tunnel**（公開隧道）、**QuickConnect**（群暉內建）、**傳統 VPN**（WireGuard／OpenVPN／路由器內建）。它們不是同一種東西——有的走私有網路、有的把服務公開到網際網路，選錯會差很多。這篇把四者的本質差異、免費額度、流量路徑、要不要開埠、身分驗證講清楚，幫你按「誰要用」來選。
+
+> 本文依 2026 年 10 月 11 日的 Tailscale、Cloudflare、Synology 官方文件與 WireGuard／OpenVPN 官方文件整理，以 Tailscale v1.104 為準。免費方案的額度是**易變數字**，以下都以本文查證日（2026-10-11）為準，使用前請以各官方定價頁為準。本文屬文件整理，未實機比較各方案。
+
+## 先分兩類：私有網路 vs 公開發布
+
+四種做法其實分兩大類，先分清這個，後面就都好懂：
+
+- **私有網路**：Tailscale、傳統 VPN。你的服務**不對公網開放**，只有通過身分驗證、加入同一個私人網路的裝置才連得到。外面的人連掃描都掃不到你的服務。
+- **公開發布**：Cloudflare Tunnel（Funnel 也是）、QuickConnect 的 relay。服務**對公網可達**，任何上得了網的人都能碰到入口（有沒有登入是另一回事）。
+
+這不是「誰比較安全」的簡單二分——私有網路的攻擊面小，但對方得裝用戶端；公開發布最方便（對方不用裝東西），但等於把登入頁攤在公網上。以下逐一說明。
+
+## Tailscale：私有 mesh VPN
+
+- **本質**：把裝置組成一個私有 mesh 網路（tailnet），WireGuard 端到端加密。
+- **流量路徑**：點對點**直連**（NAT 穿透），打不通才走 DERP 中繼。兩台都在台灣時，流量通常不繞國外。原理見 [NAT 穿透原理](/getting-started/nat-traversal/)。
+- **要不要開埠**：不用。不靠連接埠轉送，躲在 CGNAT 後面也能用，見 [台灣 ISP 與 NAT](/troubleshooting/taiwan-isp-nat/)。
+- **身分驗證**：SSO（Google、Microsoft、GitHub 等）+ ACL 控制誰能連誰，也可以分享給家人朋友。
+- **免費額度**（2026-10-11 查證）：Personal 方案**免費、6 位使用者、裝置數不限**、3 個 ACL 群組、50 個 tagged resources。
+- **適用情境**：**自己／家人**要連全部服務（NAS、SSH、Docker、Home Assistant…），要最小攻擊面。要對外公開某個服務時，再用 [Funnel](/features/funnel/) 補足。
+
+## Cloudflare Tunnel：把服務公開，經 Cloudflare 邊緣
+
+- **本質**：反向隧道，把服務發布到公網，流量經 Cloudflare 的全球網路。
+- **流量路徑**：`網際網路 → Cloudflare 邊緣 → cloudflared → 你的服務`。由你伺服器上的 `cloudflared` 主動建立**outbound-only** 連線到 Cloudflare，所以不用開對外埠、不用公開 IP。但所有流量都**繞經 Cloudflare**，不像 Tailscale 會直連。
+- **要不要開埠**：不用（outbound-only，連線從你這邊往外打）。
+- **身分驗證**：可搭 [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/policies/access/)（在邊緣做身分驗證，例如 email OTP、SSO，驗過才放行到你的服務）；[WARP](https://developers.cloudflare.com/cloudflare-one/connections/connect-devices/warp/) 則是 Cloudflare 的用戶端，讓裝置的流量走 Cloudflare 的網路。
+- **免費額度**（2026-10-11 查證）：Zero Trust Free 方案**免費、50 位使用者**。
+- **適用情境**：要讓**陌生人／沒有裝用戶端的人**存取（公開網站、給客戶的 demo、webhook），或有自訂網域想掛 CDN／WAF。本質是「公開 + 在邊緣把關」，與 Tailscale 的「私有」是不同思路。
+
+> **條款提醒（影音／大檔案）**：Cloudflare 的 CDN 條款限制用非 Enterprise 方案代理影音。依 [Service-Specific Terms](https://www.cloudflare.com/service-specific-terms-application-services/)（2026-09-28 更新）的 CDN 段落，非 Enterprise 客戶要透過 CDN 提供 **video 和其他大型檔案**，必須使用付費服務（如 Stream、Images）；否則 Cloudflare 有權在偵測到你用它提供影片、或「不成比例的圖片、音訊或其他大型檔案」時停用或限制存取。所以 Jellyfin、監視器、照片庫這類以影音／圖片為主的服務，不適合用 Cloudflare Tunnel 免費方案公開。
+
+## QuickConnect：群暉內建、最省事但只限自家 App
+
+QuickConnect 是 Synology NAS 內建的功能，跟 Tailscale 的詳細比較見 [QuickConnect 與 Tailscale](/synology/quickconnect-vs-tailscale/)，這裡只列重點：
+
+- **流量路徑**：先打洞直連，失敗才走 **Synology Relay Server**（中繼）。
+- **要不要開埠**：不用。
+- **身分驗證**：Synology 帳號 + DSM 登入。
+- **免費額度**：隨 NAS，免費。
+- **適用情境**：只想在外面用群暉自家 App（Photos、Drive、DSM），而且不想在每台裝置裝東西。
+
+## 傳統 VPN：WireGuard／OpenVPN／路由器內建
+
+- **本質**：整台裝置的流量都導進 VPN 隧道，像把裝置「搬回家」。
+- **流量路徑**：`裝置 → VPN 伺服器 → 網際網路`，所有流量（不只某個服務）都走這條隧道。
+- **要不要開埠**：**要**。VPN 伺服器得對外開一個 UDP 埠並設定連接埠轉送（[WireGuard](https://www.wireguard.com/quickstart/) 預設 UDP `51820`、[OpenVPN](https://openvpn.net/community-resources/reference-manual-for-openvpn-2-6/) 預設 UDP `1194`）。這在 CGNAT 後面就做不到，見 [台灣 ISP 與 NAT](/troubleshooting/taiwan-isp-nat/)。
+- **身分驗證**：WireGuard 用金鑰對（PSK 式）、OpenVPN 用憑證＋帳密、路由器內建 VPN 各有各的。
+- **免費額度**：自架免費，無廠商限制。
+- **適用情境**：要**所有流量**都回家（公共 Wi-Fi 保護、用家裡 IP 看內容），或已有路由器內建 VPN。缺點是要自己維護、要開埠、對方裝置要設 VPN 設定檔。
+
+## 比較表
+
+|                   | 本質          | 流量路徑                 | 開埠 | 身分驗證                         | 免費額度（2026-10-11） |
+| ----------------- | ------------- | ------------------------ | ---- | -------------------------------- | ---------------------- |
+| Tailscale         | 私有 mesh VPN | 直連為主，DERP 備援      | 否   | SSO + ACL                        | 6 人、裝置不限         |
+| Cloudflare Tunnel | 公開隧道      | 必經 Cloudflare 邊緣     | 否   | Cloudflare Access（WARP 用戶端） | 50 人                  |
+| QuickConnect      | 群暉遠端入口  | 直連或 Synology Relay    | 否   | Synology 帳號 + DSM 登入         | 隨 NAS 免費            |
+| 傳統 VPN          | 全流量 VPN    | 裝置 → VPN 伺服器 → 外網 | 是   | 金鑰／憑證／帳密                 | 自架免費               |
+
+## 按「誰要用」來選
+
+- **只有自己用**：Tailscale。全部服務、最小攻擊面、免開埠，出門在外手機筆電一裝就能連。這是多數 homelab 的預設答案。
+- **家人、朋友偶爾用**：先看對方能不能裝用戶端。能裝 → Tailscale 分享節點；不能裝、只要群暉 App → QuickConnect；要公開一個網頁 → Cloudflare Tunnel。
+- **陌生人／公開服務**（個人網站、給客戶的 demo、webhook）：Cloudflare Tunnel（或 Tailscale Funnel）。這類一定要在入口做身分驗證或至少了解公開的風險。
+- **要「整台裝置」的流量都回家**（公共 Wi-Fi、換地區 IP）：Tailscale 的 [Exit Node](/features/exit-node/) 或傳統 VPN。要自己架又要開埠的，Tailscale exit node 通常比傳統 VPN 省事；已有路由器內建 VPN 就用現成的。
+
+## 可以並存
+
+這四種不是二選一。常見的組合：
+
+- **Tailscale 管私有**（自己連全部服務）+ **QuickConnect 管群暉 App**（給不裝東西的家人）——兩者互不干擾。
+- **Tailscale 管私有** + **Cloudflare Tunnel 管那幾個要公開的服務**——私有歸私有、公開歸公開，攻擊面分開。
+- 傳統 VPN 和 Tailscale 也可以同時開，只是功能重疊、維護兩份，通常沒必要。
+
+## 小結
+
+| 你的需求                     | 選哪個                                   |
+| ---------------------------- | ---------------------------------------- |
+| 自己連全部服務、要最小攻擊面 | Tailscale                                |
+| 公開網站、給陌生人用         | Cloudflare Tunnel（或 Tailscale Funnel） |
+| 只連群暉 App、不裝東西       | QuickConnect                             |
+| 整台裝置流量都回家           | Tailscale exit node 或傳統 VPN           |
+
+先想清楚「**給誰用**」和「**要不要公開**」，再套這個表，答案就出來了。更多細節：Tailscale 的觀念見 [Tailscale 是什麼](/getting-started/what-is-tailscale/)，群暉兩者比較見 [QuickConnect 與 Tailscale](/synology/quickconnect-vs-tailscale/)，台灣網路能不能直連、開埠見 [台灣 ISP 與 NAT](/troubleshooting/taiwan-isp-nat/)。
+
+## 參考資料
+
+- [Tailscale Pricing（Personal 方案 6 人免費）](https://tailscale.com/pricing)
+- [Cloudflare Zero Trust Plans & Pricing（Free 50 人）](https://www.cloudflare.com/plans/zero-trust-services/)
+- [Cloudflare Tunnel（官方，outbound-only、不開埠）](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/)
+- [Cloudflare Access（官方）](https://developers.cloudflare.com/cloudflare-one/policies/access/)
+- [Synology QuickConnect White Paper（Synology 官方）](https://kb.synology.com/en-sg/WP/Synology_QuickConnect_White_Paper/4)
+- [WireGuard Quick Start（官方，UDP 51820）](https://www.wireguard.com/quickstart/)
+- [OpenVPN 2.6 參考手冊（官方，預設埠 1194）](https://openvpn.net/community-resources/reference-manual-for-openvpn-2-6/)
+- [Cloudflare Service-Specific Terms（官方，CDN 對影音／大檔案的條款）](https://www.cloudflare.com/service-specific-terms-application-services/)
+- [QuickConnect 與 Tailscale：什麼時候用哪一個](/synology/quickconnect-vs-tailscale/)
+- [Tailscale 是什麼：tailnet、WireGuard 與控制平面的基本觀念](/getting-started/what-is-tailscale/)
+- [台灣 ISP 與 NAT：中華電信、社區網路、5G 行動網路下的直連率](/troubleshooting/taiwan-isp-nat/)
+- [Tailscale Funnel：把服務公開到網際網路](/features/funnel/)
