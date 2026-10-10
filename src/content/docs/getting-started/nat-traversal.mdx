@@ -90,7 +90,7 @@ Tailscale 偵測到路由器支援其中之一時，會自動要求一個對外�
 
 家裡用「業者的數據機兼路由器」後面再接自己的路由器，就是兩層 NAT。有些業者使用 **CGNAT**（carrier-grade NAT），在業者那一端再做一次 NAT，用戶拿到的「公開 IP」其實是 `100.64.0.0/10` 這段共享位址。
 
-STUN 問到的永遠是最外層 NAT 的位址，所以多層 NAT 本身不會讓打洞失敗；真正影響結果的是最外層 NAT 是 easy 還是 hard。但自動開埠協定只能控制你自己那一層，外層的 NAT 不受影響，所以在 CGNAT 後面，UPnP 等協定通常幫不上忙。
+STUN 問到的永遠是最外層 NAT 的位址，所以多層 NAT 本身不會讓打洞失敗；真正影響結果的是最外層 NAT 是 easy 還是 hard。但自動開埠協定只能控制你自己那一層，外層的 NAT 不受影響，所以在 CGNAT 後面，UPnP 等協定通常幫不上忙。台灣各電信方案的 CGNAT 與直連狀況，見 [台灣 ISP 與 NAT](/troubleshooting/taiwan-isp-nat/)。
 
 ### Hairpinning：同一個 NAT 後面的兩台
 
