@@ -22,7 +22,7 @@ OpenClaw 和 Hermes Agent 都是「常駐的個人 AI 助理」：它們會讀�
 
 拿到 token 之後，攻擊者就能呼叫 API：關掉「危險指令要人工確認」的保護、把執行環境從沙箱改到宿主機，最後執行任意指令。全程只需要你點一下那個連結。修復版本是 2026.1.29（2026 年 1 月 30 日發布），修法是把「自動連線」改成「先跳出確認視窗」。
 
-同一個時期，社群整理的[已知漏洞頁面](http://clawdocs.org/security/known-vulnerabilities)引 Shodan 掃描，稱網路上掃到 4 萬多台 OpenClaw 實例，其中 2 萬多台的控制台介面直接開在公網、1 萬多台可被這類漏洞遠端執行指令。這兩個問題（點一下就 RCE、控制台開公網）背後的教訓都一樣：**預設的「方便」不等於「安全」，控制台這種東西不該直接見公網。**
+同一個時期，社群整理的[已知漏洞頁面](https://clawdocs.org/security/known-vulnerabilities)引 Shodan 掃描，稱網路上掃到 4 萬多台 OpenClaw 實例，其中 2 萬多台的控制台介面直接開在公網、1 萬多台可被這類漏洞遠端執行指令。這兩個問題（點一下就 RCE、控制台開公網）背後的教訓都一樣：**預設的「方便」不等於「安全」，控制台這種東西不該直接見公網。**
 
 ## 第一步：gateway 綁 loopback
 
@@ -101,7 +101,7 @@ OpenClaw 的解法是把「信標頭」這件事交給 Tailscale 查證。設定
 Hermes Agent（Nous Research 開源、MIT 授權）的做法和 OpenClaw 不同，但原則一樣：**預設不開 inbound，要暴露得自己動手**。
 
 - **訊息 gateway 是 outbound polling**。Hermes 連 Telegram、Discord 等平台時，預設用 long polling：由 gateway **主動**去平台伺服器抓訊息，平台不會連進來，所以**不對外開任何埠**。想讓它收外來連線，得另外設 `TELEGRAM_WEBHOOK_URL` 切成 webhook 模式——那是給雲端部署省錢用的，不是個人助理的日常。換句話說，「用 Telegram 控制 Hermes」這條主要通道，本來就沒有暴露面。
-- **web dashboard（埠 9119）是 opt-in**。`hermes dashboard` 預設綁 `127.0.0.1:9119`。過去的 `--insecure` 旗標已廢棄，綁到非 loopback 位址時，沒有註冊驗證提供者（Nous Portal OAuth 或基本密碼）會直接拒絕啟動。
+- **web dashboard（埠 9119）是 opt-in**。`hermes dashboard` 預設綁 `127.0.0.1:9119`。過去的 `--insecure` 旗標已廢棄，綁到非 loopback 位址時，沒有註冊驗證提供者（例如 Nous Portal OAuth、基本密碼或自架 OIDC）會直接拒絕啟動。
 - **API server（埠 8642）是 opt-in 且預設關閉**。這個 OpenAI 相容的端點是「能完整操控 agent 與工具」的控制點，`API_SERVER_ENABLED` 預設 `false`；要開還要同時設 `API_SERVER_KEY`，且預設綁 `127.0.0.1`。
 
 所以 Hermes 的預設姿態是：**主要通道沒有 inbound，兩個額外伺服器都綁 loopback 且預設關閉或要驗證**。你要做的只是別去改壞它——不要 `--host 0.0.0.0`、不要把 9119／8642 用 Docker 映射到公網、不要放到沒有驗證的公網反向代理後面。
@@ -159,7 +159,7 @@ Serve 把控制台發在 443 埠，但 tailnet 預設全開，任何裝置都能
 - [CVE-2026-25253（NVD）](https://nvd.nist.gov/vuln/detail/CVE-2026-25253)
 - [1-Click RCE To Steal Your OpenClaw Data and Keys（depthfirst，漏洞原始報告）](https://depthfirst.com/post/1-click-rce-to-steal-your-moltbot-data-and-keys)
 - [OpenClaw 官方文件：Tailscale（gateway.tailscale.mode、allowTailscale 與 whois 驗證）](https://docs.openclaw.ai/gateway/tailscale)
-- [OpenClaw 已知漏洞（clawdocs，含 Shodan 暴露統計）](http://clawdocs.org/security/known-vulnerabilities)
+- [OpenClaw 已知漏洞（clawdocs，含 Shodan 暴露統計）](https://clawdocs.org/security/known-vulnerabilities)
 - [Hermes Agent 官方文件：Web Dashboard](https://hermes-agent.nousresearch.com/docs/user-guide/features/web-dashboard)
 - [Hermes Agent 官方文件：API Server](https://hermes-agent.nousresearch.com/docs/user-guide/features/api-server)
 - [Hermes Agent 官方文件：Telegram（long polling 與 webhook）](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/telegram)
