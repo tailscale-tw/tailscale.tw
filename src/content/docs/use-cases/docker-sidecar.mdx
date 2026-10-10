@@ -57,6 +57,8 @@ volumes:
 - `TS_STATE_DIR` 一定要掛 volume（否則每次重啟變新節點），`TS_AUTH_ONCE=true` 避免每次重新登入。
 - sidecar 命名用 `ts-<服務名>`，讓它和服務容器一眼對應；state volume 也各自獨立（`ts-jellyfin-state`），別讓多個 sidecar 共用同一個 state。
 
+> 第三方映像檔（jellyfin、vaultwarden、immich 等）也建議釘版本 tag，理由同 Tailscale 映像檔——`latest` 會在半夜自己升版。下面的範例為了簡潔，部分用了 `latest`／`release`，正式部署時換成你驗證過的具體版本。
+
 Serve 的設定檔（`serve.json`）也是同一套，只改代理埠。下面三個範例各附一份。
 
 ## Jellyfin：單一容器
@@ -76,9 +78,9 @@ Jellyfin 的 HTTP 埠是 **8096**。`serve.json` 代理到它：
 
 Jellyfin 是單一容器、單一埠，最簡單。`hostname: jellyfin` 之後就能用 `https://jellyfin.tailxxxxx.ts.net` 存取。
 
-## Immich：多服務，只讓 server 進 tailnet
+## Immich：多服務，全部走同一個 netns
 
-Immich 由多個容器組成：`server`（對外埠 **2283**）、`machine-learning`、`database`（Postgres）、`redis`。**只有 `server` 需要進 tailnet**，其他都留在內部網路：
+Immich 由多個容器組成：`server`（對外埠 **2283**）、`machine-learning`、`database`（Postgres）、`redis`。多個容器要共享 sidecar 的網路時，讓它們**全部**用 `network_mode: service:ts-immich`（同一個 netns）、彼此用 `localhost` 連線——compose 的服務名 DNS 在借 netns 之後是解析不到的：
 
 ```yaml
 services:
@@ -105,11 +107,12 @@ services:
     image: ghcr.io/immich-app/immich-server:release
     network_mode: service:ts-immich
     environment:
-      DB_HOSTNAME: database
+      DB_HOSTNAME: localhost
       DB_USERNAME: immich
       DB_PASSWORD: postgres
       DB_DATABASE_NAME: immich
-      REDIS_HOSTNAME: redis
+      REDIS_HOSTNAME: localhost
+      IMMICH_MACHINE_LEARNING_URL: http://127.0.0.1:3003
     volumes:
       - immich-library:/usr/src/app/upload
     depends_on:
@@ -119,12 +122,14 @@ services:
 
   immich-machine-learning:
     image: ghcr.io/immich-app/immich-machine-learning:release
+    network_mode: service:ts-immich
     volumes:
       - model-cache:/cache
     restart: unless-stopped
 
   database:
-    image: ghcr.io/immich-app/postgres:14
+    image: ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0
+    network_mode: service:ts-immich
     environment:
       POSTGRES_USER: immich
       POSTGRES_PASSWORD: postgres
@@ -134,7 +139,8 @@ services:
     restart: unless-stopped
 
   redis:
-    image: valkey/valkey:8-alpine
+    image: valkey/valkey:9
+    network_mode: service:ts-immich
     restart: unless-stopped
 
 volumes:
@@ -157,7 +163,7 @@ volumes:
 }
 ```
 
-`immich-server` 用 `network_mode: service:ts-immich` 進 tailnet，同時因為 sidecar 也在同一個 compose 網路上，它照樣能解析 `database`、`redis` 這些內部服務名。`database`、`redis`、`machine-learning` 都不要加 `network_mode`，留在內部網路即可——這正是「只讓需要對外的容器進 tailnet」的原則。
+四個容器都走 `network_mode: service:ts-immich`（同一個 netns），彼此用 `localhost` 連線：DB 是 5432、Redis 是 6379、machine-learning 是 3003，與 server 的 2283 不衝突。這是 Tailscale 官方維護的 ScaleTail 對多服務 App 採用的模式，也是借 netns 下唯一可靠的做法。對外只靠 sidecar 的 Serve 443，四個服務都不開 `ports:`。
 
 > Immich 的完整官方 compose 還有很多細項（資料庫帶 vector 擴充、immich-machine-learning 的 GPU 設定等），上面是為了示範 sidecar 骨架而精簡的版本，實際部署以 [Immich 官方 compose](https://docs.immich.app/install/docker-compose/) 為準。
 
@@ -229,11 +235,11 @@ sidecar 和服務之間通常不需要特別的啟動順序——服務連不上
 
 ## 小結
 
-| 服務        | 對外埠 | 進 tailnet 的容器 | 必要設定                          |
-| ----------- | ------ | ----------------- | --------------------------------- |
-| Jellyfin    | 8096   | 全部（單一容器）  | 無                                |
-| Immich      | 2283   | 只有 `server`     | DB／Redis／ML 留在內部網路        |
-| Vaultwarden | 80     | 全部（單一容器）  | `DOMAIN` 要填 Serve 的 HTTPS 網址 |
+| 服務        | 對外埠 | 進 tailnet 的容器                      | 必要設定                          |
+| ----------- | ------ | -------------------------------------- | --------------------------------- |
+| Jellyfin    | 8096   | 全部（單一容器）                       | 無                                |
+| Immich      | 2283   | 全部（server／DB／Redis／ML 同 netns） | 以 `localhost` 連線、不開對外埠   |
+| Vaultwarden | 80     | 全部（單一容器）                       | `DOMAIN` 要填 Serve 的 HTTPS 網址 |
 
 同一個模式可以套到任何 Docker 服務：加一個 `ts-<服務名>` sidecar、服務容器改 `network_mode: service:ts-<服務名>`、`serve.json` 指到服務埠，就完成了。更多現成範例見 [ScaleTail](https://github.com/tailscale-dev/ScaleTail) 與 [docker-guide-code-examples](https://github.com/tailscale-dev/docker-guide-code-examples)。
 
