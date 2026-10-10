@@ -61,7 +61,7 @@ Tailscale 在 Synology 上走 userspace（hybrid）networking，加上 DSM 7 的
 - **子網分享不保證 ping 得到**：hybrid networking 下，分享的子網在 UDP／TCP 可達，但不一定能 ping（ICMP 不一定通）。
 - **Tailscale SSH 不支援**：要用 SSH 連 NAS，用 DSM 內建的 SSH 服務。
 
-這些限制大多是 DSM 7 沙箱強加的，最新狀態見 Tailscale 的 [Synology tracking issue](https://github.com/tailscale/tailscale/issues/1995)。
+這些限制有部分是 DSM 7 沙箱強加的，最新狀態見 Tailscale 的 [Synology tracking issue](https://github.com/tailscale/tailscale/issues/1995)。
 
 同一個 `tailscale configure` 家族還有另一個子指令，是幫 DSM 安裝 MagicDNS 憑證的，見 [在 Synology NAS 上安裝 Tailscale 憑證方法](/synology/install-tailscale-certificate-on-synology/)。
 
