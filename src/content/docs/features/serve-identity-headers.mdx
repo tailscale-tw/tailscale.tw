@@ -8,7 +8,7 @@ sidebar:
 
 用 [Tailscale Serve](/features/serve/) 分享自架服務時，你的後端其實可以**不用自己再做一次登入**：Serve 會在轉發請求前，把「是誰連進來的」寫進幾個 HTTP 標頭。後端只要信任這幾個標頭，就能直接用 tailnet 身分做單一登入（SSO）——Grafana、Open WebUI、Dashy 這類支援「信任標頭」或 auth proxy 的服務都能接。這篇講這幾個標頭是什麼、Serve 怎麼保護它們不被偽造，以及實際怎麼接。
 
-> 本文依 2026 年 10 月的 Tailscale 官方文件與原始碼（`ipn/ipnlocal/serve.go`）整理，以 Tailscale v1.104 為準。Grafana、Open WebUI、Dashy 的範例依各自 2026 年 10 月的官方文件整理，未實機跑過整套設定，屬文件整理。
+> 本文依 2026 年 10 月的 Tailscale 官方文件與原始碼（`ipn/ipnlocal/serve.go`）整理，以 Tailscale v1.104 為準。Grafana auth proxy 與 Open WebUI 的相關設定跨版本穩定、官方文件未綁定特定版本，Dashy 依官方 Tailscale 指南的 4.x（範例映像檔 `lissy93/dashy:4.1.5`）為準；三者的範例未實機跑過整套設定，屬文件整理。
 
 ## 三個身分標頭
 
@@ -64,7 +64,7 @@ whitelist = 127.0.0.1
 tailscale serve --bg 3000   # Grafana 聽在 127.0.0.1:3000
 ```
 
-之後 tailnet 上的人開 `https://你的主機.tailxxxxx.ts.net`，就會以各自的 tailnet 帳號自動登入 Grafana，不用再打一組帳密。
+之後 tailnet 上的人開 `https://my-dev-machine.tailxxxxx.ts.net`，就會以各自的 tailnet 帳號自動登入 Grafana，不用再打一組帳密。
 
 ## 範例二：Open WebUI
 
