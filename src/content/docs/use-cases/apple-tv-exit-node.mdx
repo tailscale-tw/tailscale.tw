@@ -23,7 +23,7 @@ Exit node 需要「一直開著、一直在線」，Apple TV 天生就符合：
 官方文件列了兩個前提：
 
 1. **tvOS 17.0 以上**（建議 18.0 以上）。
-2. **Apple TV 設定為 home hub（家庭中樞）**。這點很重要——Apple TV 睡眠時，要當 home hub 才會繼續保持網路連線，否則睡著了 exit node 就跟著斷。通常初次設定時會自動設成 home hub，但換位置、改網路設定、或停在 tvOS 17（17 版會自動挑選其他裝置當 hub）都可能失效。tvOS 18 以後可以手動指定：**設定 → AirPlay 與 HomeKit → HomeKit**，指定房間名稱就會設成 hub。
+2. **Apple TV 設定為 home hub（家庭中樞）**。這點很重要——Apple TV 睡眠時，要當 home hub 才會繼續保持網路連線，否則睡著了 exit node 就跟著斷。通常初次設定時會自動設成 home hub，但換位置、改網路設定、或停在 tvOS 17 都可能失效——tvOS 17 會依效能與可用性自動挑一個 hub，**不保證挑到這台 Apple TV**。tvOS 18 以後可以手動指定：先確認 Apple TV 已登入 iCloud（**設定 → 使用者與帳號 → 預設使用者**，看 iCloud 欄位有沒有內容），再到 **設定 → AirPlay 與 HomeKit → HomeKit** 指定房間名稱，就會設成 hub。
 
 ## 安裝 tvOS 版 Tailscale
 
@@ -51,7 +51,7 @@ Exit node 需要「一直開著、一直在線」，Apple TV 天生就符合：
 ## 注意事項
 
 - **睡眠與 home hub**：Apple TV 睡著後要當 home hub 才保持連線，前面「前置條件」那節一定要確認。官方文件的常見故障第一名就是「睡著了、不是 home hub」。
-- **不能遠端 SSH／VNC**：Apple TV 無法用 Tailscale SSH 或遠端桌面連進去管理，只能透過 Apple TV 本身的遙控器／App 操作。所以它適合「放著當出口」的角色，不適合當需要進去的伺服器。
+- **不能遠端 SSH／遠端桌面**：Tailscale SSH 的伺服器端只在 Linux 與 macOS 開源版提供，tvOS 沒有；tvOS 本身也沒有遠端桌面服務。所以 Apple TV 只能透過自己的遙控器／App 操作，適合「放著當出口」，不適合當需要進去管理的伺服器。
 - **想測延遲**：App 的 **My Other Devices** 裡可以對其他裝置 ping，看連線是直連還是走 DERP，用來確認打洞有沒有成功。
 
 ## 小結
@@ -69,5 +69,6 @@ Apple TV 是「放著不管、專職出口」的好選擇：常開、有線、�
 
 - [Install Tailscale on an Apple TV（Tailscale 官方）](https://tailscale.com/docs/install/appletv)
 - [Subnet routers（Tailscale 官方，Apple TV 僅 IPv4）](https://tailscale.com/docs/features/subnet-routers)
+- [Tailscale SSH（Tailscale 官方，伺服器端僅 Linux／macOS 開源版）](https://tailscale.com/docs/features/tailscale-ssh)
 - [Exit Node：讓所有流量經由指定裝置出去](/features/exit-node/)
 - [Subnet Router：存取整個區網內沒裝 Tailscale 的設備](/features/subnet-router/)
