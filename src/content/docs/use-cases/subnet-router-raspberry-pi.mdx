@@ -1,0 +1,127 @@
+---
+title: Raspberry Pi 當 subnet router 兼 exit node 的實作
+description: 用一台常開的 Raspberry Pi 當 Tailscale 的 subnet router 與 exit node：Raspberry Pi OS Lite 安裝、Tailscale 開機自啟、IP forwarding、廣告與核准路由、兼 exit node 的取捨，以及順手當 Wake-on-LAN 發送端
+sidebar:
+  order: 0.5
+  label: Raspberry Pi 當 subnet router
+---
+
+Subnet router 與 exit node 的觀念、`--advertise-routes`、SNAT 在站內〈[Subnet Router](/features/subnet-router/)〉與〈[Exit Node](/features/exit-node/)〉已經講過，這篇不再重複。這裡專注做一件事：**用一台常開的 Raspberry Pi 把兩件事落地**，包括 Pi 的安裝、開機自啟，以及「順手當 Wake-on-LAN 發送端」這類 Pi 特有的用法。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件整理，以 Tailscale v1.104、Raspberry Pi OS（Debian 12 Bookworm 系）為準。本文未在實機的 Pi 上跑完整套設定，屬文件整理；效能數字沒有可靠出處就不寫，調校方式一律指向站內有出處的文章。
+
+## 為什麼用 Pi
+
+Subnet router 要「一直在線」，否則網段路由會跟著失效。Pi 的幾個特質剛好適合：
+
+- **省電、安靜、便宜**，可以 24/7 開著不管它。
+- **有線網路**。路由器要用有線乙太網路才穩，Wi-Fi 打洞與轉送都不穩定。
+- **Linux**，IP forwarding、`ethtool` 調校、系統服務都齊全。
+
+Pi 3（含）以前的機型是 100 Mbps 乙太網路、Pi 4 與 Pi 5 是 Gigabit，但實際上 WireGuard 的吞吐通常先卡在 CPU 而不是網路線，所以別期待一台小 Pi 跑滿 Gigabit。要衝轉送效能，照站內 [UDP GRO forwarding](/performance/udp-gro-forwarding/) 那篇調校，數字都以該文為準。
+
+## 1. 安裝 Raspberry Pi OS Lite
+
+用無桌面環境的 **Raspberry Pi OS Lite**（不跑 GUI 比較省資源）。安裝用 [Raspberry Pi Imager](https://www.raspberrypi.com/software/) 把映像檔寫進 microSD：
+
+- 在 Imager 的進階選項（齒輪）裡設定：**主機名稱**、**開啟 SSH**（用金鑰或密碼）、**使用者帳號密碼**、以及 Wi-Fi（有線就略過）。
+- 寫好開機、用 SSH 登入，先跑一次系統更新：
+
+  ```bash
+  sudo apt update && sudo apt full-upgrade -y
+  ```
+
+## 2. 安裝 Tailscale 並讓它開機自啟
+
+Pi 是 Debian 系，用 Tailscale 的通用 Linux 安裝指令：
+
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up
+```
+
+安裝程式會順手設好 systemd 服務，重開機後 `tailscaled` 會自動帶起來，不用另外設開機腳本。`tailscale up` 第一次會印出認證網址，用瀏覽器登入完成。
+
+這台要當伺服器用，建議到 [Admin console](https://console.tailscale.com/admin/machines) 替它 **Disable key expiry**（或改用 [tag](/admin/tags-auth-keys/)，tagged 裝置預設就停用金鑰到期），否則金鑰到期後路由會跟著失效。
+
+## 3. 開啟 IP forwarding
+
+Subnet router 與 exit node 都要讓核心能轉發封包。Pi 上有 `/etc/sysctl.d`：
+
+```bash
+echo 'net.ipv4.ip_forward = 1' | sudo tee -a /etc/sysctl.d/99-tailscale.conf
+echo 'net.ipv6.conf.all.forwarding = 1' | sudo tee -a /etc/sysctl.d/99-tailscale.conf
+sudo sysctl -p /etc/sysctl.d/99-tailscale.conf
+```
+
+寫進 `99-tailscale.conf` 的好處是重開機後仍然生效。檢查：
+
+```bash
+sysctl net.ipv4.ip_forward
+# 應該回傳 net.ipv4.ip_forward = 1
+```
+
+## 4. 廣告路由（與 exit node）
+
+假設區網是 `192.168.1.0/24`，先只當 subnet router：
+
+```bash
+sudo tailscale set --advertise-routes=192.168.1.0/24
+```
+
+要連 exit node 一起兼，再加：
+
+```bash
+sudo tailscale set --advertise-exit-node
+sudo tailscale up
+```
+
+接著到管理後台的 **Machines → Edit route settings** 核准網段與 exit node（或設 `autoApprovers` 免手動）。核准、用戶端接受路由的完整流程見 [Subnet Router](/features/subnet-router/) 與 [Exit Node](/features/exit-node/)。
+
+## 5. 同一台兼 exit node 的取捨
+
+一台 Pi 同時當 subnet router 和 exit node 是可以的，但有一個已知的坑：**同一台裝置兼兩種角色、又關了 SNAT 時，上游可能丟包**。所以：
+
+- **預設的 SNAT 開著**：兼兩種角色沒問題，這是多數人的用法。
+- **需要關 SNAT**（讓區網服務看到真實來源 IP）：官方建議把 subnet router 和 exit node **拆到不同裝置**。
+
+細節見 [Subnet Router 的 SNAT 一節](/features/subnet-router/#snat來源-ip-的問題)。一般家用「從外面連回家裡的區網設備」用預設 SNAT 就夠了，不需要動它。
+
+## 6. 順手當 Wake-on-LAN 發送端
+
+Pi 一天 24 小時待在區網裡，很適合順便當 **Wake-on-LAN 發送端**：從外面 SSH 進 Pi，對區網裡睡眠中的機器（NAS、桌機）送出 WoL 魔術封包把它叫醒。
+
+裝 Debian 的 `etherwake`：
+
+```bash
+sudo apt install etherwake
+```
+
+之後從 tailnet 任何地方 SSH 進 Pi，執行：
+
+```bash
+sudo etherwake -i eth0 AA:BB:CC:DD:EE:FF
+```
+
+`AA:BB:CC:DD:EE:FF` 換成目標機器的 MAC 位址。前提是目標機器有在 BIOS／韌體裡開啟 Wake-on-LAN，而且它和 Pi 在同一個區網（WoL 封包是二層廣播，不會跨網段）。完整的 WoL 情境（含常見失敗原因）留待站內後續文章，這篇先打底：Pi 就是那個「常開、能送 WoL 封包」的角色。
+
+## 小結
+
+| 步驟                | 指令／動作                                                   |
+| ------------------- | ------------------------------------------------------------ | --- |
+| 安裝 Pi OS          | Raspberry Pi Imager 寫入 Lite 映像、開 SSH                   |
+| 裝 Tailscale        | `curl -fsSL https://tailscale.com/install.sh                 | sh` |
+| 開 IP forwarding    | `net.ipv4.ip_forward = 1`（寫進 `99-tailscale.conf`）        |
+| 廣告路由／exit node | `tailscale set --advertise-routes=... --advertise-exit-node` |
+| 核准                | 管理後台 Edit route settings（或 `autoApprovers`）           |
+| 兼兩種角色的取捨    | 預設 SNAT 沒問題；要關 SNAT 就拆成兩台                       |
+| 當 WoL 發送端       | `apt install etherwake` + `etherwake -i eth0 <MAC>`          |
+
+Pi 這類小主機最適合「常開的網路角色」：接電、插有線網路、跑 subnet router，順便當 WoL 發送端。效能不夠快沒關係，穩定常在線才是這個角色的重點。
+
+## 參考資料
+
+- [Subnet Router：存取整個區網內沒裝 Tailscale 的設備](/features/subnet-router/)
+- [Exit Node：讓所有流量經由指定裝置出去](/features/exit-node/)
+- [UDP GRO forwarding：加速 Subnet Router 與 Exit Node 的 UDP 轉送](/performance/udp-gro-forwarding/)
+- [Tags 與 auth key](/admin/tags-auth-keys/)
