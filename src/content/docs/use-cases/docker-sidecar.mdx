@@ -1,0 +1,247 @@
+---
+title: Docker 的 Tailscale sidecar：Jellyfin、Immich、Vaultwarden 共用寫法
+description: 用 tailscale/tailscale sidecar 容器把 Jellyfin、Immich、Vaultwarden 接進 tailnet：network_mode 共用寫法、TS_AUTHKEY／TS_STATE_DIR／TS_SERVE_CONFIG 與 state volume，以及各服務的埠號與必要設定
+sidebar:
+  order: 0.75
+  label: Docker sidecar
+---
+
+要把 Docker 裡的服務接進 tailnet，最乾淨的寫法是 **sidecar**：每個服務旁邊跑一個 `tailscale/tailscale` 容器，服務容器用 `network_mode: service:<sidecar>` 共享它的網路。這樣服務不用改任何程式碼、也不用開對外埠，就能以 MagicDNS 名稱在 tailnet 上被存取，再用 [Tailscale Serve](/features/serve/) 掛 HTTPS。這篇以 Jellyfin、Immich、Vaultwarden 三個常見服務示範同一個模式。
+
+環境變數（`TS_AUTHKEY`、`TS_STATE_DIR`、`TS_SERVE_CONFIG` 等）的細節、userspace／kernel 模式與 state volume 的重要性，都寫在 [Docker 官方映像檔](/platforms/docker/) 那篇，這裡只列與 sidecar 相關的部分，不重複說明。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件與 Jellyfin、Immich、Vaultwarden 官方文件整理，以 Tailscale v1.104（Docker Hub 映像檔穩定版 v1.102.5）為準。各服務的埠號都是官方預設值、跨版本穩定。本文未在實機跑過下述 compose，屬文件整理。
+
+## 共用寫法
+
+三個服務的 sidecar 骨架完全一樣，只有服務名、埠號和 `serve.json` 的代理目標不同：
+
+```yaml
+services:
+  # Tailscale sidecar：只負責把這個服務接進 tailnet
+  ts-jellyfin:
+    image: tailscale/tailscale:v1.102.5
+    hostname: jellyfin
+    environment:
+      - TS_AUTHKEY=tskey-auth-xxxx
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_AUTH_ONCE=true
+      - TS_SERVE_CONFIG=/config/serve.json
+      - TS_USERSPACE=false
+    volumes:
+      - ts-jellyfin-state:/var/lib/tailscale
+      - ./jellyfin-config:/config
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - net_admin
+      - net_raw
+    restart: unless-stopped
+
+  # 服務容器：共享 sidecar 的網路，自己不開對外埠
+  jellyfin:
+    image: jellyfin/jellyfin
+    network_mode: service:ts-jellyfin
+    volumes:
+      - ./jellyfin-data:/config
+      - ./media:/media:ro
+    restart: unless-stopped
+
+volumes:
+  ts-jellyfin-state:
+```
+
+三個關鍵：
+
+- `network_mode: service:ts-jellyfin` 讓 Jellyfin 走 sidecar 的網路，Jellyfin 自己**不用 `ports:`**——tailnet 上的存取走 sidecar 的 Serve 443，實體區網完全看不到它。
+- `TS_STATE_DIR` 一定要掛 volume（否則每次重啟變新節點），`TS_AUTH_ONCE=true` 避免每次重新登入。
+- sidecar 命名用 `ts-<服務名>`，讓它和服務容器一眼對應；state volume 也各自獨立（`ts-jellyfin-state`），別讓多個 sidecar 共用同一個 state。
+
+Serve 的設定檔（`serve.json`）也是同一套，只改代理埠。下面三個範例各附一份。
+
+## Jellyfin：單一容器
+
+Jellyfin 的 HTTP 埠是 **8096**。`serve.json` 代理到它：
+
+```json
+{
+  "TCP": { "443": { "HTTPS": true } },
+  "Web": {
+    "${TS_CERT_DOMAIN}:443": {
+      "Handlers": { "/": { "Proxy": "http://127.0.0.1:8096" } }
+    }
+  }
+}
+```
+
+Jellyfin 是單一容器、單一埠，最簡單。`hostname: jellyfin` 之後就能用 `https://jellyfin.tailxxxxx.ts.net` 存取。
+
+## Immich：多服務，只讓 server 進 tailnet
+
+Immich 由多個容器組成：`server`（對外埠 **2283**）、`machine-learning`、`database`（Postgres）、`redis`。**只有 `server` 需要進 tailnet**，其他都留在內部網路：
+
+```yaml
+services:
+  ts-immich:
+    image: tailscale/tailscale:v1.102.5
+    hostname: immich
+    environment:
+      - TS_AUTHKEY=tskey-auth-xxxx
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_AUTH_ONCE=true
+      - TS_SERVE_CONFIG=/config/serve.json
+      - TS_USERSPACE=false
+    volumes:
+      - ts-immich-state:/var/lib/tailscale
+      - ./immich-config:/config
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - net_admin
+      - net_raw
+    restart: unless-stopped
+
+  immich-server:
+    image: ghcr.io/immich-app/immich-server:release
+    network_mode: service:ts-immich
+    environment:
+      DB_HOSTNAME: database
+      DB_USERNAME: immich
+      DB_PASSWORD: postgres
+      DB_DATABASE_NAME: immich
+      REDIS_HOSTNAME: redis
+    volumes:
+      - immich-library:/usr/src/app/upload
+    depends_on:
+      - database
+      - redis
+    restart: unless-stopped
+
+  immich-machine-learning:
+    image: ghcr.io/immich-app/immich-machine-learning:release
+    volumes:
+      - model-cache:/cache
+    restart: unless-stopped
+
+  database:
+    image: ghcr.io/immich-app/postgres:14
+    environment:
+      POSTGRES_USER: immich
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: immich
+    volumes:
+      - immich-pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  redis:
+    image: valkey/valkey:8-alpine
+    restart: unless-stopped
+
+volumes:
+  ts-immich-state:
+  immich-library:
+  model-cache:
+  immich-pgdata:
+```
+
+`serve.json` 代理到 server 的 **2283**：
+
+```json
+{
+  "TCP": { "443": { "HTTPS": true } },
+  "Web": {
+    "${TS_CERT_DOMAIN}:443": {
+      "Handlers": { "/": { "Proxy": "http://127.0.0.1:2283" } }
+    }
+  }
+}
+```
+
+`immich-server` 用 `network_mode: service:ts-immich` 進 tailnet，同時因為 sidecar 也在同一個 compose 網路上，它照樣能解析 `database`、`redis` 這些內部服務名。`database`、`redis`、`machine-learning` 都不要加 `network_mode`，留在內部網路即可——這正是「只讓需要對外的容器進 tailnet」的原則。
+
+> Immich 的完整官方 compose 還有很多細項（資料庫帶 vector 擴充、immich-machine-learning 的 GPU 設定等），上面是為了示範 sidecar 骨架而精簡的版本，實際部署以 [Immich 官方 compose](https://docs.immich.app/install/docker-compose/) 為準。
+
+## Vaultwarden：記得多帶 DOMAIN
+
+Vaultwarden 在容器內聽 **80** 埠，而且**必須**設定 `DOMAIN` 環境變數（例如 `https://vw.tailxxxxx.ts.net`），否則產生的登入／註冊網址會是錯的（`http://localhost` 之類），導致從外面無法正常使用：
+
+```yaml
+services:
+  ts-vaultwarden:
+    image: tailscale/tailscale:v1.102.5
+    hostname: vaultwarden
+    environment:
+      - TS_AUTHKEY=tskey-auth-xxxx
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_AUTH_ONCE=true
+      - TS_SERVE_CONFIG=/config/serve.json
+      - TS_USERSPACE=false
+    volumes:
+      - ts-vaultwarden-state:/var/lib/tailscale
+      - ./vw-config:/config
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - net_admin
+      - net_raw
+    restart: unless-stopped
+
+  vaultwarden:
+    image: vaultwarden/server:latest
+    network_mode: service:ts-vaultwarden
+    environment:
+      - DOMAIN=https://vw.tailxxxxx.ts.net
+    volumes:
+      - vw-data:/data
+    restart: unless-stopped
+
+volumes:
+  ts-vaultwarden-state:
+  vw-data:
+```
+
+`serve.json` 代理到 80：
+
+```json
+{
+  "TCP": { "443": { "HTTPS": true } },
+  "Web": {
+    "${TS_CERT_DOMAIN}:443": {
+      "Handlers": { "/": { "Proxy": "http://127.0.0.1:80" } }
+    }
+  }
+}
+```
+
+Vaultwarden 有兩個跟 Serve 有關的細節：
+
+- `DOMAIN` 要填 Serve 的最終網址（含 `https://` 前綴）。Bitwarden 用戶端（瀏覽器擴充、手機 App）會用這個網址連線，填錯就會連不上。
+- 瀏覽器擴充、App 需要 WebSocket 通知，Vaultwarden 新版已把 WebSocket 併進同一個 HTTP 埠（80），所以 `serve.json` 只代理 80 就夠了，不用另開 3012。
+
+## 啟動順序與 healthcheck
+
+sidecar 和服務之間通常不需要特別的啟動順序——服務連不上 tailnet 時只是暫時連不到，不會掛掉。但如果要講究，可以：
+
+- 讓服務容器 `depends_on: [ts-xxx]`，確保 sidecar 先起。
+- 在 sidecar 加 `TS_ENABLE_HEALTH_CHECK=true`，用 `/healthz` 當健康檢查，讓上游的反向代理或編排系統等到節點有 tailnet IP 再放流量進來。
+
+一般家用只要 `restart: unless-stopped` 就夠了，不需要特別處理。
+
+## 小結
+
+| 服務        | 對外埠 | 進 tailnet 的容器 | 必要設定                          |
+| ----------- | ------ | ----------------- | --------------------------------- |
+| Jellyfin    | 8096   | 全部（單一容器）  | 無                                |
+| Immich      | 2283   | 只有 `server`     | DB／Redis／ML 留在內部網路        |
+| Vaultwarden | 80     | 全部（單一容器）  | `DOMAIN` 要填 Serve 的 HTTPS 網址 |
+
+同一個模式可以套到任何 Docker 服務：加一個 `ts-<服務名>` sidecar、服務容器改 `network_mode: service:ts-<服務名>`、`serve.json` 指到服務埠，就完成了。更多現成範例見 [ScaleTail](https://github.com/tailscale-dev/ScaleTail) 與 [docker-guide-code-examples](https://github.com/tailscale-dev/docker-guide-code-examples)。
+
+## 參考資料
+
+- [Docker 官方映像檔：環境變數、userspace 與 Serve 設定檔](/platforms/docker/)
+- [Jellyfin：Networking（官方，埠 8096）](https://jellyfin.org/docs/general/post-install/networking/)
+- [Immich：Docker Compose（官方）](https://docs.immich.app/install/docker-compose/)
+- [Vaultwarden：環境變數（官方，DOMAIN）](https://github.com/dani-garcia/vaultwarden/blob/main/.env.template)
+- [ScaleTail（Tailscale 官方範例）](https://github.com/tailscale-dev/ScaleTail)
+- [Tailscale Serve：在 tailnet 內分享本機服務](/features/serve/)
