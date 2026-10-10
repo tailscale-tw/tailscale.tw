@@ -1,0 +1,221 @@
+---
+title: 家裡一台常開主機跑 agent：Mac mini 的無頭設定
+description: 把 Mac mini 設定成 24/7 常開的 agent 主機：pmset 不休眠、Remote Login、Tailscale（Homebrew 與 App Store 版的差異）、只用金鑰登入 SSH、agent 專用非管理員帳號、launchd 自動重啟，以及 FileVault 與 HDMI dummy plug 的取捨
+sidebar:
+  order: 1
+  label: 常開 agent 主機
+---
+
+AI agent 要能「一直在那裡等你」，就得有一台常開的主機。Mac mini 是常見選擇：省電、安靜、Apple Silicon 能跑本地模型，而且有完整的 macOS，跑得動那些需要 GUI 或桌面 App 的 agent 工具。缺點是 macOS 預設會睡、會要求登入、會為了省電把背景程式節流——要當 24/7 的 agent 主機，得先動手把它「調成不會睡」。
+
+這篇講的就是這台主機的基本設定。跑在上面的 agent（Claude Code、OpenClaw、Hermes 等）各有各的裝法，但底下這層是共通的：不休眠、能 SSH、走 Tailscale、用非管理員帳號跑、重開機後自動回來。為什麼要先想「它是誰、能碰到什麼」，見 [AI 與 agent](/ai/)。
+
+> 本文依 2026 年 10 月的 Tailscale 與 Apple 官方文件、多篇社群文章整理，以 Tailscale v1.104 為準。macOS 設定無法在本文環境實測，屬文件整理；FileVault 與 HDMI dummy plug 兩處各家說法不一，文中會標明。
+
+## 設定順序總覽
+
+從一台全新的 Mac mini 開始，依序要做這幾件事：
+
+1. [讓它別睡：pmset](#1-讓它別睡pmset)
+2. [開 Remote Login（SSH）](#2-開-remote-loginssh)
+3. [裝 Tailscale：Homebrew 版還是 App Store 版](#3-裝-tailscalehomebrew-版還是-app-store-版)
+4. [SSH 只用金鑰](#4-ssh-只用金鑰)
+5. [agent 專用非管理員帳號](#5-agent-專用非管理員帳號)
+6. [自動啟動與重啟：launchd](#6-自動啟動與重啟launchd)
+7. [FileVault 與自動登入的取捨](#7-filevault-與自動登入的取捨)
+8. [HDMI dummy plug 還需要嗎](#8-hdmi-dummy-plug-還需要嗎)
+
+## 1. 讓它別睡：pmset
+
+macOS 預設閒置一段時間就進入系統睡眠，這會直接殺掉或節流 agent。用 `pmset` 把它關掉：
+
+```bash
+sudo pmset -a sleep 0          # 永不進入系統睡眠
+sudo pmset -a disksleep 0      # 硬碟（SSD）不進入睡眠
+sudo pmset -a hibernatemode 0  # 不寫入休眠檔（hibernation）
+sudo pmset -a standby 0        # 不進入 standby 深度睡眠
+sudo pmset -a autorestart 1    # 停電復電後自動重開機
+```
+
+- **`sleep 0` 是最關鍵的一項**：系統睡眠才是真正會中斷 agent 的東西。
+- `standby`、`hibernatemode` 是筆電闔蓋後的深度睡眠機制，Mac mini 一直是接電狀態，比較少用到，但設成 0 無妨。
+- `autorestart 1` 讓停電復電後自動開機，是「無人值守」的底線——不然一次跳電，agent 就停在關機狀態。
+- 顯示器睡眠（`displaysleep`）不會讓機器停下來，CLI 型 agent 可以放著不管；但如果你跑的是需要螢幕畫面的 GUI 自動化，可能連顯示器也不想讓它睡，那再補 `sudo pmset -a displaysleep 0`。
+
+另一種做法是開機就掛一個 `caffeinate`，用 launchd 讓它常駐（見[第 6 節](#6-自動啟動與重啟launchd)）。`caffeinate` 的效果和 `sleep 0` 類似，可以二選一，都設也行。
+
+## 2. 開 Remote Login（SSH）
+
+macOS 出廠時 SSH 是關的。在 System Settings → General → Sharing 裡打開 **Remote Login**，指定允許哪些帳號登入。命令行等價的做法是載入 SSH 的 launchd 服務：
+
+```bash
+sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist
+```
+
+開好之後，就能用 `ssh <使用者>@<主機 IP>` 連進去了。這台機器接著會裝 Tailscale（下一節），之後都用 Tailscale IP 或 MagicDNS 名稱來連，不會把 SSH 曝露在網際網路上。
+
+## 3. 裝 Tailscale：Homebrew 版還是 App Store 版
+
+Tailscale 在 macOS 上其實有三種版本，官方把差異整理得很清楚：
+
+| 版本                                                              | 底層                            | 有沒有 GUI | 能不能在登入前啟動 | 能不能當 Tailscale SSH server |
+| ----------------------------------------------------------------- | ------------------------------- | ---------- | ------------------ | ----------------------------- |
+| **App Store 版**                                                  | App Sandbox + Network Extension | 有         | 不行（sandbox）    | 不行                          |
+| **Standalone 版**（官網 .pkg 或 `brew install --cask tailscale`） | System Extension                | 有         | 不行               | 不行                          |
+| **開源 `tailscaled` CLI 版**（`brew install tailscale`）          | kernel `utun` 介面              | 沒有       | 可以               | 可以                          |
+
+關鍵差異是 **App Store 版跑在 macOS 的 App Sandbox 裡**：它以登入使用者的身分運作，只能在登入後啟動，不能當 Tailscale SSH server，不支援 Funnel，還可能和 Screen Time 的網頁過濾衝突。對筆電沒什麼影響，但對一台無頭、希望重開機後自動就位的 agent 主機，這些限制就麻煩了。
+
+對 agent 主機，建議二選一：
+
+- **`brew install tailscale`（`tailscaled` CLI 版）**：無 GUI，但可以在登入前啟動、能當 Tailscale SSH server、支援 Funnel。官方註明它適合「由有經驗的系統管理者做無人值守安裝」，正好是我們要的情境。裝完用 `sudo brew services start tailscale` 讓它開機自啟，再 `sudo tailscale up` 登入。
+- **Standalone 版**（官網下載 .pkg，或 `brew install --cask tailscale`）：官方推薦的一般選項，功能比 App Store 版完整、更新也更快。
+
+不要同時裝兩種以上：官方明說 App Store 版和 Standalone 版並存可能導致 extension 無法啟動；要換版本先刪掉舊的 `Tailscale.app`、清空垃圾桶、重開機再裝。
+
+裝好之後，這台主機就有了一個固定的 Tailscale IP 和 MagicDNS 名稱，之後從任何裝置連它都用這個位址。
+
+## 4. SSH 只用金鑰
+
+開好 SSH 之後，第一件事是關掉密碼登入、只留金鑰。在**你平常操作的機器**上產生一把 key：
+
+```bash
+ssh-keygen -t ed25519
+ssh-copy-id <使用者>@<主機的 Tailscale IP>
+```
+
+接著在 Mac mini 上編輯 `/etc/ssh/sshd_config`，加上：
+
+```text
+PasswordAuthentication no
+```
+
+存檔後重新載入 SSH。這樣密碼爆破就完全沒機會；key 沒了頂多再到本機用螢幕登入補一把。
+
+更省事的替代方案是 [Tailscale SSH](/features/tailscale-ssh/)：它把身分驗證交給 tailnet（你連得上 = 你被允許），連金鑰都不用管。要跑 agent 自動 SSH 進其他機器的話，Tailscale SSH 也很方便。兩者不衝突，可以照你的習慣選。
+
+## 5. agent 專用非管理員帳號
+
+不要用你平常的管理員帳號跑 agent。agent 會執行指令、讀寫檔案，給它一個獨立的**標準（非管理員）帳號**，能把它能碰到的範圍限制在最小：
+
+1. System Settings → Users & Groups → Add User，建立一個標準帳號，例如 `agent`。
+2. 用 `sudo` 需要時再切管理員；日常的 agent 工作都在 `agent` 帳號下跑。
+3. 把它的家目錄鎖起來，避免其他本機帳號翻看：
+
+   ```bash
+   chmod 700 ~agent
+   ```
+
+這樣就算 agent 被誘導做壞事，它也不是管理員，動不了系統、也看不到你個人帳號裡的東西。這和 tailnet 那套「tag 身分、grants 最小權限」是同一種思路，只是作用在本機帳號這一層。
+
+## 6. 自動啟動與重啟：launchd
+
+重開機之後 agent 要自己回來，靠的是 launchd。macOS 有兩層：
+
+- **LaunchDaemon**（`/Library/LaunchDaemons/`）：系統層級，root 執行，登入前就會啟動，適合真正的「服務」。
+- **LaunchAgent**（`~/Library/LaunchAgents/`）：使用者層級，登入後啟動，適合需要 GUI 工作階段的程式。
+
+關鍵是兩個 key：`RunAtLoad`（開機就跑）和 `KeepAlive`（掛了就重啟）。以「開機就掛 caffeinate 防睡」為例：
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.example.agent-caffeinate</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/caffeinate</string>
+    <string>-s</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+</dict>
+</plist>
+```
+
+存到 `/Library/LaunchDaemons/com.example.agent-caffeinate.plist` 再 `sudo launchctl load -w` 載入。你實際要跑的 agent（Claude Code、OpenClaw 等）多半有自己的 daemon 安裝指令，但背後原理都是這套：寫成 launchd 服務、`RunAtLoad` + `KeepAlive`，掛了才會自己回來。
+
+## 7. FileVault 與自動登入的取捨
+
+這裡沒有兩全其美，得選一邊：
+
+- **開 FileVault**：整顆磁碟加密，主機被偷走資料也讀不出來。代價是**開機一定要有人打密碼解鎖**——Apple 明定開 FileVault 時「自動登入」是無法使用的。停電復電後，機器會停在登入畫面等密碼，agent 不會自己回來。
+- **開自動登入**：停電復電後自動登入、agent 自動回歸。代價是必須**關掉 FileVault**，磁碟沒有加密。
+
+兩者互斥，只能選一個。怎麼選，看你在意什麼：
+
+- 這台主機放在家裡、實體上不太可能被偷，但你常不在家、希望跳電後自己恢復 → 傾向**自動登入**（關 FileVault）。
+- 這台主機會存 API key、token 這類敏感憑證，或被偷的風險你比較在意 → 傾向**開 FileVault**，接受停電後要手動解鎖。
+
+沒有標準答案。很多人折衷的做法是：開 FileVault，把 `autorestart` 開著（復電自動開機到解鎖畫面），自己遠端再想辦法解鎖——但這就失去「無人值守」了。社群文章對此說法也常相反，這裡只把兩邊的取捨講清楚，你自己決定。
+
+## 8. HDMI dummy plug 還需要嗎
+
+結論先講：**Apple Silicon（M1 以後）的 Mac mini，一般不需要 dummy plug。**
+
+- 這在 Intel 時代是標準配備：沒接螢幕時 macOS 不建立顯示器，遠端桌面連不進去或解析度很差，所以要用一顆 dummy plug 騙系統「有螢幕」。
+- Apple Silicon 會自己建立虛擬顯示器，SSH、Apple Screen Sharing 無頭都能用，不用額外硬體。
+
+還想買 dummy plug 的，剩下這幾種情況：
+
+- 你用 Apple Screen Sharing 或 VNC，覺得預設 1920×1080 太糊，想要更高解析度（dummy plug 或第三方虛擬顯示工具可以解決）。
+- 你跑的是需要「真的有個螢幕、有 GPU 繪圖內容」的 GUI 自動化。
+
+這點社群說法一向分歧，本文沒有實機驗證。建議先不要買：SSH 型 agent 完全用不到；真的遇到解析度或圖形問題，再補也不遲。
+
+## 存取規則：讓 agent 主機只有你能連
+
+這台主機打上 tag 之後，就能用 grants 限制「只有你能連」。給它 `tag:agent-host`：
+
+```json
+"tagOwners": {
+  "tag:agent-host": ["autogroup:admin"],
+},
+"grants": [
+  // 只有管理員能 SSH 到 agent 主機
+  {
+    "src": ["autogroup:admin"],
+    "dst": ["tag:agent-host"],
+    "ip": ["tcp:22"],
+  },
+],
+```
+
+- 如果你的 policy 還是預設全開，記得先拿掉 `*` 到 `*` 的全開規則，否則上面的限制沒有作用（詳見 [ACL / Grants 入門](/admin/acl-grants/)）。
+- tag 的定義與打 tag 的方法見 [Tags 與 auth key](/admin/tags-auth-keys/)。跑在雲端或容器裡的 agent 用 ephemeral auth key 加入，這台常開主機則是長期節點、不開 ephemeral。
+
+## Linux 小主機與 VPS 的對照
+
+Mac mini 不是唯一選擇。同樣的「常開 agent 主機」，還有兩條路：
+
+|           | Mac mini                                                | Linux 小主機（NUC、迷你 PC）                            | 便宜 VPS                        |
+| --------- | ------------------------------------------------------- | ------------------------------------------------------- | ------------------------------- |
+| 費用      | 一次買斷，較貴                                          | 一次買斷，較便宜                                        | 月付（約 5–6 美元起）           |
+| 不休眠    | `pmset`                                                 | systemd 的 `logind`（`systemctl mask sleep.target` 等） | 本來就不睡                      |
+| SSH       | 要開 Remote Login                                       | 通常預設就有                                            | 預設就有                        |
+| Tailscale | Homebrew／官網 .pkg                                     | 套件或官方腳本                                          | 官方腳本                        |
+| 優勢      | 完整 macOS、能跑 GUI 自動化、Apple Silicon 可跑本地模型 | 便宜、省電、headless 生態成熟                           | 不依賴家中電力網路、公網固定 IP |
+| 劣勢      | macOS 的睡眠與登入要特別處理                            | 跑不了 macOS 專屬 App                                   | 是別人的機器，資料在雲端        |
+
+簡單的判斷：
+
+- 需要 macOS 專屬 App、GUI 自動化或本地模型 → Mac mini。
+- 只要 CLI 型 agent、想省錢 → Linux 小主機。
+- 不想讓「家裡的電和網路」變成你 agent 的單點故障、能接受資料放雲端 → VPS（做法見 [Codex Cloud](/platforms/codex-cloud/) 這類雲端沙箱的通用思路）。
+
+## 參考資料
+
+- [Three ways to run Tailscale on macOS（官方）](https://tailscale.com/kb/1065/macos-variants)
+- [Install Tailscale on macOS（官方）](https://tailscale.com/docs/install/mac)
+- [How to log in automatically to a Mac user account（Apple 官方支援）](https://support.apple.com/en-us/102316)
+- [Protect data on your Mac with FileVault（Apple 官方支援）](https://support.apple.com/en-kg/guide/mac-help/mh11785/mac)
+- [Always-On Claude Code: Remote Control Server on a Mac Mini（Guy's DevOps Site，2026-07）](https://guydevops.com/posts/always-on-claude-code-remote-control-mac-mini/)
+- [OpenClaw + Tailscale: Your Always-On AI Agent, Accessible from Anywhere（mager.co，2026-02）](https://www.mager.co/blog/2026-02-22-openclaw-mac-mini-tailscale/)
+- [Mac Mini Home Server for AI Agents（Hyperbox，2026-05）](https://hyperbox.sh/blog/mac-mini-home-server-ai-agents)
+- [Make Mac mini a headless server and operate Claude Code from outside（DevelopersIO，2026-08）](https://dev.classmethod.jp/en/articles/reona-herdr-remote-mac-mini/)
+- [Do You Need a Dummy Plug for a Headless Mac Mini?（Astropad）](https://astropad.com/blog/dummy-plug-headless-mac-mini/)
+- [Tailscale SSH](/features/tailscale-ssh/)
