@@ -1,0 +1,113 @@
+---
+title: 台灣 ISP 與 NAT：中華電信、社區網路、5G 行動網路下的直連率
+description: 台灣常見的三種上網環境——HiNet 光世代（PPPoE 公開 IP）、行動網路（CGNAT）、社區網路（共用 IP）——各自的直連條件，怎麼用 tailscale netcheck 判讀，以及申請固定 IP、開 IPv6、架 Peer Relay／自架 DERP 的改善順序
+sidebar:
+  order: 2.5
+  label: 台灣 ISP 與 NAT
+---
+
+同樣是「台灣的網路」，能不能直連差很多。HiNet 光世代給的是公開 IP，直連條件好；手機的 4G／5G 行動網路幾乎都在 CGNAT 後面，直連比較難；社區大樓的共用網路常常連對外 IP 都沒有，只能靠中繼。這篇把這三種環境的差別講清楚，並教你用 `tailscale netcheck` 判斷自己屬於哪一種、直連條件好不好。
+
+直連為什麼重要、三種連線方式（直連／Peer Relay／DERP）的差異，見 [直連與 DERP 中繼](/troubleshooting/direct-vs-derp/)；打洞背後的原理，見 [NAT 穿透原理](/getting-started/nat-traversal/)。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件與原始碼（`net/netcheck`、`cmd/tailscale/cli/netcheck.go`）整理，以 Tailscale v1.104 為準。各業者的 CGNAT 與 IPv6 現況以 TWNIC「國內 IASP 支援 IPv6 調查」為準（該次調查約 2019 年，比例可能已隨時間調整）；HiNet 固定 IP 的機制以中華電信官網為準。本文未在實機逐一驗證各電信方案，屬文件整理。
+
+## 先搞懂：台灣的「三種網路」其實差很大
+
+「能不能直連」關鍵在兩件事：你有沒有**公開 IP**，以及你的 NAT 是 **easy 還是 hard**（`tailscale netcheck` 的 `MappingVariesByDestIP`）。台灣常見的三種上網環境，這兩件事完全不同：
+
+| 環境                     | 對外 IP                | NAT 型態                       | 直連條件       |
+| ------------------------ | ---------------------- | ------------------------------ | -------------- |
+| **HiNet 光世代（固網）** | 公開 IP（PPPoE）       | 通常 easy，可開埠／申請固定 IP | 好             |
+| **4G／5G 行動網路**      | CGNAT 共享公開 IP      | 多半 hard，無法開埠            | 較差           |
+| **社區網路／有線電視**   | 共用 IP（或無獨立 IP） | 無法控制最外層 NAT             | 差，常只能中繼 |
+
+## HiNet 光世代：有公開 IP，直連條件最好
+
+中華電信 HiNet 光世代（固網）走 **PPPoE 撥接**，中華電信官網說明非固定制預設配發 **8 個浮動 IP**，也可以申請改成 **1 個固定 IP + 7 個浮動 IP**（免費）。撥接帳號決定拿到的 IP 類型：
+
+- `用戶識別碼@hinet.net`：浮動 IP。
+- `用戶識別碼@ip.hinet.net`：固定 IP（僅限一台設備使用）。
+
+有了公開 IP，這台裝置就能成為 tailnet 裡「條件最好」的那一端：其他裝置即使躲在 CGNAT 或 hard NAT 後面，也能直接連上它。想要更穩，可以：
+
+- **申請固定 IP**（在中華電信「我的服務中心」的 HiNet 非固定制固定 IP 申請），讓位址不會因重新撥接而變動。
+- 在路由器上開 UDP 41641（或設 UPnP／NAT-PMP），讓對方有固定位址可連，見 [直連與 DERP 中繼](/troubleshooting/direct-vs-derp/)。
+
+兩件要注意的事：固定 IP 會因**移機、升速、設備異動**等原因被中華電信重新配發；一年以上沒使用也可能被收回。所以別把它當「永久不變」，異動前最好記一下用了這個 IP 的服務。
+
+## 行動網路：CGNAT 是常態
+
+手機熱點、平板插 SIM 卡、甚至是 5G 家用路由器，對外幾乎都走 **CGNAT**（carrier-grade NAT，電信級 NAT）：業者讓很多用戶共用一個公開 IP，你的裝置只拿到 `100.64.0.0/10` 這段「共享位址空間」裡的私有 IP。
+
+TWNIC 的「國內 IASP 支援 IPv6 調查」寫得很直接：**目前所有行動業者都有使用 CGNAT**，核發比例（多少用戶共用一個公開 IP）：
+
+| 核發比例 | 業者                                   |
+| -------- | -------------------------------------- |
+| 1 : 16   | 中華電信、遠傳電信、台灣大哥大（部分） |
+| 1 : 64   | 台灣大哥大（部分）、亞太電信、台灣之星 |
+
+1:64 時，一個公開 IP 的 65,535 個連接埠被 64 個用戶分，每人約分到一千個左右，連線一多品質就會受影響。
+
+CGNAT 對 Tailscale 的影響是：**你在 NAT 的最外層沒有控制權**，不能開埠、UPnP／NAT-PMP 也幫不上忙（那些只能控制你自己那台路由器）。如果 CGNAT 又是 hard NAT，兩邊都 hard 時就很難直連，只能走 [Peer Relay](/features/peer-relay/) 或 DERP。好消息是，行動網路打洞**常常還是會成功**——只是沒有固定 IP 那麼穩，而且兩邊都是行動網路時成功率明顯下降。
+
+## 社區網路：常連對外 IP 都沒有
+
+社區大樓、套房、租屋的「共用網路」，通常由管委會或業者統一供網，住戶**拿不到獨立的對外 IP**，也無法設定連接埠轉送（port forwarding）。這和 CGNAT 類似但更受限：你連最外層的 NAT 長怎樣都不知道，完全沒有可控制的開埠手段。這種環境下，直連大多要靠運氣，穩定解法是架一台有公開 IP 的 Peer Relay，或走 DERP。
+
+## 用 `tailscale netcheck` 判斷自己在哪一類
+
+`tailscale netcheck` 顯示的是「這台裝置打洞的條件」。欄位與 `net/netcheck` 原始碼裡的 `Report` 結構對應如下（輸出格式見 `cmd/tailscale/cli/netcheck.go`）：
+
+| 欄位                    | 原始碼意義                                             | 台灣情境下的判讀                              |
+| ----------------------- | ------------------------------------------------------ | --------------------------------------------- |
+| `UDP`                   | UDP STUN 是否成功                                      | `false` 幾乎只能走 DERP                       |
+| `IPv4`／`IPv6`          | STUN 問到的公開位址（`GlobalV4`／`GlobalV6`）          | `yes, <IP>` 代表有對外 IPv4／IPv6 路徑        |
+| `MappingVariesByDestIP` | IPv4 的 STUN 結果是否隨目的地改變                      | `true` = hard NAT，CGNAT 常是如此             |
+| `PortMapping`           | 偵測到 UPnP／NAT-PMP／PCP 與否（`UPnP`／`PMP`／`PCP`） | 空白 = 沒有可用的自動開埠；CGNAT 後面多半空白 |
+| `Nearest DERP`          | 延遲最低的 DERP 區域（`PreferredDERP`）                | 台灣通常選香港（`hkg`）或東京（`tok`）        |
+| `DERP latency`          | 到各 DERP 區域的延遲                                   | 決定中繼時的品質                              |
+
+幾個台灣環境的典型樣貌：
+
+- **HiNet 光世代**：`IPv4: yes, 公開 IP`、`MappingVariesByDestIP: false`、`PortMapping` 可能偵測到 UPnP。這是理想的直連條件。
+- **行動網路（CGNAT）**：`MappingVariesByDestIP: true` 很常見（CGNAT 多半是 hard NAT）、`PortMapping` 空白、IPv4 是共享的公開 IP。
+- **IPv6 有開**：`IPv6: yes, <位址>`，等於多一條直連路徑，成功率會提高。
+
+一個常見誤解要先講清楚：**`netcheck` 的 `IPv4` 欄位顯示的是 STUN 問到的「最外層公開 IP」**，所以你在 CGNAT 後面時，這個欄位會顯示業者 CGNAT 閘道器的公開 IP，看起來就是正常的公開 IP——光看它無法判斷是不是 CGNAT。判斷 CGNAT 要看**路由器的 WAN 端 IP**：如果是 `100.64.x.x`～`100.127.x.x`，就是業者的 CGNAT（見 [直連與 DERP 中繼](/troubleshooting/direct-vs-derp/)）。`netcheck` 能告訴你的是「症狀」：hard NAT、沒有 PortMapping 等。
+
+各欄位的完整說明見 [用 tailscale netcheck 與 tailscale ping 診斷連線](/troubleshooting/netcheck-and-ping/)。
+
+## 改善順序：從免費到自架
+
+依成本從低到高：
+
+1. **開 IPv6**。台灣的行動業者與中華電信固網都已提供 IPv6（中華電信約 2018 年起），IPv6 位址夠多、通常不用 NAT，多一條直連路徑。可以在中華電信的服務頁面開啟，或在作業系統／路由器啟用 IPv6。`netcheck` 的 `IPv6: yes` 就是開通了。
+2. **申請固定 IP**（限 HiNet 固網）。見上面的「HiNet 光世代」一節，免費，一分鐘內可完成。
+3. **架一台 Peer Relay**。找一台網路條件好（有公開 IP）的常開裝置當中繼，讓 CGNAT 或社區網路後面的裝置改經它轉送，比繞到國外的 DERP 快。設定見 [Peer Relay](/features/peer-relay/) 與 [直連與 DERP 中繼](/troubleshooting/direct-vs-derp/)。
+4. **自架 DERP**。真正想讓中繼延遲最低、又不適合用 Peer Relay 時才考慮，維運成本高，官方認為多數情況不需要，見 [自架 DERP 伺服器](/features/custom-derp/)。
+
+一般家用先做 1 和 2 就很有感；行動網路或社區網路的痛點則靠 3 解決。
+
+## 小結
+
+| 你的網路           | 直連機會       | 最值得做的事                           |
+| ------------------ | -------------- | -------------------------------------- |
+| HiNet 光世代       | 高             | 申請固定 IP、開 UDP 41641／UPnP        |
+| 4G／5G 行動網路    | 中（看 CGNAT） | 開 IPv6；兩邊都行動網路時架 Peer Relay |
+| 社區網路／有線電視 | 低             | 架 Peer Relay，或接受走 DERP           |
+
+「能不能直連」不是玄學，是可以量出來的：用 `tailscale netcheck` 看條件，用 `tailscale ping` 看實際走哪條路。判斷與改善的完整流程見 [直連與 DERP 中繼](/troubleshooting/direct-vs-derp/)。
+
+## 參考資料
+
+- [國內 IASP 支援 IPv6 調查（TWNIC，各行動業者 CGNAT 核發比例）](https://ipv6.twnic.tw/promotion-IPv6-Support-Situation.html)
+- [HiNet 非固定制固定 IP 申請（中華電信我的服務中心）](https://123.cht.com.tw/HiNetStaticIp)
+- [寬頻、Wi-Fi 上網自助服務（中華電信網路門市）](https://www.cht.com.tw/home/consumer/member/FTTXservice)
+- [光世代固定制／非固定制 IP 配發說明（中華電信企業上網）](https://www.cht.com.tw/home/business/HiNet/fttx.html)
+- [社區網路外網 IP 受限？Tailscale 突破限制實現內網穿透（香腸炒魷魚）](https://sofree.cc/tailscale-vpn/)
+- [Tailscale 原始碼：`net/netcheck`（Report 欄位）](https://github.com/tailscale/tailscale/blob/main/net/netcheck/netcheck.go)
+- [Tailscale 原始碼：`cmd/tailscale/cli/netcheck.go`（輸出格式）](https://github.com/tailscale/tailscale/blob/main/cmd/tailscale/cli/netcheck.go)
+- [直連與 DERP 中繼：為什麼連線變慢、怎麼改善](/troubleshooting/direct-vs-derp/)
+- [NAT 穿透原理：Tailscale 怎麼在兩個 NAT 之間打通連線](/getting-started/nat-traversal/)
+- [用 tailscale netcheck 與 tailscale ping 診斷連線](/troubleshooting/netcheck-and-ping/)
