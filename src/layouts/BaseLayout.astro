@@ -12,6 +12,7 @@ import AgentDirective from "@/components/AgentDirective.astro";
 import Footer from "@/components/Footer.astro";
 import { SearchDialog } from "@/components/ui/search";
 import NimbusHead from "@cloudflare/nimbus-docs/components/NimbusHead.astro";
+import WebMCP from "@/components/WebMCP.astro";
 import type { BasePageProps } from "@cloudflare/nimbus-docs/types";
 
 type Props = BasePageProps;
@@ -69,6 +70,7 @@ const resolvedMarkdownUrl =
     <!-- Sarasa Mono TC（等距更紗黑體 TC）— unicode-range 分包，只下載頁面用到的字 -->
     <link rel="stylesheet" href="/fonts/sarasa-mono-tc/regular/result.css" />
     <link rel="stylesheet" href="/fonts/sarasa-mono-tc/bold/result.css" />
+    <WebMCP />
 
     <script is:inline>
       (() => {
@@ -157,8 +159,11 @@ const resolvedMarkdownUrl =
     >
       Skip to content
     </a>
-    {resolvedMarkdownUrl && !isHiddenVersion && (
-      <AgentDirective markdownUrl={resolvedMarkdownUrl} llmsUrl={llmsUrl} />
+    {!isHiddenVersion && (
+      <AgentDirective
+        markdownUrl={resolvedMarkdownUrl ?? null}
+        llmsUrl={llmsUrl}
+      />
     )}
     <slot />
     <Footer />

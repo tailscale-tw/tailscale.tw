@@ -55,7 +55,8 @@ const isCustom = mode === "custom";
 // `sidebar: false` / `tableOfContents: false` in frontmatter come through
 // from the route as literal `false` (not coerced to `[]`). They drive
 // per-column suppression — chrome, mobile dialog, header menu button.
-const showSidebar = sidebar !== false;
+// Custom pages render no sidebar, so they get no drawer or menu button.
+const showSidebar = sidebar !== false && !isCustom;
 
 // Versioning: per-page status drives Pagefind faceting, deprecation
 // banner, and the data-pagefind-ignore exclusion for hidden versions.
