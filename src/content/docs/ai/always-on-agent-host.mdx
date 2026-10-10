@@ -10,7 +10,7 @@ AI agent 要能「一直在那裡等你」，就得有一台常開的主機。Ma
 
 這篇講的就是這台主機的基本設定。跑在上面的 agent（Claude Code、OpenClaw、Hermes 等）各有各的裝法，但底下這層是共通的：不休眠、能 SSH、走 Tailscale、用非管理員帳號跑、重開機後自動回來。為什麼要先想「它是誰、能碰到什麼」，見 [AI 與 agent](/ai/)。
 
-> 本文依 2026 年 10 月的 Tailscale 與 Apple 官方文件、多篇社群文章整理，以 Tailscale v1.104 為準。macOS 設定無法在本文環境實測，屬文件整理；FileVault 與 HDMI dummy plug 兩處各家說法不一，文中會標明。
+> 本文依 2026 年 10 月的 Tailscale 與 Apple 官方文件、多篇社群文章整理，以 Tailscale v1.104、macOS 26 為準。macOS 設定無法在本文環境實測，屬文件整理；FileVault 與 HDMI dummy plug 兩處各家說法不一，文中會標明。
 
 ## 設定順序總覽
 
@@ -52,6 +52,8 @@ macOS 出廠時 SSH 是關的。在 System Settings → General → Sharing 裡�
 sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist
 ```
 
+`launchctl load -w` 是舊的 legacy 子命令，現行 macOS 仍可用；現代等價做法是 `sudo launchctl enable system/com.openssh.sshd`（或 `sudo launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist`），之後重開機。直接在 System Settings 開關最省事。
+
 開好之後，就能用 `ssh <使用者>@<主機 IP>` 連進去了。這台機器接著會裝 Tailscale（下一節），之後都用 Tailscale IP 或 MagicDNS 名稱來連，不會把 SSH 曝露在網際網路上。
 
 ## 3. 裝 Tailscale：Homebrew 版還是 App Store 版
@@ -73,6 +75,8 @@ Tailscale 在 macOS 上其實有三種版本，官方把差異整理得很清楚
 
 不要同時裝兩種以上：官方明說 App Store 版和 Standalone 版並存可能導致 extension 無法啟動；要換版本先刪掉舊的 `Tailscale.app`、清空垃圾桶、重開機再裝。
 
+這節只挑了對無頭主機有影響的差異；三種版本的完整比較見 [macOS 上安裝 Tailscale 的三種方法](/platforms/macos-install/)。
+
 裝好之後，這台主機就有了一個固定的 Tailscale IP 和 MagicDNS 名稱，之後從任何裝置連它都用這個位址。
 
 ## 4. SSH 只用金鑰
@@ -92,7 +96,9 @@ PasswordAuthentication no
 
 存檔後重新載入 SSH。這樣密碼爆破就完全沒機會；key 沒了頂多再到本機用螢幕登入補一把。
 
-更省事的替代方案是 [Tailscale SSH](/features/tailscale-ssh/)：它把身分驗證交給 tailnet（你連得上 = 你被允許），連金鑰都不用管。要跑 agent 自動 SSH 進其他機器的話，Tailscale SSH 也很方便。兩者不衝突，可以照你的習慣選。
+更省事的替代方案是 [Tailscale SSH](/features/tailscale-ssh/)：它把身分驗證交給 tailnet（你連得上 = 你被允許），連金鑰都不用管。要跑 agent 自動 SSH 進其他機器的話，Tailscale SSH 也很方便。
+
+要注意兩者行為不同、不是單純的「另一種登入方式」：啟用 Tailscale SSH server 之後，走 tailnet 的 SSH 是由 `tailscaled` 處理，**不經過**上面的 `sshd`，所以 `PasswordAuthentication no` 管不到它；而且 server 端只有 Linux 和 macOS 的開源 `tailscaled` 版支援（App Store 版、Standalone 版都不能當 Tailscale SSH server）。可以兩者並存，但選哪個、各自怎麼鎖，先想清楚。
 
 ## 5. agent 專用非管理員帳號
 
@@ -103,7 +109,7 @@ PasswordAuthentication no
 3. 把它的家目錄鎖起來，避免其他本機帳號翻看：
 
    ```bash
-   chmod 700 ~agent
+   sudo chmod 700 /Users/agent
    ```
 
 這樣就算 agent 被誘導做壞事，它也不是管理員，動不了系統、也看不到你個人帳號裡的東西。這和 tailnet 那套「tag 身分、grants 最小權限」是同一種思路，只是作用在本機帳號這一層。
