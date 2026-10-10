@@ -7,7 +7,7 @@ sidebar:
     label: AI 與 agent
 ---
 
-AI agent（AI 代理）和聊天機器人最大的差別，是它不只回答，還會動手：讀檔案、查資料庫、執行指令、發訊息。這些能力讓它很有用，也讓它很危險——它會接觸你的私密資料、會看到你丟給它的內容、還會往外送東西。這三個特性湊在一起，正好是攻擊者最喜歡的組合。Tailscale 稱之為「致命三重奏（lethal trifecta）」。
+AI agent（AI 代理）和聊天機器人最大的差別，是它不只回答，還會動手：讀檔案、查資料庫、執行指令、發訊息。這些能力讓它很有用，也讓它很危險——它會接觸你的私密資料、會看到你丟給它的內容、還會往外送東西。這三個特性湊在一起，正好是攻擊者最喜歡的組合，Simon Willison 稱之為「致命三重奏（lethal trifecta）」。
 
 這篇是 `ai/` section 的觀念首篇，解釋這個風險從哪來，以及為什麼 Tailscale 的 tag、grants、ephemeral 這三樣看起來無聊的基礎建設，就是關住 agent 的關鍵。實際怎麼做，見 [Tags 與 auth key](/admin/tags-auth-keys/)、[ACL / Grants 入門](/admin/acl-grants/) 和 [Codex Cloud](/platforms/codex-cloud/)。
 
@@ -109,7 +109,7 @@ AI agent（AI 代理）和聊天機器人最大的差別，是它不只回答，
 
 ## 從 Codex Cloud 看這套原則怎麼落地
 
-站內 [Codex Cloud](/platforms/codex-cloud/) 就是三個原則的具體實作：OpenAI 的雲端任務 VM 用一把 **reusable + ephemeral + 帶 tag** 的 auth key 加入 tailnet，任務結束、VM 離線後自動移除；再用 grants 限制它只能連到該連的 HTTP／HTTPS 服務。Tailscale 官方在部落格裡建議的做法也是同一套：AI agent 和它要連的資源都打上 tag、auth key 保留效期、開啟 network flow logs 觀察它實際連到哪裡。
+站內 [Codex Cloud](/platforms/codex-cloud/) 就是三個原則的具體實作：OpenAI 的雲端任務 VM 用一把 **reusable + ephemeral + 帶 tag** 的 auth key 加入 tailnet，任務結束、VM 離線後自動移除；再用 grants 只開放必要的 HTTPS 服務。Tailscale 官方在部落格裡建議的做法也是同一套：AI agent 和它要連的資源都打上 tag、auth key 保留效期、開啟 network flow logs 觀察它實際連到哪裡。
 
 如果 agent 跑在你自己家裡的主機、手機、Docker 或雲端 sandbox，原理完全一樣：先想清楚它是誰、它能碰到什麼、它結束後要不要消失，剩下的就是把這三件事寫進 tag、grants 和 auth key。
 
