@@ -1,8 +1,13 @@
 {
   "$schema": "https://nimbus-docs.com/schema/nimbus.json",
   "version": "0.7.10",
-  "lastReviewedNimbusVersion": "0.16.0",
+  "lastReviewedNimbusVersion": "0.17.0",
   "templatesTag": "templates-v0.7.10",
+  "templatesTagByFile": {
+    "src/components/AgentDirective.astro": "templates-v0.7.11",
+    "src/components/WebMCP.astro": "templates-v0.7.11",
+    "src/pages/robots.txt.ts": "templates-v0.7.11"
+  },
   "variant": "empty",
   "registry": "https://nimbus-docs.com/registry",
   "install": {

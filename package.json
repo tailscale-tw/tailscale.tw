@@ -20,7 +20,7 @@
     "deploy": "astro check && astro build && wrangler deploy"
   },
   "dependencies": {
-    "@cloudflare/nimbus-docs": "^0.16.0",
+    "@cloudflare/nimbus-docs": "^0.17.0",
     "@iconify-json/ph": "^1.2.0",
     "astro": "7.3.1",
     "astro-og-canvas": "^0.13.0",
