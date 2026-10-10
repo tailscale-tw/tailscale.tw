@@ -1,0 +1,73 @@
+---
+title: DSM 7 讓 NAS 上的其他服務也能連出去：TUN 與 configure-host
+description: 開啟 DSM 7 上 Tailscale 的出站連線：用 configure-host（現在叫 configure synology）建立 TUN 裝置與授予權限、Task Scheduler 開機執行、套件升級後重跑、防火牆放行 100.64.0.0/10，以及 DSM7 沙箱帶來的其他限制
+sidebar:
+  order: 5.5
+  label: DSM 7 連出去：TUN 與 configure-host
+---
+
+在 Synology NAS 上裝好 Tailscale 之後，預設你只能「**從外面連進**」NAS——手機、筆電可以經 tailnet 存取 DSM、SMB 等服務。但反過來，**NAS 上的其他程式**（Docker 容器、下載工具、VM 等）預設**不能主動連出**到 tailnet 裡的其他裝置。要開啟這個出站能力，得建立 TUN 裝置並授予權限，這篇講怎麼做。
+
+> 本文依 2026 年 10 月的 Tailscale 官方 Synology KB 與原始碼（`cmd/tailscale/cli/configure-synology.go`）整理，以 Tailscale v1.104、DSM 7.2 為準。本文未在實機的 DSM 上跑過這些步驟，屬文件整理。
+
+## 為什麼預設只能連入
+
+DSM 7 對套件能做的事限制比 DSM 6 嚴。Tailscale 套件**沒有建立 TUN 裝置的權限**，所以 `tailscaled` 只能用 userspace（hybrid）networking 模式：它能收下 tailnet 送進來的連線、轉給 NAS 本身，卻無法建立一張虛擬網卡讓 NAS 上的其他程式透過它往外連。DSM 6 沒有這個限制（套件以 root 完整權限跑），這篇的步驟在 DSM 6 上不是必要的。
+
+## configure-host 做了什麼
+
+Tailscale 內建一個 `configure-host` 指令（在新版原始碼裡已經改名 `tailscale configure synology`，`configure-host` 保留為相容別名），用途就是「設定 Synology 以啟用出站連線」。看 `configure-synology.go`，它做了三件事：
+
+1. 建立 `/dev/net/tun` 裝置（用 `mknod` 建立 character device `10:200`），並把 `/dev/net` 與 `/dev/net/tun` 的權限設成可存取。
+2. **DSM 7**：用 `setcap` 把 `cap_net_admin,cap_net_raw+eip` 這兩個 capability 加到 `tailscaled` 執行檔上（`/var/packages/Tailscale/target/bin/tailscaled`），讓它能操作 TUN。
+3. 印出提示，叫你重啟 Tailscale 套件讓新權限生效。
+
+也就是說，DSM 7 的出站能力是靠「建立 TUN + 授予 capability」兩個動作湊出來的，不是改一個設定檔就完成。指令本身必須以 root 執行，而且只在 Synology 上有效。
+
+## 用 Task Scheduler 讓它在開機時執行
+
+官方建議把這步設成**開機觸發的排程任務**，這樣每次重開機後 TUN 都會重建。步驟（DSM 7 中文介面）：
+
+1. 前往 **控制台 → 任務排程表 → 新增 → 觸發的任務 → 使用者定義的指令碼**。
+2. **一般設定**：任務名稱自訂（例如 `Enable Tailscale outbound`）、**使用者**選 `root`、**事件**選 `開機`，並確認任務已啟用。
+3. **任務設定**：在 **使用者定義的指令碼** 欄位填入：
+
+   ```shell
+   /var/packages/Tailscale/target/bin/tailscale configure-host; synosystemctl restart pkgctl-Tailscale.service
+   ```
+
+4. 按 **確定** 儲存。
+
+前置條件是 Tailscale **v1.22.2 以上**。儲存後重開機 NAS；不想重開機的話，直接以 root 在 SSH 裡手動執行上面那行指令碼，效果一樣。
+
+## 套件升級後要重新執行
+
+注意：**升級 Tailscale 套件後，這道程序要再跑一次**。因為套件升級會換掉 `tailscaled` 執行檔，之前用 `setcap` 加的 capability 就沒了。官方文件的說法是：升級後手動重跑上面那段指令碼，或直接重開機 NAS。
+
+## 防火牆要放行 100.64.0.0/10
+
+啟用 TUN 之後，Tailscale 的流量就會開始受到 **DSM 內建防火牆**的管制。防火牆預設是關閉的；如果你有開啟，記得加一條規則放行 Tailscale 的子網段：
+
+- 前往 **控制台 → 安全性 → 防火牆**，在預設設定檔加一條「允許」規則。
+- **來源 IP** 填 `100.64.0.0`，**子網路遮罩**填 `255.192.0.0`（也就是 CIDR 的 `100.64.0.0/10`）。
+
+少了這條，啟用 TUN 後的 Tailscale 連線會被防火牆擋下。
+
+## 其他 DSM 7 的限制
+
+Tailscale 在 Synology 上走 userspace（hybrid）networking，加上 DSM 7 的沙箱，還有幾個官方文件明列的已知限制：
+
+- **只能 `--advertise-routes`，不能 `--accept-routes`**：NAS 可以當 subnet router 把區網宣告進 tailnet，但不能接收其他 subnet router 宣告的路由。所以別的網段裡的裝置無法經由 tailnet 連到 NAS 或它區網裡的設備。
+- **子網分享不保證 ping 得到**：hybrid networking 下，分享的子網在 UDP／TCP 可達，但不一定能 ping（ICMP 不一定通）。
+- **Tailscale SSH 不支援**：要用 SSH 連 NAS，用 DSM 內建的 SSH 服務。
+
+這些限制大多是 DSM 7 沙箱強加的，最新狀態見 Tailscale 的 [Synology tracking issue](https://github.com/tailscale/tailscale/issues/1995)。
+
+同一個 `tailscale configure` 家族還有另一個子指令，是幫 DSM 安裝 MagicDNS 憑證的，見 [在 Synology NAS 上安裝 Tailscale 憑證方法](/synology/install-tailscale-certificate-on-synology/)。
+
+## 參考資料
+
+- [Access Synology NAS from anywhere（Tailscale 官方）](https://tailscale.com/docs/integrations/synology)
+- [Tailscale 原始碼：`cmd/tailscale/cli/configure-synology.go`](https://github.com/tailscale/tailscale/blob/main/cmd/tailscale/cli/configure-synology.go)
+- [Synology tracking issue（GitHub）](https://github.com/tailscale/tailscale/issues/1995)
+- [在 Synology NAS 上安裝 Tailscale 憑證方法](/synology/install-tailscale-certificate-on-synology/)

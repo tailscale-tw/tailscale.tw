@@ -53,7 +53,7 @@ Mac 內建的 Time Machine（台灣版 macOS 介面稱為「時光機」）通�
 
 從 **套件中心** 安裝 Tailscale，依畫面指示登入你的 tailnet。DSM 7 上的 Tailscale 預設就接受從 tailnet 連進 NAS 的連線，SMB 不需要額外設定。
 
-如果你曾經依官方文件執行 `tailscale configure-host` 讓 NAS 可以**主動連出**到 tailnet，又開了 DSM 的防火牆，要在防火牆規則放行來源 `100.64.0.0/10`，否則 Tailscale 的連線會被擋。
+如果你曾經依官方文件執行 `tailscale configure-host` 讓 NAS 可以**主動連出**到 tailnet，又開了 DSM 的防火牆，要在防火牆規則放行來源 `100.64.0.0/10`，否則 Tailscale 的連線會被擋。這段的完整做法見 [DSM 7 讓 NAS 上的其他服務也能連出去：TUN 與 configure-host](/synology/dsm7-outbound-tun/)。
 
 在 Admin console 的 [Machines](https://console.tailscale.com/admin/machines) 頁面記下 NAS 的 MagicDNS 名稱，例如 `nas.tail1234.ts.net`。
 
