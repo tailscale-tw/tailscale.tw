@@ -10,17 +10,17 @@ sidebar:
 
 直連為什麼重要、三種連線方式（直連／Peer Relay／DERP）的差異，見 [直連與 DERP 中繼](/troubleshooting/direct-vs-derp/)；打洞背後的原理，見 [NAT 穿透原理](/getting-started/nat-traversal/)。
 
-> 本文依 2026 年 10 月的 Tailscale 官方文件與原始碼（`net/netcheck`、`cmd/tailscale/cli/netcheck.go`）整理，以 Tailscale v1.104 為準。各業者的 CGNAT 與 IPv6 現況以 TWNIC「國內 IASP 支援 IPv6 調查」為準（該次調查約 2019 年，比例可能已隨時間調整）；HiNet 固定 IP 的機制以中華電信官網為準。本文未在實機逐一驗證各電信方案，屬文件整理。
+> 本文依 2026 年 10 月的 Tailscale 官方文件與原始碼（`net/netcheck`、`cmd/tailscale/cli/netcheck.go`）整理，以 Tailscale v1.104 為準。各業者的 CGNAT 與 IPv6 現況以 TWNIC「國內 IASP 支援 IPv6 調查」為準（該次調查約 2019 年，比例可能已隨時間調整）；HiNet 固定 IP 的機制以中華電信官網與社群文件為準。本文未在實機逐一驗證各電信方案，屬文件整理。
 
 ## 先搞懂：台灣的「三種網路」其實差很大
 
 「能不能直連」關鍵在兩件事：你有沒有**公開 IP**，以及你的 NAT 是 **easy 還是 hard**（`tailscale netcheck` 的 `MappingVariesByDestIP`）。台灣常見的三種上網環境，這兩件事完全不同：
 
-| 環境                     | 對外 IP                | NAT 型態                       | 直連條件       |
-| ------------------------ | ---------------------- | ------------------------------ | -------------- |
-| **HiNet 光世代（固網）** | 公開 IP（PPPoE）       | 通常 easy，可開埠／申請固定 IP | 好             |
-| **4G／5G 行動網路**      | CGNAT 共享公開 IP      | 多半 hard，無法開埠            | 較差           |
-| **社區網路／有線電視**   | 共用 IP（或無獨立 IP） | 無法控制最外層 NAT             | 差，常只能中繼 |
+| 環境                         | 對外 IP                | NAT 型態                       | 直連條件       |
+| ---------------------------- | ---------------------- | ------------------------------ | -------------- |
+| **HiNet 光世代（固網）**     | 公開 IP（PPPoE）       | 通常 easy，可開埠／申請固定 IP | 好             |
+| **4G／5G 行動網路**          | CGNAT 共享公開 IP      | 多半 hard，無法開埠            | 較差           |
+| **社區網路（大樓統一供網）** | 共用 IP（或無獨立 IP） | 無法控制最外層 NAT             | 差，常只能中繼 |
 
 ## HiNet 光世代：有公開 IP，直連條件最好
 
@@ -49,11 +49,15 @@ TWNIC 的「國內 IASP 支援 IPv6 調查」寫得很直接：**目前所有行
 
 1:64 時，一個公開 IP 的 65,535 個連接埠被 64 個用戶分，每人約分到一千個左右，連線一多品質就會受影響。
 
+上表是 TWNIC 在 4G 時代（約 2019 年）的調查值；之後台灣之星已併入台灣大哥大、亞太電信已併入遠傳（2023 年 12 月，品牌仍在但經營者整併），實際核發比例可能已調整。
+
 CGNAT 對 Tailscale 的影響是：**你在 NAT 的最外層沒有控制權**，不能開埠、UPnP／NAT-PMP 也幫不上忙（那些只能控制你自己那台路由器）。如果 CGNAT 又是 hard NAT，兩邊都 hard 時就很難直連，只能走 [Peer Relay](/features/peer-relay/) 或 DERP。好消息是，行動網路打洞**常常還是會成功**——只是沒有固定 IP 那麼穩，而且兩邊都是行動網路時成功率明顯下降。
 
 ## 社區網路：常連對外 IP 都沒有
 
 社區大樓、套房、租屋的「共用網路」，通常由管委會或業者統一供網，住戶**拿不到獨立的對外 IP**，也無法設定連接埠轉送（port forwarding）。這和 CGNAT 類似但更受限：你連最外層的 NAT 長怎樣都不知道，完全沒有可控制的開埠手段。這種環境下，直連大多要靠運氣，穩定解法是架一台有公開 IP 的 Peer Relay，或走 DERP。
+
+這裡講的是「大樓統一供網」的社區網路；**有線電視寬頻（凱擘、中嘉等）不屬於這一類**——它們的主流家用方案用 DHCP 發**獨立的**公開 IP（很多方案一樣是 1 固定 + 7 浮動），直連條件其實接近 HiNet 光世代。
 
 ## 用 `tailscale netcheck` 判斷自己在哪一類
 
@@ -91,11 +95,11 @@ CGNAT 對 Tailscale 的影響是：**你在 NAT 的最外層沒有控制權**，
 
 ## 小結
 
-| 你的網路           | 直連機會       | 最值得做的事                           |
-| ------------------ | -------------- | -------------------------------------- |
-| HiNet 光世代       | 高             | 申請固定 IP、開 UDP 41641／UPnP        |
-| 4G／5G 行動網路    | 中（看 CGNAT） | 開 IPv6；兩邊都行動網路時架 Peer Relay |
-| 社區網路／有線電視 | 低             | 架 Peer Relay，或接受走 DERP           |
+| 你的網路                 | 直連機會       | 最值得做的事                           |
+| ------------------------ | -------------- | -------------------------------------- |
+| HiNet 光世代             | 高             | 申請固定 IP、開 UDP 41641／UPnP        |
+| 4G／5G 行動網路          | 中（看 CGNAT） | 開 IPv6；兩邊都行動網路時架 Peer Relay |
+| 社區網路（大樓統一供網） | 低             | 架 Peer Relay，或接受走 DERP           |
 
 「能不能直連」不是玄學，是可以量出來的：用 `tailscale netcheck` 看條件，用 `tailscale ping` 看實際走哪條路。判斷與改善的完整流程見 [直連與 DERP 中繼](/troubleshooting/direct-vs-derp/)。
 
@@ -105,7 +109,10 @@ CGNAT 對 Tailscale 的影響是：**你在 NAT 的最外層沒有控制權**，
 - [HiNet 非固定制固定 IP 申請（中華電信我的服務中心）](https://123.cht.com.tw/HiNetStaticIp)
 - [寬頻、Wi-Fi 上網自助服務（中華電信網路門市）](https://www.cht.com.tw/home/consumer/member/FTTXservice)
 - [光世代固定制／非固定制 IP 配發說明（中華電信企業上網）](https://www.cht.com.tw/home/business/HiNet/fttx.html)
+- [如何申請中華電信 HiNet 浮動 IP 轉固定 IP（香腸炒魷魚，`@ip.hinet.net` 帳號後綴）](https://sofree.cc/hinet-ip/)
 - [社區網路外網 IP 受限？Tailscale 突破限制實現內網穿透（香腸炒魷魚）](https://sofree.cc/tailscale-vpn/)
+- [凱擘大寬頻：FTTB 寬頻 IP 配發說明（1 固定 + 7 浮動）](https://www.kbro.com.tw/K01/service-obstacles-detail_19_2688_3448_130.html?type=67)
+- [中嘉寬頻：固定 IP 設定說明](https://www.homeplus.net.tw/cable/customer-service/service-faq-page-new/205)
 - [Tailscale 原始碼：`net/netcheck`（Report 欄位）](https://github.com/tailscale/tailscale/blob/main/net/netcheck/netcheck.go)
 - [Tailscale 原始碼：`cmd/tailscale/cli/netcheck.go`（輸出格式）](https://github.com/tailscale/tailscale/blob/main/cmd/tailscale/cli/netcheck.go)
 - [直連與 DERP 中繼：為什麼連線變慢、怎麼改善](/troubleshooting/direct-vs-derp/)
