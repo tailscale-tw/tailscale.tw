@@ -55,7 +55,7 @@ Tailscale 的原理站內已經講過（見 [NAT 穿透原理](/getting-started/
 
 QuickConnect 白皮書列出它的安全措施：伺服器資訊與憑證保護、NAS 與客戶端之間的端到端加密、網頁入口的受信任憑證、以及高安全性的資料中心。就「傳輸」這層來說，Synology 聲稱是加密的。
 
-真正要留意的，其實不是 QuickConnect 本身的加密，而是**「把 NAS 暴露到網際網路」這件事**。2019 年那波鎖定 Synology NAS 的勒索軟體，Synology 官方調查後聲明：原因是**字典攻擊**（弱密碼），**不是特定系統漏洞**——換句話說，是「開在公網 + 密碼太弱」的組合，而不是 QuickConnect 有洞。之後 2021 年的 eCh0raix 也是鎖定暴露在網路上、用預設或弱憑證的 NAS。
+真正要留意的，其實不是 QuickConnect 本身的加密，而是**「把 NAS 暴露到網際網路」這件事**。2019 年那波也打到 Synology NAS 的勒索軟體（官方聲明提到同一波同時鎖定多家廠商的 NAS 機型），Synology 官方調查後聲明：原因是**字典攻擊**（弱密碼），**不是特定系統漏洞**——換句話說，是「開在公網 + 密碼太弱」的組合，而不是 QuickConnect 有洞。之後 2021 年的 eCh0raix 也是鎖定暴露在網路上、用預設或弱憑證的 NAS。
 
 從這個角度看，QuickConnect 與 Tailscale 的安全差異主要在一點：
 
@@ -100,6 +100,7 @@ QuickConnect 白皮書列出它的安全措施：伺服器資訊與憑證保護�
 - [Synology QuickConnect White Paper（Synology 官方，2023 年 6 月）](https://global.download.synology.com/download/Document/Software/WhitePaper/Os/DSM/All/enu/Synology_QuickConnect_White_Paper_enu.pdf)
 - [Synology QuickConnect White Paper（Synology 知識中心）](https://kb.synology.com/en-sg/WP/Synology_QuickConnect_White_Paper/4)
 - [Synology® Urges All Users to Take Immediate Action to Protect Data from Ransomware Attack（Synology 官方，2019）](https://www.synology.com/en-us/company/news/article/2019JulyRansomware/Synology%C2%AE%20Urges%20All%20Users%20to%20Take%20Immediate%20Action%20to%20Protect%20Data%20from%20Ransomware%20Attack)
+- [Synology NAS Devices Targeted in Large-Scale Brute-Force Attack（Bitdefender，2021，eCh0raix）](https://www.bitdefender.com/en-us/blog/hotforsecurity/synology-nas-devices-targeted-in-large-scale-brute-force-attack)
 - [NAT 穿透原理：Tailscale 怎麼在兩個 NAT 之間打通連線](/getting-started/nat-traversal/)
 - [直連與 DERP 中繼：為什麼連線變慢、怎麼改善](/troubleshooting/direct-vs-derp/)
 - [DSM 7 讓 NAS 上的其他服務也能連出去：TUN 與 configure-host](/synology/dsm7-outbound-tun/)
