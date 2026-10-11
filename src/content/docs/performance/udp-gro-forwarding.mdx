@@ -161,6 +161,8 @@ ExecMainStatus=0
 
 官方檢查與指令針對的是**預設路由的網卡**。如果 Subnet Router 往區網走的是另一張網卡，把同一行 `ethtool` 指令用在接收該流量的網卡上也是同樣的機制——效果在「收 UDP 的那張」。
 
+除了 kernel 端的 GRO forwarding，2026 年後續還有 Tailscale 自己資料平面的升級（小封包緩衝、multi-queue、netmap caching），其中 multi-queue 同樣針對 subnet router／exit node 的轉送，見〈[2026 年的效能升級：multi-queue 與 netmap caching](/performance/multiqueue-netmap-cache/)〉。
+
 ## 常見問題
 
 - **設定了，警告還在？** 確認改的是「預設路由」那張網卡（`ip -o route get 8.8.8.8` 查），再用 `ethtool -k` 確認兩個選項的狀態。改完後再跑一次 `tailscale set --advertise-exit-node`（或 `--advertise-routes=...`）會再做一次檢查。

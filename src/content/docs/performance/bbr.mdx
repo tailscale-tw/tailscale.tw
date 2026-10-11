@@ -103,7 +103,7 @@ sysctl net.core.default_qdisc
 4. 對照 `iperf3 -c <A 的 Tailscale IP> -R -t 30 -C cubic` 與 `-C bbr` 各量一輪：`-C` 指定這次連線的擁塞控制，而且 client 的設定會一併傳給 server 套用，所以不必改 sysctl，也不受 A 上既有 listener 繼承舊演算法的影響
 5. 測完記得清掉：`sudo tc qdisc del dev "$NETDEV" root`
 
-順帶一提，轉送 UDP 的效能（exit node、subnet router 的大宗流量）要靠 [UDP GRO forwarding](/performance/udp-gro-forwarding/) 那篇的調校，跟 BBR 是兩件獨立的事。
+順帶一提，轉送 UDP 的效能（exit node、subnet router 的大宗流量）要靠 [UDP GRO forwarding](/performance/udp-gro-forwarding/) 那篇的調校，跟 BBR 是兩件獨立的事。2026 年後續還有一批資料平面的升級（小封包緩衝、multi-queue、netmap caching），見〈[2026 年的效能升級：multi-queue 與 netmap caching](/performance/multiqueue-netmap-cache/)〉。
 
 ## 常見問題
 
