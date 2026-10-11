@@ -39,7 +39,7 @@ tailscale up --auth-key="${TAILSCALE_AUTHKEY}" --hostname=agent-<task-id>
 
 ### 第四步：grants 只開 HTTPS
 
-sandbox 加入後就是 tailnet 上的一台裝置。如果 policy 還留著預設全開規則，它就連得到 tailnet 內幾乎所有東西。用 [grants](/admin/acl-grants/) 只放行它需要的服務與連接埠，收在 `tcp:443`，並移除預設的 `*` 到 `*` 全開規則。
+sandbox 加入後就是 tailnet 上的一台裝置。如果 policy 還留著預設全開規則，它就連得到 tailnet 內幾乎所有東西。用 [grants](/admin/acl-grants/) 只放行它需要的服務與連接埠，收在 `tcp:443`，並移除預設的 `*` 到 `*` 全開規則。這些服務可能是內部 API，也可能是放在 tailnet 上的 [MCP server](/ai/mcp-over-tailscale/)（streamable HTTP 走的就是 HTTPS）。
 
 ## 兩種憑證路線：auth key 或 OAuth client
 
