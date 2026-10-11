@@ -1,0 +1,148 @@
+---
+title: GitHub Actions 進 tailnet：用 OAuth client 建 ephemeral runner
+description: 用 tailscale/github-action 把 GitHub Actions workflow 連進 tailnet：OAuth client 與 tag、workload identity federation、self-hosted runner 的差異，以及只開必要 port 的最小 grants 範例與「不要照抄全開 grants」的提醒
+sidebar:
+  order: 7
+  label: GitHub Actions
+---
+
+GitHub Actions 的 workflow 跑在 GitHub 代管的 VM 上，本來碰不到你家裡或公司內網的服務。用 [Tailscale GitHub Action](https://github.com/tailscale/github-action) 可以在 workflow 裡加一個 step，讓它以一台 **ephemeral**（用完即丟）的節點加入你的 tailnet，之後的 step 就能連到 tailnet 內的其他機器——部署到內部伺服器、讀測試資料庫、連 self-hosted runner 都行。
+
+這篇講怎麼設、三種認證方式（OAuth client、workload identity federation、auth key）的差異，以及最重要的：**用 grants 把這台 runner 的權限收到最小，不要照抄示範的全開規則**。cloud agent 連回 tailnet 的通則（tag 身分、會過期的憑證、grants 只開 HTTPS），先看 [雲端 agent sandbox 連回 tailnet 的通用做法](/ai/cloud-sandbox-pattern/)。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件、GitHub 文件與 tailscale/github-action 原始碼（`action.yml`）整理，以 Tailscale v1.104 為準。github-action 以 **v4** 為目前主版本（tag `v4` 存在，最新 minor 為 `v4.2.0`；`action.yml` 的 `version` 輸入預設 `1.94.2`）。workload identity federation 需要 Tailscale 1.90.1 以上。本文未在 GitHub 代管 runner 實機跑過整套流程，屬文件整理。
+
+## 這個 action 是什麼
+
+`tailscale/github-action@v4` 做的事很單純：在 workflow 裡加一個 step，它會裝 Tailscale、用你給的憑證把這台 runner 以 **tag 身分**加入 tailnet，等 workflow 跑完再登出。這台節點是 **ephemeral**——登出後控制平面會自動把它從 tailnet 移除，不會在 Machines 頁面堆積。有開 device approval 的 tailnet，它建立的節點也會是 **pre-approved**，不用每次等管理員核准。
+
+用 tag 身分是重點：GitHub runner 不是任何一個使用者，它必須靠 tag 才能套用你為它寫的存取規則。tag 的概念見 [Tags 與 auth key](/admin/tags-auth-keys/)。
+
+## 主要輸入
+
+action 的輸入都定義在 `action.yml`，比較常用的是：
+
+| 輸入              | 說明                                                                                                 |
+| ----------------- | ---------------------------------------------------------------------------------------------------- |
+| `oauth-client-id` | OAuth client **或** OIDC federated identity 的 client ID                                             |
+| `oauth-secret`    | OAuth client secret（走 workload identity federation 時不需要）                                      |
+| `audience`        | OIDC federated identity 的 audience（走 workload identity federation 時用）                          |
+| `tags`            | 逗號分隔的 tag 清單，至少一個；OAuth client／federated identity 要有 `auth_keys` scope 且 tag 要相符 |
+| `authkey`         | 舊的 auth key 認證方式，`action.yml` 已標棄用，官方建議改用 OAuth client                             |
+| `version`         | Tailscale 版本，預設 `1.94.2`，可設 `latest` 或 `unstable`                                           |
+| `ping`            | 連上後要用 `tailscale ping` 驗證的主機清單（IP 或 MagicDNS 名稱），最多等 3 分鐘                     |
+| `use-cache`       | 是否快取 Tailscale 二進位檔，v4 起預設 `true`                                                        |
+| `log-mode`        | `grouped`（預設）／`normal`／`quiet`                                                                 |
+| `statedir`        | state 目錄；留空用記憶體。開 Tailnet Lock 的 tailnet 要指定                                          |
+
+注意 `oauth-client-id` 一個欄位同時扛兩種用途：走 OAuth client 時放 client ID，走 workload identity federation 時放 federated identity 的 client ID。差別在第二個欄位——OAuth client 用 `oauth-secret`，federated identity 用 `audience`。
+
+## 三種認證方式
+
+### 方式一：OAuth client（最常用）
+
+在 Tailscale 建一個 OAuth client，scope 給 `auth_keys` 的 Write，並指定它能用哪些 tag。client ID 與 secret 存成 GitHub secret，workflow 裡：
+
+```yaml
+- name: Tailscale
+  uses: tailscale/github-action@v4
+  with:
+    oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+    oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+    tags: tag:ci
+```
+
+OAuth client 的建立、`auth_keys` scope、tag 必填、secret 只顯示一次等細節，見 [OAuth client](/admin/oauth-clients/)。
+
+### 方式二：workload identity federation（無長效 secret）
+
+OAuth client 的 secret 是長效憑證，要一直保管。如果你願意多設一點，可以用 **workload identity federation** 丟掉這把 secret：改用 GitHub 發的短效 OIDC token（JWT）證明身分，action 拿它向 Tailscale 換取建立節點的權限。
+
+```yaml
+permissions:
+  id-token: write # 讓 action 向 GitHub 索取 JWT，federation 一定要開
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          audience: ${{ secrets.TS_AUDIENCE }}
+          tags: tag:ci
+```
+
+- 建立的是 **federated identity**（Trust credentials 裡的 OpenID Connect 型），拿到的 client ID 與 audience 都**不是秘密**，還是可以存進 GitHub secret 免得外露。
+- 需要 Tailscale **1.90.1 以上**。
+- 和 OAuth client 一樣，federated identity 要有 `auth_keys` scope、要指定 tag。
+- federation 的機制（`--client-id`、`--audience` 等）見 [OAuth client](/admin/oauth-clients/) 的「Workload identity federation」一節。
+
+### 方式三：auth key（已棄用）
+
+`authkey` 輸入仍可用，但 `action.yml` 已標上 deprecationMessage，官方建議改用 OAuth client。真要用的話，key 要是 reusable、ephemeral、帶 tag（有 device approval 再開 pre-approved）。另外開 **Tailnet Lock** 的 tailnet 不能用 OAuth client 認證，得用 pre-signed auth key 並指定 `statedir`。
+
+## 設定步驟（OAuth client 路線）
+
+1. **定義 tag**：在 policy 的 `tagOwners` 定義 `tag:ci`。
+2. **建 OAuth client**：Trust credentials 頁面建 OAuth client，scope 勾 `auth_keys` 的 Write，tag 選 `tag:ci`。記下 client ID 與 secret（secret 只顯示一次）。
+3. **存 GitHub secret**：把 client ID 存成 `TS_OAUTH_CLIENT_ID`、secret 存成 `TS_OAUTH_SECRET`。
+4. **加 step**：workflow 裡加上面的 Tailscale step，`tags: tag:ci`。
+5. **驗證連線**：因為新節點在 tailnet 的傳播有延遲（eventual consistency），官方建議用 `ping` 輸入列出要連的目標，或在後續 step 手動 `tailscale ping <目標>`。
+
+## 最小權限的 grants 範例
+
+這是最容易出錯的一步。新 tailnet 的預設政策是**全開**——任何裝置都能連到任何裝置的任何埠。GitHub runner 一進來，如果不特別處理，它就能連到 tailnet 內幾乎所有東西。有些示範為了方便，會貼出 `"src": ["*"], "dst": ["*"]` 這種全開 grants——**那是示範用，不要照抄進 production**。
+
+正確做法是只放行 runner 需要的服務與埠。假設 `tag:ci` 只需要部署到一台 build server 的 HTTPS：
+
+```json
+"tagOwners": {
+  "tag:ci": ["autogroup:admin"],
+  "tag:build-server": ["autogroup:admin"],
+},
+"grants": [
+  // CI runner 只能連 build server 的 HTTPS，其他一律連不到
+  {
+    "src": ["tag:ci"],
+    "dst": ["tag:build-server"],
+    "ip": ["tcp:443"],
+  },
+],
+```
+
+- 需要 SSH 部署就把 `ip` 加上 `tcp:22`，但**只加真正需要的埠**。
+- 確認 policy 裡沒有殘留的全開規則（`"*"` 到 `"*"`）——Tailscale 的 grants 只放行、不阻擋，留著全開規則，上面的限制形同虛設。
+- 雙重最小權限：OAuth client 的 scope 只管「能建哪個 tag 的節點」，grants 管「那個 tag 的節點能連到哪裡」，兩層都要收緊。規則寫法見 [ACL / Grants 入門](/admin/acl-grants/)。
+
+## self-hosted runner 的差異
+
+上面講的是 GitHub 代管 runner。如果你用自己的 **self-hosted runner**：
+
+- GitHub 代管 runner 每次都是乾淨的 VM，跑完就丟；self-hosted runner 是**持續存在**的機器，跑完 workflow 後 action 只會停掉 Tailscale 背景程序、把二進位檔留在機器上，不會整台重置。
+- 代管 runner 節點 ephemeral、離線即移除；self-hosted runner 若不特別處理，可能以 tag 身分一直掛在 tailnet 上，等於一台常駐的 CI 機器——權限要另做考量。
+- 官方文件對「self-hosted runner 持續存在的差異」講得不多，部署前以當時的 [action README](https://github.com/tailscale/github-action) 為準。
+
+## 小結
+
+| 認證方式                     | 憑證                 | 長效 secret | 何時用                  |
+| ---------------------------- | -------------------- | ----------- | ----------------------- |
+| OAuth client                 | client ID + secret   | 有          | 最常見、設定簡單        |
+| workload identity federation | client ID + audience | 無          | 想丟掉長效 secret 時    |
+| auth key                     | reusable auth key    | 有          | 已棄用；或 Tailnet Lock |
+
+骨架都一樣：tag 身分 → ephemeral 節點 → grants 只開必要埠。真正的差別在憑證由誰背書，以及你有沒有那把要長期保管的 secret。不管選哪種，都記得把 grants 收緊、別照抄全開示範。
+
+## 參考資料
+
+- [tailscale/github-action（官方 repo，action.yml 與 README）](https://github.com/tailscale/github-action)
+- [Tailscale GitHub Action（官方 KB）](https://tailscale.com/kb/1276/tailscale-github-action)
+- [Connect GitHub CI/CD workflows to private infrastructure（官方）](https://tailscale.com/docs/solutions/connect-github-cicd-workflows-to-private-infrastructure-without-public-exposure)
+- [Workload identity federation（官方）](https://tailscale.com/docs/features/workload-identity-federation)
+- [OAuth clients（官方）](https://tailscale.com/docs/features/oauth-clients)
+- [Auth keys（官方）](https://tailscale.com/docs/features/access-control/auth-keys)
+- [OAuth client：給 CI、operator 與雲端 agent 用的憑證](/admin/oauth-clients/)
+- [雲端 agent sandbox 連回 tailnet 的通用做法](/ai/cloud-sandbox-pattern/)
+- [Tags 與 auth key：給伺服器用的非互動登入](/admin/tags-auth-keys/)
+- [ACL / Grants 入門](/admin/acl-grants/)
