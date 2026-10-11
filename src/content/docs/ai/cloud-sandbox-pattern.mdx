@@ -1,0 +1,167 @@
+---
+title: 雲端 agent sandbox 連回 tailnet 的通用做法
+description: 從 Codex Cloud 抽出的通則：reusable + ephemeral + tagged auth key、OAuth client、pre-approved、grants 只開 HTTPS，以及 Tembo、Daytona、Modal 等平台的現況與 Claude Code on the web 的非官方 hook 做法
+sidebar:
+  order: 6
+  label: 雲端 sandbox 連回 tailnet
+---
+
+雲端 agent sandbox（Codex Cloud、Tembo、Daytona、Modal、E2B 這類在雲端跑一段 agent 程式的環境）要在任務裡存取你 tailnet 內的服務，做法看似各家不同，其實都收斂到同一套通則：**給 sandbox 一個 tag 身分，用一把會過期的憑證加入，跑在 userspace 網路模式，再用 grants 把它能碰到的範圍收到只剩需要的 HTTPS**。
+
+這篇先講通則，再對照幾個平台的現況，最後講 Claude Code on the web 用社群 hook 連回 tailnet 的非官方做法。具體的 step-by-step 以 [Codex Cloud 連上 tailnet](/platforms/codex-cloud/) 為例，通則背後的觀念見 [AI 與 agent](/ai/)。
+
+> 本文依 2026 年 10 月的 Tailscale、OpenAI、Tembo、Daytona、Modal、E2B 官方文件與 Tailscale v1.104 原始碼整理。auth key 的 `--auth-key`、`--client-secret` 等旗標與 `?ephemeral=`、`?preauthorized=` 參數對照過 `cmd/tailscale/cli/up.go`，`tailscaled --tun=userspace-networking` 對照過 `cmd/tailscaled/tailscaled.go`。Claude Code on the web 的 hook 是社群做法（非官方），出處見該節。本文未實機跑過這些平台，屬文件整理。
+
+## 通則：四個步驟
+
+把 Codex Cloud、Tembo、Daytona、Modal 的設定攤開，都逃不出下面四步：
+
+### 第一步：給 sandbox 一個 tag 身分
+
+雲端 sandbox 是「跑一次任務就丟」的機器，不該掛在某個使用者帳號下。先在 policy 的 `tagOwners` 定義一個專屬 tag（例如 `tag:agent`），sandbox 加入時就以這個 tag 的身分出現，套用你為它寫的規則。tag 的定義與套用見 [Tags 與 auth key](/admin/tags-auth-keys/)。
+
+### 第二步：用會過期的憑證加入
+
+sandbox 沒有瀏覽器可以互動登入，要靠 auth key 或 OAuth client。兩種路線詳見下一節，共通點是**不要用一把永久、全開的 key**。
+
+### 第三步：sandbox 內跑 userspace 網路模式
+
+雲端 sandbox 大多沒有 root、也不能動 kernel 網路，所以跑 `tailscaled --tun=userspace-networking`（beta，不建立 TUN 裝置，改走 userspace 的 netstack），再靠 SOCKS5／HTTP proxy 讓 sandbox 裡的程式連上 tailnet：
+
+```bash
+tailscaled --tun=userspace-networking --socks5-server=localhost:1080 \
+  --outbound-http-proxy-listen=localhost:1080 &
+
+tailscale up --auth-key="${TAILSCALE_AUTHKEY}" --hostname=agent-<task-id>
+```
+
+`--auth-key` 是 `tailscale up` 的正確旗標（原始碼 `up.go` 裡就是 `auth-key`，沒有 `--authkey` 這個拼法；`tailscaled` 的 `--tun=userspace-networking` 見 `tailscaled.go`）。key 也可以用 `--auth-key=file:/path/to/key` 從檔案讀入，避免出現在 `ps` 的參數列表。
+
+### 第四步：grants 只開 HTTPS
+
+sandbox 加入後就是 tailnet 上的一台裝置。如果 policy 還留著預設全開規則，它就連得到 tailnet 內幾乎所有東西。用 [grants](/admin/acl-grants/) 只放行它需要的服務與連接埠，收在 `tcp:443`，並移除預設的 `*` 到 `*` 全開規則。
+
+## 兩種憑證路線：auth key 或 OAuth client
+
+### 路線一：一把 reusable + ephemeral + tagged + pre-approved 的 auth key
+
+這是 Codex Cloud 的用法，也是手工最簡單的選擇。在 Admin console 的 [Keys](https://console.tailscale.com/admin/settings/keys) 頁面產生 auth key 時：
+
+| 選項             | 為什麼 sandbox 需要                                                                                                |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------ |
+| **Reusable**     | 每個任務都是新機器，一把 key 要能讓很多台加入                                                                      |
+| **Ephemeral**    | 任務結束、離線後自動移除，Machines 頁面才不會堆滿用過即丟的裝置                                                    |
+| **Tags**         | 以 tag 身分加入，套用你寫的規則，而不是繼承產生 key 那個人的權限                                                   |
+| **Pre-approved** | tailnet 有開 device approval 時，用這把 key 加入的機器不必再等管理員核准（見 [裝置安全](/admin/device-security/)） |
+
+沒有加 tag 的 auth key，加入的機器會以產生 key 的使用者身分出現——等於 sandbox 拿到和你一樣的存取範圍。reusable key 被偷走，任何人都能用它把機器加進你的 tailnet，所以要存在密鑰管理工具，效期設短。
+
+### 路線二：OAuth client，即時 mint 短效 key
+
+auth key 最長 90 天、又要手動輪替，平台型的整合（例如 Tembo）用的是更乾淨的做法：**OAuth client 的 secret 留在平台伺服器端，需要時才即時產生一把單次、短效的 auth key 丟進 sandbox**。
+
+建一個帶 `auth_keys` scope（Write）的 OAuth client、只指派它會用到的 tag，secret 交給平台。平台每次 sandbox 要連線時，用這個 client 呼叫 Tailscale API 產生一把單次（`reusable:false`）、ephemeral、pre-authorized、帶 tag 的 key。OAuth 憑證本身**不進 sandbox**，sandbox 只拿到那把幾分鐘內到期的 key。scope、tag 必填與輪替的細節見 [OAuth client](/admin/oauth-clients/)。
+
+也可以把 OAuth client secret 直接當 auth key 用，但 `--advertise-tags` 必填，且 tag 要是建立 client 時選過的：
+
+```bash
+tailscale up --client-secret="${OAUTH_CLIENT_SECRET}?ephemeral=true&preauthorized=true" \
+  --advertise-tags=tag:agent
+```
+
+用 client secret 加入的裝置**一定是 tag 身分**。`ephemeral` 預設 `true`（離線自動移除）、`preauthorized` 預設 `false`（有開 device approval 時設 `true` 免核准）。這幾個旗標與參數的細節見 [OAuth client](/admin/oauth-clients/)。
+
+## 最小權限的 grants 範例
+
+假設 sandbox 的 tag 是 `tag:agent`，它只需要連內部 API 的 HTTPS：
+
+```json
+"tagOwners": {
+  "tag:agent": ["autogroup:admin"],
+  "tag:internal-api": ["autogroup:admin"],
+},
+"grants": [
+  // sandbox 只能連內部 API 的 443，其他一律連不到
+  {
+    "src": ["tag:agent"],
+    "dst": ["tag:internal-api"],
+    "ip": ["tcp:443"],
+  },
+],
+```
+
+- sandbox 打上 `tag:agent`，身分不綁個人帳號。
+- `dst` 只放它要用的服務，`ip` 收到 `tcp:443`。
+- 記得確認 policy 沒有殘留的全開規則，否則上面的限制形同虛設（Tailscale 規則只放行、不阻擋）。規則寫法見 [ACL / Grants 入門](/admin/acl-grants/)。
+
+## 各平台的現況
+
+### Tembo：最完整的原生整合
+
+[Tembo](https://tembo.io)（Postgres 與 AI agent sandbox 平台）把上面整套通則做成了開箱即用的整合：
+
+- **OAuth client 留在伺服器端**：你給它 `auth_keys` Write scope 的 client 與 `tag:tembo-session`，它即時 mint **單次、短效（幾分鐘）、ephemeral、pre-authorized** 的 auth key。OAuth 憑證永不進 sandbox。
+- **opt-in per session**：sandbox 不會自動連 tailnet，只有任務需要時才連。
+- **sandbox 內 userspace 模式**：無 root、無 TUN，traffic 走 DERP 中繼（sandbox 不收 inbound UDP）。
+- **ACL 決定一切**：連上的 sandbox 只是一台 tagged 裝置，能碰什麼完全由你的 grants 決定，且不對它開任何 inbound。
+- 安裝後自動產生一個 managed 的 `/tailscale` skill 教 agent 怎麼連。
+
+### Daytona：原生 VPN 連線
+
+[Daytona](https://www.daytona.io) 的文件把 Tailscale 列在原生支援的 VPN 提供者裡（另有 OpenVPN、Netbird），sandbox 能以 Tailscale IP 加入 tailnet。提供瀏覽器登入、auth key、web terminal 三種連法，但 **VPN 連線需要 Tier 3 以上的方案**。
+
+### Modal：官方範例（DIY）
+
+[Modal](https://modal.com) 有官方範例「Add Modal Apps to Tailscale」，做法就是第四步的 userspace 模式：自訂 entrypoint 裝 Tailscale、跑 `tailscaled --tun=userspace-networking --socks5-server=localhost:1080`、用 `TAILSCALE_AUTHKEY` 驗證，並建議 key 用 **reusable + ephemeral**。它不是 Tembo 那種管理式整合，而是「照範例自己組」的路線。
+
+### E2B：目前沒有原生 Tailscale
+
+[E2B](https://e2b.dev) 的文件沒有原生 Tailscale 整合，只有 proxy tunneling（Shadowsocks）這類通用做法；要連回 tailnet 得自己在 sandbox template 裡套上面的 DIY 通則。以 2026 年 8 月的 LogRocket 比較文與 E2B 文件為準，此狀態可能隨時改變，實作前先查最新文件。
+
+### CodeSandbox：官方文件有整合
+
+Tailscale 官方文件另有 [CodeSandbox 整合頁](https://tailscale.com/docs/integrations/codesandbox)，一樣要求 key 用 **reusable + ephemeral + pre-authorized**（可選 tagged），以 Docker sidecar 的方式提供網路。
+
+## Claude Code on the web：社群 hook（非官方）
+
+Claude Code on the web（Anthropic 的網頁版 Claude Code）沒有官方 Tailscale 整合。社群有人用 **SessionStart hook** 讓雲端 session 自動連回 tailnet，出處是 [mark-brannan/symphony 的 PR #8](https://github.com/mark-brannan/symphony/pull/8)（2026 年 8 月合併）。**這是非官方、社群專案的做法**，不是 Anthropic 的功能，會隨環境變動、可能隨時壞掉。
+
+它的原理是：session 開始時由 `.claude/hooks/tailscale-join.sh` 這個 hook 偵測到雲端 session（`CLAUDE_CODE_REMOTE` 環境變數），起一個 `tailscaled`（userspace 模式）、用 `TAILSCALE_AUTHKEY` 驗證加入 tailnet，之後 SSH 靠 `tailscale nc` 與 SOCKS5 proxy 走通。幾個值得注意的坑（都寫在那個 PR 的 commit 紀錄裡）：
+
+- **session ID 含底線**：`CLAUDE_CODE_REMOTE_SESSION_ID` 長得像 `cse_01AB...`，底線不符合 Tailscale 的 DNS label 規則，直接拿來當 `--hostname` 會被拒（`not a valid DNS label`），要先把底線處理掉。
+- **auth key 用 `--auth-key=file:` 讀入**：避免出現在 `ps` 的參數列表給同機其他使用者看到。
+- **雲端環境要自備 Tailscale 套件與網路**：hook 不負責裝套件，環境沒有 `tailscaled` 或網路受限時就靜默跳過。
+
+如果你只是想在網頁版 Claude Code 裡連 tailnet，與其追這個脆弱的 hook，不如先確認是否有官方整合；目前 Codex Cloud 才是唯一官方支援的雲端 agent 路線（見 [Codex Cloud](/platforms/codex-cloud/)）。
+
+## 小結
+
+| 平台／做法             | 類型                | 憑證                                    | 附註                         |
+| ---------------------- | ------------------- | --------------------------------------- | ---------------------------- |
+| Codex Cloud            | 官方整合            | auth key（reusable + ephemeral + tag）  | 目前唯一官方雲端 agent 路線  |
+| Tembo                  | 原生整合            | OAuth client → 單次短效 key             | 最完整，安全預設             |
+| Daytona                | 原生 VPN            | browser／auth key／web terminal         | 需 Tier 3+                   |
+| Modal                  | 官方範例（DIY）     | reusable + ephemeral auth key           | userspace + SOCKS5           |
+| E2B                    | 無原生              | 自己套 DIY 通則                         | 文件只有 proxy tunneling     |
+| Claude Code on the web | 社群 hook（非官方） | `TAILSCALE_AUTHKEY` + SessionStart hook | 脆弱、需 sanitize session ID |
+
+不管走哪條路，骨架都是同一套：tag 身分、會過期的憑證、userspace 網路、grants 只開 HTTPS。真正有差的是「憑證由誰保管」——自己手動發一把 reusable key（簡單但風險高），還是交給平台伺服器用 OAuth client 即時 mint 短效 key（乾淨但要有整合）。
+
+## 參考資料
+
+- [Codex Cloud shipped with Tailscale support. Nobody told us.（Tailscale 官方部落格）](https://tailscale.com/blog/codex-cloud-tailscale)
+- [Codex Cloud environments：Private networking (VPN)（OpenAI）](https://learn.chatgpt.com/docs/environments/cloud-environments#private-networking-vpn)
+- [Tembo：Tailscale 整合（官方文件）](https://docs.tembo.io/integrations/tailscale)
+- [Daytona：VPN Connections（官方文件）](https://www.daytona.io/docs/en/vpn-connections)
+- [Add Modal Apps to Tailscale（Modal 官方範例）](https://modal.com/docs/examples/modal_tailscale)
+- [Access your tailnet from CodeSandbox（Tailscale 官方文件）](https://tailscale.com/docs/integrations/codesandbox)
+- [Comparing AI agent sandbox platforms: E2B, Modal, Daytona, and more（LogRocket）](https://blog.logrocket.com/comparing-ai-agent-sandbox-platforms-e2b-modal-daytona-and-more/)
+- [Claude/cloud tailnet connectivity（mark-brannan/symphony PR #8，社群、非官方）](https://github.com/mark-brannan/symphony/pull/8)
+- [Auth keys（官方）](https://tailscale.com/docs/features/access-control/auth-keys)
+- [OAuth clients（官方）](https://tailscale.com/docs/features/oauth-clients)
+- [Ephemeral nodes（官方）](https://tailscale.com/kb/1111/ephemeral-nodes)
+- [Tailscale 原始碼：`cmd/tailscale/cli/up.go`](https://github.com/tailscale/tailscale/blob/main/cmd/tailscale/cli/up.go)
+- [Tailscale 原始碼：`cmd/tailscaled/tailscaled.go`](https://github.com/tailscale/tailscale/blob/main/cmd/tailscaled/tailscaled.go)
+- [Codex Cloud 連上 tailnet：讓雲端 AI 代理存取內部服務](/platforms/codex-cloud/)
+- [OAuth client：給 CI、operator 與雲端 agent 用的憑證](/admin/oauth-clients/)
+- [Tags 與 auth key：給伺服器用的非互動登入](/admin/tags-auth-keys/)
