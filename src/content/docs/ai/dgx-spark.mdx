@@ -10,7 +10,7 @@ NVIDIA DGX Spark 是一台「個人 AI 超級電腦」：GB10 Grace Blackwell �
 
 這篇以 NVIDIA 官方的 [DGX Spark Tailscale playbook](https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/tailscale) 為底改寫成繁中，不是逐字翻譯；另外補上 playbook 沒有、但實際上更有用的三件事：Tailscale SSH、Serve 發布 Jupyter／Open WebUI、以及 tag 與最小權限 grants。
 
-> 本文以 NVIDIA 官方 DGX Spark Tailscale playbook（github.com/NVIDIA/dgx-spark-playbooks/nvidia/tailscale，2025-11-07 更新）為底改寫，以 Tailscale v1.104 與 NVIDIA DGX Spark／DGX OS 官方資料為準；華碩 Ascent GX10 的差異以 ASUS 官方產品頁與 FAQ 為準。本文未持有 DGX Spark／Ascent GX10，屬文件整理。
+> 本文以 NVIDIA 官方 DGX Spark Tailscale playbook（github.com/NVIDIA/dgx-spark-playbooks/nvidia/tailscale，README self-stamp 2025-11-07、核對時 repo main 為 commit `09e077d`）為底改寫，以 Tailscale v1.104 與 NVIDIA DGX Spark／DGX OS 官方資料為準；華碩 Ascent GX10 的差異以 ASUS 官方產品頁與 FAQ 為準。本文未持有 DGX Spark／Ascent GX10，屬文件整理。
 
 ## 這台機器是什麼
 
@@ -63,7 +63,7 @@ sudo systemctl status tailscaled --no-pager
 sudo tailscale up   # 照跳出的網址在瀏覽器登入（Google、GitHub、Microsoft 等）
 ```
 
-接著在筆電／手機上也裝 Tailscale、用**同一個帳號**登入，讓兩台進同一個 tailnet。之後就能用 Tailscale 主機名稱 SSH 進去（playbook 建議另外用 SSH key，不要用密碼）：
+接著在筆電／手機上也裝 Tailscale、用**同一個帳號**登入，讓兩台進同一個 tailnet。之後就能用 Tailscale 主機名稱 SSH 進去（playbook 用 SSH key 驗證：`ssh-keygen -t ed25519` 產生 `~/.ssh/tailscale_spark`，再把公鑰塞進 `authorized_keys`）：
 
 ```bash
 ssh -i ~/.ssh/tailscale_spark <使用者>@<spark-主機名稱>
@@ -89,7 +89,7 @@ SSH 之外，你也可以用 [Tailscale Serve](/features/serve/) 把 Jupyter 或
 
 ### Jupyter
 
-DGX Spark 的 JupyterLab 由 DGX Dashboard 服務管理（預設在 localhost 的 1102 埠，dashboard 本身是 11000）。要用 Serve 發布，把 Serve 指到本機的 Jupyter 埠：
+DGX Spark 的 JupyterLab 由 DGX Dashboard 服務管理（dashboard 在 localhost 的 11000；JupyterLab 每個使用者帳號各配一個埠，實際埠寫在 `/opt/nvidia/dgx-dashboard-service/jupyterlab_ports.yaml`，playbook 範例用 1102）。要用 Serve 發布，把 Serve 指到你帳號實際的 Jupyter 埠：
 
 ```bash
 tailscale serve --bg http://127.0.0.1:1102
@@ -134,7 +134,7 @@ DGX Spark 是常駐的伺服器，該給它 **tag 身分**（不是某個使用�
 
 華碩 Ascent GX10 與 DGX Spark 是同一平台，所以上面整套（含 playbook）**直接適用**。以 ASUS 官方產品頁與 FAQ 核對，幾點差異／補充：
 
-- 硬體同一顆 GB10：20 核 Arm CPU + Blackwell GPU、128 GB 統一記憶體、1 PFLOP（FP4）、ConnectX-7（2×QSFP 200Gb/s）、10 GbE、HDMI 2.1b、1TB／2TB／4TB SSD。
+- 硬體同一顆 GB10：20 核 Arm CPU + Blackwell GPU、**64 GB 或 128 GB** 統一記憶體（ASUS 提供 64GB 與 128GB 兩種配置）、1 PFLOP（FP4）、ConnectX-7（2×QSFP 200Gb/s）、10 GbE、HDMI 2.1b。SSD 以 ASUS 的 SKU 為準（FAQ 明說提供 **1TB 與 4TB** 兩種）。
 - 出廠一樣預載 DGX OS（Ubuntu 為基礎）；ASUS FAQ 明說 **DGX OS 是唯一測試並建議的作業系統**（「只支援 DGX OS」）。
 - 關於「出廠是哪個版本的 DGX OS」，ASUS FAQ 的答案是「版本尚未定案（產品仍在開發中）」——所以**本文不寫具體 DGX OS 版本號**，以出貨當下的版本為準。
 - 尺寸約 150×150×51 mm，峰值功耗 240 W（GB10 TDP 140 W）。
