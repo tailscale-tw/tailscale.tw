@@ -126,24 +126,24 @@ Tailscale 官方文件另有 [CodeSandbox 整合頁](https://tailscale.com/docs/
 
 Claude Code on the web（Anthropic 的網頁版 Claude Code）沒有官方 Tailscale 整合。社群有人用 **SessionStart hook** 讓雲端 session 自動連回 tailnet，出處是 [mark-brannan/symphony 的 PR #8](https://github.com/mark-brannan/symphony/pull/8)（2026 年 8 月合併）。**這是非官方、社群專案的做法**，不是 Anthropic 的功能，會隨環境變動、可能隨時壞掉。
 
-它的原理是：session 開始時由 `.claude/hooks/tailscale-join.sh` 這個 hook 偵測到雲端 session（`CLAUDE_CODE_REMOTE` 環境變數），起一個 `tailscaled`（userspace 模式）、用 `TAILSCALE_AUTHKEY` 驗證加入 tailnet，之後 SSH 靠 `tailscale nc` 與 SOCKS5 proxy 走通。幾個值得注意的坑（都寫在那個 PR 的 commit 紀錄裡）：
+它的原理是：session 開始時由 `.claude/hooks/tailscale-join.sh` 這個 hook 偵測到雲端 session（`CLAUDE_CODE_REMOTE` 環境變數為 `"true"`），起一個 `tailscaled`（userspace 模式、`--state=mem:` 不落盤）、用 `TAILSCALE_AUTHKEY` 驗證加入 tailnet，之後 **SSH 只靠 `tailscale nc`（寫進 SSH `ProxyCommand`）走通**。SOCKS5／HTTP proxy listener 有起，但 hook 本身沒用上（註解明說「nothing in this hook sets those env vars today, only the SSH ProxyCommand below consumes the tailnet」，留給 session 內其他工具）。幾個值得注意的細節（以 merge 後的最終版本為準）：
 
-- **session ID 含底線**：`CLAUDE_CODE_REMOTE_SESSION_ID` 長得像 `cse_01AB...`，底線不符合 Tailscale 的 DNS label 規則，直接拿來當 `--hostname` 會被拒（`not a valid DNS label`），要先把底線處理掉。
-- **auth key 用 `--auth-key=file:` 讀入**：避免出現在 `ps` 的參數列表給同機其他使用者看到。
-- **雲端環境要自備 Tailscale 套件與網路**：hook 不負責裝套件，環境沒有 `tailscaled` 或網路受限時就靜默跳過。
+- **session ID 含底線**：`CLAUDE_CODE_REMOTE_SESSION_ID` 長得像 `cse_01AB...`，底線不符合 Tailscale 的 DNS label 規則，直接拿來當 `--hostname` 會被拒（`not a valid DNS label`）。hook 會把底線換成 `-`、截到 32 字元、去掉結尾的連字號。
+- **auth key 用 `--auth-key=file:` 讀入**：先寫進 mode-600 的暫存檔再傳，避免出現在 `ps` 的參數列表給同機其他使用者看到。
+- **缺東西不阻塞、但會印 stderr 提示**：雲端環境要自備 `tailscaled`、能連上 tailscale.com、以及 `TAILSCALE_AUTHKEY`；任何一項不齊或 `tailscale up` 失敗時，hook 會在 stderr 印提示後放行 session（不阻塞啟動），不是靜默跳過。
 
-如果你只是想在網頁版 Claude Code 裡連 tailnet，與其追這個脆弱的 hook，不如先確認是否有官方整合；目前 Codex Cloud 才是唯一官方支援的雲端 agent 路線（見 [Codex Cloud](/platforms/codex-cloud/)）。
+如果你只是想在網頁版 Claude Code 裡連 tailnet，與其追這個脆弱的 hook，不如先確認是否有官方整合。站內 [Codex Cloud](/platforms/codex-cloud/) 是目前唯一把 Tailscale 直接內建為環境設定的雲端 agent 平台（其環境設定的 VPN 供應商只有 Tailscale）；Tembo、Daytona 等平台則是靠各自的整合或 VPN 連線，方向不同。
 
 ## 小結
 
-| 平台／做法             | 類型                | 憑證                                    | 附註                         |
-| ---------------------- | ------------------- | --------------------------------------- | ---------------------------- |
-| Codex Cloud            | 官方整合            | auth key（reusable + ephemeral + tag）  | 目前唯一官方雲端 agent 路線  |
-| Tembo                  | 原生整合            | OAuth client → 單次短效 key             | 最完整，安全預設             |
-| Daytona                | 原生 VPN            | browser／auth key／web terminal         | 需 Tier 3+                   |
-| Modal                  | 官方範例（DIY）     | reusable + ephemeral auth key           | userspace + SOCKS5           |
-| E2B                    | 無原生              | 自己套 DIY 通則                         | 文件只有 proxy tunneling     |
-| Claude Code on the web | 社群 hook（非官方） | `TAILSCALE_AUTHKEY` + SessionStart hook | 脆弱、需 sanitize session ID |
+| 平台／做法             | 類型                | 憑證                                    | 附註                             |
+| ---------------------- | ------------------- | --------------------------------------- | -------------------------------- |
+| Codex Cloud            | 官方整合            | auth key（reusable + ephemeral + tag）  | 內建 VPN，唯一供應商是 Tailscale |
+| Tembo                  | 原生整合            | OAuth client → 單次短效 key             | 最完整，安全預設                 |
+| Daytona                | 原生 VPN            | browser／auth key／web terminal         | 需 Tier 3+                       |
+| Modal                  | 官方範例（DIY）     | reusable + ephemeral auth key           | userspace + SOCKS5               |
+| E2B                    | 無原生              | 自己套 DIY 通則                         | 文件只有 proxy tunneling         |
+| Claude Code on the web | 社群 hook（非官方） | `TAILSCALE_AUTHKEY` + SessionStart hook | 脆弱、需 sanitize session ID     |
 
 不管走哪條路，骨架都是同一套：tag 身分、會過期的憑證、userspace 網路、grants 只開 HTTPS。真正有差的是「憑證由誰保管」——自己手動發一把 reusable key（簡單但風險高），還是交給平台伺服器用 OAuth client 即時 mint 短效 key（乾淨但要有整合）。
 
