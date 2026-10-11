@@ -8,7 +8,7 @@ sidebar:
 
 coding agent 對 Tailscale 的了解，跟你丟給它的 context 一樣好。與其每次問問題都複製貼上一堆文件，不如裝一個 **skill**：它把 Tailscale 的參考資料整理好，agent 在回答涉及 Tailscale 的問題時自己會去讀。這篇講官方 skill 怎麼裝、涵蓋什麼、有哪些限制，以及兩個社群 skill 的差別與風險。
 
-> 本文依 2026 年 10 月的 Tailscale 官方文件與 GitHub 原始碼整理，以 Tailscale v1.104 為準。官方 skill（github.com/tailscale/tailscale-skill）為 public alpha，核對時 commit 為 `4f05d35`；社群 skill 於 2026 年 10 月核對——tailscale-superpowers commit `302e989`、0oAstro/tailscale-skill commit `e38f2a2`，兩者皆為非官方專案。本文未在 Claude Code 實機跑過安裝流程，屬文件整理。
+> 本文依 2026 年 10 月的 Tailscale 官方文件與 GitHub 原始碼整理，以 Tailscale v1.104 為準。官方 skill（github.com/tailscale/tailscale-skill）為 public alpha，核對時 commit 為 `4f05d35`；第三方工具以核對時點為準——Claude Code v2.1.296（官方 changelog，2026-10-09）、skills CLI 1.7.2（npm）；社群 skill 於 2026 年 10 月核對——tailscale-superpowers commit `302e989`、0oAstro/tailscale-skill commit `e38f2a2`，兩者皆為非官方專案。本文未在 Claude Code 實機跑過安裝流程，屬文件整理。
 
 ## 官方 skill：tailscale/tailscale-skill
 
@@ -41,18 +41,18 @@ README 列出的支援對象是 **Claude Code、Cursor、OpenCode、OpenAI Codex
 
 `SKILL.md` 是一個主題索引，把 agent 導到 `references/` 目錄下各自的參考檔。涵蓋的主題有：
 
-| 主題              | 內容                                                                    |
-| ----------------- | ----------------------------------------------------------------------- |
-| 核心 mesh VPN     | exit node、subnet router、MagicDNS、grants（與舊式 ACL）、tag           |
-| 連線診斷          | DERP、NAT traversal、peer relay、`tailscale netcheck`／`ping`／`status` |
-| 分享與發布        | Taildrop、Taildrive、Serve（私有）、Funnel（公開）                      |
-| 容器與 Kubernetes | operator、Docker sidecar、ProxyGroup、Connector CRD                     |
-| 企業部署          | SCIM、MDM（Jamf／Intune）、device posture、device approval、auth key    |
-| 工作階段錄影      | `tsrecorder`、S3 目的地、fail-closed、SSH／Kubernetes 錄影              |
-| Aperture          | LLM API key 集中管理、配額、用量儀表板、coding agent 整合               |
-| CLI               | 每個 `tailscale` 子指令的旗標與範例                                     |
-| REST API          | 驗證、裝置管理、policy file、webhook                                    |
-| 用 Go 開發        | `tsnet`——把 Tailscale client 嵌進你的應用程式                           |
+| 主題              | 內容                                                                      |
+| ----------------- | ------------------------------------------------------------------------- |
+| 核心 mesh VPN     | exit node、subnet router、MagicDNS、grants（與舊式 ACL）、tag             |
+| 連線診斷          | DERP、NAT traversal、peer relay、`tailscale netcheck`／`ping`／`status`   |
+| 分享與發布        | Taildrop、Taildrive、Serve（私有）、Funnel（公開）                        |
+| 容器與 Kubernetes | operator、Docker sidecar、ProxyGroup、Connector CRD、API server proxy     |
+| 企業部署          | SCIM、MDM（Jamf／Intune）、device posture、device approval、auth key、SSO |
+| 工作階段錄影      | `tsrecorder`、S3 目的地、fail-closed、SSH／Kubernetes 錄影                |
+| Aperture          | LLM API key 集中管理、配額、用量儀表板、coding agent 整合                 |
+| CLI               | 每個 `tailscale` 子指令的旗標與範例                                       |
+| REST API          | 驗證、裝置管理、policy file、webhook                                      |
+| 用 Go 開發        | `tsnet`——把 Tailscale client 嵌進你的應用程式                             |
 
 `SKILL.md` 裡有一個對本文讀者特別有用的「寫作預設」：**寫 policy 時用 grants，不要用舊式 ACL**，並把 agent 導到 `references/access-control.md`。也就是說，叫 agent 幫你寫 grants 是這個 skill 直接內建支援的情境（見最後一節）。
 
@@ -66,7 +66,7 @@ README 列出的支援對象是 **Claude Code、Cursor、OpenCode、OpenAI Codex
 
 ### tailscale-superpowers：日常情境的安全配方
 
-[tailscale-superpowers](https://github.com/cathrynlavery/tailscale-superpowers)（作者 Cathryn Lavery，MIT 授權）是給「日常使用」的 skill，官方 tagline 是「everyday jobs, like safe hotel wifi, printing at home from anywhere」。它的特色是**每條指令都標了安全層級**：
+[tailscale-superpowers](https://github.com/cathrynlavery/tailscale-superpowers)（作者 Cathryn Lavery，MIT 授權）是給「日常使用」的 skill，README 的 tagline 是「everyday jobs, like safe hotel wifi, printing at home from anywhere」。它的特色是**每條指令都標了安全層級**：
 
 - **Run freely**：唯讀指令（`tailscale status`、`tailscale ping`）。
 - **Ask first**：先給你看指令、等你同意（設 exit node、傳檔案、開 SSH）。
@@ -117,6 +117,8 @@ agent（載入 /tailscale skill，參考 references/access-control.md）：
 
 先裝官方 skill 當底，社群 skill 依需求加、且務必先看來源。不管是哪個，都把 agent 的輸出當起點——尤其是會動到 policy、auth key、裝置的指令——自己核對過再套用。
 
+要 agent 直接查最新文件，官方另外有 [Tailscale docs MCP server](https://tailscale.com/docs/develop-with-ai)，讓 agent 搜尋 Tailscale 官方文件。它和 skill 互補：skill 提供整理好的參考與「用 grants」這類寫作預設，docs MCP 提供當下的文件內容，適合拿來驗證 skill 給的答案有沒有過時。
+
 ## 參考資料
 
 - [tailscale/tailscale-skill（官方 repo）](https://github.com/tailscale/tailscale-skill)
@@ -125,6 +127,7 @@ agent（載入 /tailscale skill，參考 references/access-control.md）：
 - [0oAstro/tailscale-skill（社群 repo，非官方）](https://github.com/0oAstro/tailscale-skill)
 - [Agent Skills 標準](https://agentskills.io/)
 - [skills CLI（skills.sh）](https://skills.sh/)
+- [Tailscale docs MCP server（官方）](https://tailscale.com/docs/develop-with-ai)
 - [ACL / Grants 入門](/admin/acl-grants/)
 - [OAuth client：給 CI、operator 與雲端 agent 用的憑證](/admin/oauth-clients/)
 - [Serve 的身分標頭：讓自架服務直接認得 tailnet 使用者](/features/serve-identity-headers/)
