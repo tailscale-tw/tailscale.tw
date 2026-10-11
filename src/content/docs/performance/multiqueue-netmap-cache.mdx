@@ -1,0 +1,90 @@
+---
+title: 2026 年的效能升級：multi-queue 與 netmap caching
+description: 2026 年 Tailscale 資料平面的幾項升級：Linux／Android 的小封包緩衝、給 subnet router 與 exit node 的 multi-queue，以及控制平面不通時加速啟動的 netmap caching。說明各項的作用、哪個版本才有、預設開不開與適用平台
+sidebar:
+  order: 3
+  label: Multi-queue 與 netmap caching
+---
+
+效能調校不只有 sysctl 和 ethtool。2026 年 Tailscale 在資料平面上做了幾件「裝了新版本就受惠、不必動手」的升級：小封包改用共用緩衝以省記憶體、給 [Subnet Router](/features/subnet-router/) 與 [Exit Node](/features/exit-node/) 的多通道（multi-queue），以及控制平面連不上時靠磁碟快取加速啟動的 netmap caching。這篇說明各項的作用、哪個版本才有、預設開不開、適用哪些平台，以及怎麼驗證。
+
+> 本文依 2026 年 10 月的 Tailscale 官方部落格〈[We're making Tailscale faster](https://tailscale.com/blog/making-tailscale-faster)〉（2026-09-22）與 [changelog](https://tailscale.com/changelog) 整理，以 Tailscale v1.104 為準。netmap caching 的環境變數、node attribute 與預設值都對照過 v1.104 原始碼（`ipn/ipnlocal/local.go`、`tailcfg/nodecap/nodecap.go`、`ipn/ipnlocal/netmapcache`）。multi-queue 尚未落地、netmap caching 與小封包緩衝未實機驗證，屬文件整理。
+
+## 先看結論：哪些在 v1.104、哪些還沒有
+
+| 升級           | 作用                                                   | v1.104                             | 平台                            |
+| -------------- | ------------------------------------------------------ | ---------------------------------- | ------------------------------- |
+| 小封包緩衝     | 減少封包拷貝、降低記憶體用量                           | 有，自動生效                       | Linux／Android                  |
+| multi-queue    | subnet router／app connector／exit node 多通道平行處理 | 沒有，v1.104 之後                  | Linux（規劃）                   |
+| netmap caching | 控制平面不通時用磁碟快取加速啟動                       | 有，預設開、受 node attribute 控管 | 桌面端（Linux／Windows／macOS） |
+
+## 小封包緩衝：64 KiB 的浪費
+
+GRO 讓 kernel 能一次收下最大 64 KiB 的封包批次，Tailscale 為了接得住，得準備好 64 KiB 的緩衝。但 wireguard-go 只有單一 64 KiB 的緩衝可以拆解：於是一個 1 KiB 的小封包，每次都被單獨拷進自己的 64 KiB 空間，九成以上是空的。佇列也一樣，為了吸收突發流量排得偏深，實測大部分深度用不到。
+
+v1.104 的改法是「就地處理」：封包落在哪個大緩衝裡，就直接標出每個封包的起訖，不再多拷一次；佇列深度也改成依 CPU 核心數調整。官方部落格給的數字是「在許多網路組態下約 5% 的提速」，這是小封包緩衝單項的估計，測試條件官方沒有逐條列出。changelog 對應的條目是：
+
+- WireGuard allocates a single packet buffer for batched I/O, improving throughput and reducing memory usage.
+- WireGuard packet queue depth scales with CPU core count, reducing peak memory usage under heavy traffic.
+
+這一項沒有開關、自動生效，Linux 與 Android 在 v1.104 起受惠。它跟 [UDP GRO forwarding](/performance/udp-gro-forwarding/) 是不同的層次：GRO forwarding 是讓 kernel 別把大封包拆散，這篇的小封包緩衝是讓 Tailscale 別把小封包放大。
+
+## multi-queue：目前還在規劃，v1.104 沒有
+
+到 v1.104 為止，subnet router、app connector 與 exit node 把多條獨立串流的封包放進**單一、有序、單執行緒**的 pipeline。為什麼只能一條車道？因為接收端不能看到自己的封包亂序，得用「排成一列」來保證每條流內部的順序；結果是所有連線共用一條車道，多核心 CPU 也幫不上忙。
+
+官方規劃中的 multi-queue 是開成多條車道：每條流固定分配到一條 lane、各 lane 平行執行，工作就能分散到多個 CPU core。預期效果是更高的總吞吐、更低的收包到轉送的延遲，尤其 app connector 與 exit node 這類「很多使用者、大量短連線」的節點感受最明顯。
+
+重點是：**這項在 v1.104 尚未落地**。官方部落格明寫「Multi-queue ... is planned for a release after v1.104」，而 v1.104 原始碼裡也找不到對應的多通道實作，因此目前沒有任何旗標或 node attribute 可以開關它。寫作時（2026 年 10 月）它仍是「下半年陸續推出」的規劃中功能，之後的版本才看得到。
+
+## netmap caching：控制平面不通也能開機就通
+
+裝置啟動時，通常要先連控制平面認證、拿到「網路地圖」（netmap）——描述能連到哪些裝置、怎麼連。網路好時約 100ms，沒什麼感覺；但在飛機 Wi-Fi、飯店的嚴格過濾這類爛網路上，可能拖很久、甚至連不上，表現出來就是「開了 Tailscale 卻連不到其他裝置」。
+
+netmap caching 的做法是把 netmap 快取在磁碟上：啟動時先讀快取、直接和其他裝置建立連線，等到連得上控制平面再更新成最新版（這些連線仍是裝置間直連協商，Tailscale 照例看不到流量內容）。
+
+**開關是雙重條件，兩個都要滿足：**
+
+- 環境變數 `TS_USE_CACHED_NETMAP`：預設 `true`（v1.104 起），當作緊急時關閉的 override，設 `0` 就停用。
+- node attribute `cache-network-maps`：由控制平面決定要不要授權給這個節點。沒有這個 attribute，客戶端即使支援也會忽略並丟棄既有快取。
+
+另外有 `disable-cache-network-maps` 這個 attribute，優先於前者——讓 policy 文件可以明確「這個節點不給快取」，覆寫預設。也就是說「v1.104 預設開」指的是客戶端這側預設啟用，實際是否作用還是看控制平面有沒有授權，屬於逐步 rollout。
+
+**前置與限制**：裝置必須至少連過一次（拿過 netmap）才有東西可快取；要有持久磁碟空間放快取。超大 tailnet 更新快取時磁碟 I/O 較大，用 SD 卡這類磨損敏感儲存的裝置也不建議開。行動端（iOS／Android）要 v1.104 之後的版本才有。
+
+想清掉快取：`tailscale debug clear-netmap-cache`。官方部落格給的效果是：控制平面不好連的 tailnet，暖啟動（有快取）比冷啟動（無快取）快「一到兩個數量級」進入資料平面——注意這是針對「控制平面難以連上」的情境，不是所有啟動都變快。
+
+## 怎麼驗證
+
+**netmap caching**：先確認節點有被授權快取——`tailscale status --json | jq '.Self.CapMap["cache-network-maps"]'` 有值（非 null）就代表控制平面授權了。接著量冷／暖啟動的差別：
+
+```bash
+tailscale debug clear-netmap-cache   # 清掉快取，接著冷啟動
+# 記下開機後多久能用 tailscale ping 連到另一台裝置
+
+# 讓它正常連線一次（寫入快取），重啟後再量一次（暖啟動）
+```
+
+在控制平面連不上的環境（例如先擋掉對控制平面的連線）對照最明顯；網路很好的地方兩者差異不大，屬正常。
+
+**小封包緩衝**：沒有獨立開關，無法做「開／關」對照。真要驗證就是重流量下用 iperf3 對照前後版本的吞吐、或觀察記憶體峰值有無下降，但不容易把這一項因素單獨隔離出來。
+
+**multi-queue**：v1.104 還沒有，等它落地之後，對 subnet router／exit node 做**多條流並行**的吞吐測試（不是單一流）才看得出多通道的差異。
+
+## 常見問題
+
+- **升級到 v1.104 就會變快嗎？** 小封包緩衝（Linux／Android）會自動生效；netmap caching 只有在控制平面不好連時才明顯有感；multi-queue 還沒有。別期待換個版本吞吐就翻倍。
+- **怎麼知道我這台有沒有開 netmap caching？** 用 `tailscale status --json | jq '.Self.CapMap["cache-network-maps"]'` 看有沒有被授權；`TS_USE_CACHED_NETMAP=0` 可強制關閉，`tailscale debug clear-netmap-cache` 清快取。
+- **netmap caching 會洩漏 netmap 嗎？** 快取存在本機磁碟，內容等同於之前控制平面發給你的網路地圖；連線仍是裝置間直接協商，Tailscale 看不到流量。
+- **SD 卡跑 Raspberry Pi 當 subnet router，要開 netmap caching 嗎？** 不建議——頻繁寫入對 SD 卡壽命不友善，官方也特別點名磨損敏感儲存。桌面／一般 SSD 上則沒有這個顧慮。
+- **multi-queue 和 [UDP GRO forwarding](/performance/udp-gro-forwarding/) 有關係嗎？** 兩者都提升 subnet router／exit node 的轉送，但機制不同：GRO forwarding 是 kernel 端減少封包拆散，multi-queue 是 Tailscale 端平行處理；後者尚未落地。
+
+## 參考資料
+
+- [We're making Tailscale faster（官方部落格，2026-09-22）](https://tailscale.com/blog/making-tailscale-faster)
+- [Tailscale changelog](https://tailscale.com/changelog)
+- [Tailscale 原始碼：`ipn/ipnlocal/local.go`（TS_USE_CACHED_NETMAP 與快取寫入）](https://github.com/tailscale/tailscale/blob/main/ipn/ipnlocal/local.go)
+- [Tailscale 原始碼：`tailcfg/nodecap/nodecap.go`（cache-network-maps）](https://github.com/tailscale/tailscale/blob/main/tailcfg/nodecap/nodecap.go)
+- [Tailscale 原始碼：`ipn/ipnlocal/netmapcache`](https://github.com/tailscale/tailscale/blob/main/ipn/ipnlocal/netmapcache/netmapcache.go)
+- [UDP GRO forwarding：加速 Subnet Router 與 Exit Node 的 UDP 轉送](/performance/udp-gro-forwarding/)
+- [BBR：擁塞控制在 Tailscale 節點上的實際效果](/performance/bbr/)
