@@ -75,14 +75,14 @@ curl -X POST "https://api.tailscale.com/api/v2/tailnet/-/keys" \
   -d '{"capabilities":{"devices":{"create":{"reusable":false,"ephemeral":false,"preauthorized":true,"tags":["tag:ci"]}}}}'
 ```
 
-tag 一定要是建立 client 時選過的那些。官方也提供一個小工具 `get-authkey`，讀環境變數 `TS_API_CLIENT_ID`／`TS_API_CLIENT_SECRET`，直接吐一把 key 到 stdout：
+tag 要是建立 client 時選過的那些，或是由這些 tag 所 own 的其他 tag（需另外設定 tag ownership）。官方也提供一個小工具 `get-authkey`，讀環境變數 `TS_API_CLIENT_ID`／`TS_API_CLIENT_SECRET`，直接吐一把 key 到 stdout：
 
 ```bash
 export TS_API_CLIENT_ID=<clientID> TS_API_CLIENT_SECRET=<secret>
 go run tailscale.com/cmd/get-authkey@latest -tags tag:ci
 ```
 
-`-tags` 必填，另外可加 `-reusable`、`-ephemeral`、`-preauth`（`get-authkey` 需要 Go 1.23 以上）。
+`-tags` 必填，另外可加 `-reusable`、`-ephemeral`、`-preauth`（`get-authkey` 需要 Go 1.23 以上）。注意 `-preauth` 的預設是 `true`——不帶就會產生 pre-authorized key、跳過 device approval；這和下一節 `?preauthorized=`（預設 `false`）方向相反，有開 device approval 的 tailnet 要留意。
 
 ## 直接用 client secret 註冊節點
 
@@ -97,7 +97,7 @@ tailscale up --client-secret="${OAUTH_CLIENT_SECRET}?ephemeral=false&preauthoriz
 
 幾個重點：
 
-- client 要有 `auth_keys` scope，且 `--advertise-tags` **必填**，tag 要是建立 client 時選過的。原始碼會直接以「`oauth authkeys require --advertise-tags`」拒絕沒帶 tag 的用法。
+- client 要有 `auth_keys` scope，且 `--advertise-tags` **必填**，tag 要是建立 client 時選過的、或由這些 tag 所 own 的其他 tag。原始碼會直接以「`oauth authkeys require --advertise-tags`」拒絕沒帶 tag 的用法。
 - 用 client secret 加入的裝置**一定是 tag 身分**，不是某個使用者。
 - secret 後面可以接 URL 參數：`ephemeral`（離線後自動移除，預設 `true`）、`preauthorized`（有開 device approval 時免核准，預設 `false`）、`baseURL`（預設 `https://api.tailscale.com`）。伺服器要長期保留就設 `ephemeral=false`；有開 device approval 就設 `preauthorized=true`。
 
@@ -151,7 +151,7 @@ OAuth client secret 不像 webhook secret 有「原地 rotate」的按鈕。要�
 ```
 
 - 有開 [device approval](/admin/device-security/) 時，沒設 `preauthorized=true` 的節點都要等核准，多一層保險。
-- 外洩時：撤銷 client → 檢查 Machines 有沒有多出來的裝置 → 建立新 client 並更新程式。
+- 外洩時：撤銷 client → 到 configuration audit logs 查這個 client（以 client ID 為 actor）在洩漏期間用了哪些 API → 檢查 Machines 有沒有多出來的裝置 → 建立新 client 並更新程式。
 
 ## 常見問題
 
