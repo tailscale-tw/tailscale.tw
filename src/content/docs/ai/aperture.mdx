@@ -1,0 +1,103 @@
+---
+title: Aperture 是什麼：給個人與 homelab 的 AI gateway，還是企業工具？
+description: Aperture by Tailscale 的 GA 定位、token 購買、MCP 控制 tailnet、Aperture CLI 的 bridge mode、個人方案能不能用與費用，以及和自架 LiteLLM 的取捨比較
+sidebar:
+  order: 8
+  label: Aperture
+---
+
+Aperture by Tailscale 是 Tailscale 推出的 AI gateway：它把你的 LLM 流量集中到一個閘道上，用 Tailscale 的身分自動辨識「是誰在叫模型」，讓你和 agent 都不必再分發各家 API key。它在 2026 年 8 月 26 日 [正式 GA](https://tailscale.com/blog/aperture-ga)，官方這次的宣傳重點不是企業，而是「回到 Tailscale 的根源」——給個人與 homelab 玩家一個「it just works」的體驗。
+
+這篇講 Aperture 到底是什麼、個人免費方案能不能用、怎麼買 token、怎麼用它控制 tailnet，以及它和自架 LiteLLM 這類方案怎麼選。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件、部落格與 KB 整理，以 Tailscale v1.104 為準。Aperture 於 2026 年 8 月 26 日 GA；Aperture CLI 為 alpha（CLI 文件 2026-09-29 驗證）。價格與 token 數字查詢日期為 2026 年 10 月，以官方定價頁與 buy-tokens 頁為準。LiteLLM 的比較以其 2026 年 10 月查詢的官方文件為準（repo 最新 release **v1.104.2**，2026-10-08）。本文未實機操作 Aperture，屬文件整理。
+
+## 它是怎麼長出來的
+
+Aperture 起初是一個 [private alpha 的 LLM proxy](https://tailscale.com/blog/aperture-private-alpha)，目標很單純：**不要再把 API key 分發給工程師和 agent**。之後一路長成企業向的完整 AI gateway，加了 cost control、request／response hooks、guardrails、記錄、甚至 MCP 與 API proxy。
+
+到了 GA，Tailscale 明說要「回到根源」，回頭服務個人與 homelab 玩家。所以 GA 同時帶了三個新東西：**在 Aperture 內直接買 token**、**控制 tailnet 的 MCP**、以及**升級版的聊天介面**。定位上它同時是兩件事：企業的 AI governance 工具，以及個人的免分發 key 入口——這正是標題那個問題的答案：**它兩個都想做**。
+
+## 方案與價格：個人能不能用
+
+先講大家最在意的。Tailscale 的 tailnet 方案價（查詢日期 2026 年 10 月，官方定價頁）：
+
+| 方案       | 價格            | 對象              |
+| ---------- | --------------- | ----------------- |
+| Personal   | $0（免費）      | 個人、homelab     |
+| Standard   | $8／使用者／月  | 中小團隊          |
+| Premium    | $18／使用者／月 | 進階合規、AI 安全 |
+| Enterprise | 洽業務          | 大型企業          |
+
+至於 Aperture **本身**，官方定價頁把它歸在「Platform extension」下、沒有單獨列出「Aperture 每使用者費用」的數字（只標「See platform extensions」）。就「能不能用」而言，官方 get-started 是這樣寫的：
+
+- 到 aperture.tailscale.com 完成註冊；沒有 Tailscale 帳號的話，註冊流程會順便建立一個**免費**帳號。
+- 「You can purchase tokens directly within Aperture. To use your own API keys with Aperture on a plan other than the personal Tailscale plan, contact sales.」——也就是 **Personal（免費）方案就能用**，token 直接買；要用「自己的 API key」在 Personal 上可以直接用，**非 Personal 方案則要洽業務**。
+
+有一點要誠實標註：官方定價頁的 FAQ 另外寫著「Platform Extensions 目前需洽業務、自助式近期才會開放」。這句和 get-started 的「免費註冊」並陳時略有出入，本文以較具體的 get-started 與 GA 部落格（明說給個人與 homelab、可立即加入）為準，實際以 aperture.tailscale.com 註冊頁當下的流程為準。
+
+順帶一提：官方定價 FAQ 也寫「Tailscale 與 Aperture 合作得很好，但 Aperture 也可以當 standalone 產品用」——所以「完全沒有 tailnet 能不能只用 Aperture」的答案是**可以**。不過本文主軸是把它放在 tailnet 裡的用法，standalone 的細節以官方 FAQ 為準。
+
+## token 購買
+
+GA 讓 Aperture 免掉「先有第三方 API key 或自架模型」的門檻：**每個新 Aperture 實例附一些初始 token，也可以直接在 Aperture 內為各家主要模型（開源權重與閉源都有）加購 token**。這樣你不必先去 Anthropic／OpenAI／Google 各開一個帳號，就能開始用。
+
+官方 [buy-tokens 頁](https://tailscale.com/docs/aperture/buy-tokens-through-aperture)（2026-09-28 驗證）的具體數字（查詢日期 2026 年 10 月）：
+
+- 每個使用者起始附 **$1** 的 token，可以立刻測試。
+- 單次購買**最低 $10、最高 $25**。
+- 支援付款的地區：US、CA、歐盟成員國、GB、CH、NO、AU、NZ、SG、TW、JP。
+- 可設 auto top-up（餘額低於門檻自動加值）。
+
+有一點新手容易誤會：**新 gateway 的 Chat 預設只開 `openai/gpt-5.6-luna` 一個模型**，要完成第一次 token 購買之後，Aperture 才會解鎖更多可用的模型。所以只註冊、還沒買過 token 時，在 gateway 只看到一個模型是正常的，不是設定錯。
+
+要不要買 token 是選項，不是必備：你也可以帶自己的 provider key 或訂閱（Claude Pro、ChatGPT Plus 等透過 passthrough 模式）。Aperture 會依模型用量扣 token，成本估算可在 dashboard 看到。**token 本身的加價幅度官方沒有在公開頁列出**，實際以購買頁為準。
+
+## 用 MCP 控制 tailnet
+
+GA 的 MCP 是這次對 homelab 玩家最有意思的部分：官方加了兩個 MCP 端點——**Tailnet** 與 **Tailscale SSH**，讓 Aperture（以及走它的 coding agent）可以：
+
+- 把新節點加進你的 tailnet（例如讓 agent 部署一個服務到某台機器）。
+- 透過 [Tailscale SSH](/features/tailscale-ssh/) 存取 tailnet 上的機器。
+
+三個把關機制：Tailscale 的單向存取規則（grants）照樣生效；**每台要加入的機器都要你核准**；所有動作都有 audit log。也就是說 agent 不能為所欲為，你控制得了它能連到哪、加了什麼。MCP server 放在 tailnet 的完整做法，見 [把 MCP server 放在 tailnet](/ai/mcp-over-tailscale/)。
+
+## Aperture CLI 與 bridge mode
+
+[Aperture CLI](https://tailscale.com/docs/aperture/cli)（alpha，`github.com/tailscale/aperture-cli`）是一支終端工具，幫你設定並啟動 coding agent 走 Aperture gateway——自動處理環境變數、設定檔、provider 類型，不用手動改一堆設定。它支援的 agent：**Claude Code、Gemini CLI、GitHub Copilot、OpenCode、OpenAI Codex、Claude Cowork（Claude Desktop）、Pi、Oh My Pi、Hermes Agent**。安裝用 `go install github.com/tailscale/aperture-cli/cmd/aperture@latest`（需要 Go 1.26.6+）。
+
+其中 **bridge mode** 解決「機器上沒裝 Tailscale daemon」的情境：在 CI runner、容器、或任何你不想跑 `tailscaled` 的環境，bridge 給 CLI 一個獨立的 Tailscale 身分去連 Aperture，coding agent 經 bridge 連線，不必整台機器都裝 Tailscale。第一次連線要 Tailscale 認證，之後會存下 state 重複使用。反之機器上已有 Tailscale，就直接用 direct 端點，不用 bridge。
+
+## 和自架 LiteLLM 怎麼選
+
+[LiteLLM](https://docs.litellm.ai/)（開源，核心 MIT）是自架的 AI gateway：一個 endpoint 介接 100+ LLM provider，加上 virtual key、budget、cost 記錄、MCP gateway、agent gateway 等。它和 Aperture 的差別本質上是**託管 vs 自架**，以及**要不要分發 key**：
+
+|               | Aperture by Tailscale                         | 自架 LiteLLM                                  |
+| ------------- | --------------------------------------------- | --------------------------------------------- |
+| 部署方式      | Tailscale 託管，綁你的 tailnet 身分           | 自己用 Docker／K8s 跑                         |
+| 憑證          | Tailscale 身分自動辨識，不用分發 key          | virtual key，provider key 仍要在 gateway 端管 |
+| provider 廣度 | 主流（OpenAI、Anthropic、Gemini、Bedrock 等） | 100+，廣得多                                  |
+| 買 token      | 內建，直接買                                  | 無，自帶 provider key                         |
+| 開源          | gateway 非開源；CLI 開源                      | 核心 MIT 開源，Enterprise 付費加 SSO／audit   |
+| 維運          | 不用管                                        | 自己負責部署、升級、監控                      |
+
+選哪個通常看兩點：**想不想自己養一台 gateway**，以及**你重不重視 Tailscale 身分整合**。Aperture 的價值是「跟 Tailscale 身分綁在一起、開箱即用」，特別適合已經活在 tailnet 裡的人；LiteLLM 的價值是「自主可控、provider 廣、核心開源」，代價是你得自己部署營運，且它不會自動認得 tailnet 身分。兩者都可以把你家裡的本地模型接進來——後者接自架模型的做法見 [在外面用家裡的 Ollama／LM Studio／Open WebUI](/ai/local-llm-remote/)。
+
+本文不做效能或價格高下的斷言：那類比較需要實測與當時的定價數字，超出文件整理的範圍。
+
+## 小結
+
+Aperture 給的答案是「**兩者皆是**」：它確實是給個人與 homelab 的 AI gateway（免費註冊、內建買 token、MCP 控制 tailnet），同時也是企業的 AI governance 平台（cost control、hooks、guardrails、記錄與 session 錄影）。如果你是 Tailscale 重度使用者、不想再分發 API key，Aperture 是最省事的路；如果你要自主可控、廣度優先、也願意自己營運，自架 LiteLLM 這類方案才對味。要不要買 token、用哪種方案，都以當下的官方頁為準。
+
+## 參考資料
+
+- [Aperture GA: Building a home(lab) for agentic AI（官方部落格）](https://tailscale.com/blog/aperture-ga)
+- [What is Aperture?（官方文件）](https://tailscale.com/docs/aperture/what-is-aperture)
+- [Get started with Aperture（官方文件）](https://tailscale.com/docs/aperture/get-started)
+- [Buy tokens through Aperture（官方文件）](https://tailscale.com/docs/aperture/buy-tokens-through-aperture)
+- [Aperture CLI（官方文件）](https://tailscale.com/docs/aperture/cli)
+- [Aperture CLI（GitHub）](https://github.com/tailscale/aperture-cli)
+- [Tailscale 定價（官方）](https://tailscale.com/pricing)
+- [LiteLLM 官方文件](https://docs.litellm.ai/)
+- [把 MCP server 放在 tailnet：Serve、bearer token 與 tsidp](/ai/mcp-over-tailscale/)
+- [在外面用家裡的 Ollama／LM Studio／Open WebUI](/ai/local-llm-remote/)
