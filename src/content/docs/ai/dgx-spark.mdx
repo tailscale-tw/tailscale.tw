@@ -1,0 +1,160 @@
+---
+title: DGX Spark／華碩 Ascent GX10 用 Tailscale 遠端存取
+description: 依 NVIDIA 官方 DGX Spark Tailscale playbook 改寫：在 DGX Spark／華碩 Ascent GX10 上裝 Tailscale、用 Tailscale SSH 連線、以 Serve 發布 Jupyter 與 Open WebUI（注意綁定位址），以及 tag 與最小權限 grants
+sidebar:
+  order: 9
+  label: DGX Spark／Ascent GX10
+---
+
+NVIDIA DGX Spark 是一台「個人 AI 超級電腦」：GB10 Grace Blackwell 超級晶片、128 GB 統一記憶體、最高約 1 PFLOP（FP4）的 AI 運算，大小只有一台 mini PC。華碩 Ascent GX10 是基於同一套 DGX Spark 平台的 OEM 機種。這種機器最常見的用法是放在家裡或辦公室，跑本地模型微調與推論，出門時接回去用——Tailscale 正好做這件事。
+
+這篇以 NVIDIA 官方的 [DGX Spark Tailscale playbook](https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/tailscale) 為底改寫成繁中，不是逐字翻譯；另外補上 playbook 沒有、但實際上更有用的三件事：Tailscale SSH、Serve 發布 Jupyter／Open WebUI、以及 tag 與最小權限 grants。
+
+> 本文以 NVIDIA 官方 DGX Spark Tailscale playbook（github.com/NVIDIA/dgx-spark-playbooks/nvidia/tailscale，2025-11-07 更新）為底改寫，以 Tailscale v1.104 與 NVIDIA DGX Spark／DGX OS 官方資料為準；華碩 Ascent GX10 的差異以 ASUS 官方產品頁與 FAQ 為準。本文未持有 DGX Spark／Ascent GX10，屬文件整理。
+
+## 這台機器是什麼
+
+DGX Spark 與華碩 Ascent GX10 用的是同一顆 NVIDIA GB10 Grace Blackwell 超級晶片：20 核 Arm CPU + Blackwell GPU、128 GB LPDDR5x 統一記憶體、NVLink-C2C 互連，並內建 ConnectX-7 網路卡（可再串一台跑更大的模型）。出廠預載 **NVIDIA DGX OS**（以 Ubuntu 為基礎，預載 CUDA、PyTorch、TensorFlow、Jupyter、NIM 等）。這些機器跑的就是 Ubuntu 生態，所以 Tailscale 的 Linux 安裝流程直接適用。
+
+## 安裝 Tailscale（依 playbook）
+
+NVIDIA playbook 的做法是在 DGX Spark 上用官方 apt repository 裝。先確認基本條件，再裝 SSH server（Tailscale 只負責網路，遠端登入還是要靠 SSH）：
+
+```bash
+lsb_release -a          # 確認是 Ubuntu 系（playbook 要求 20.04+，repo 用 24.04「noble」）
+ping -c 3 google.com    # 確認能連外
+sudo whoami             # 確認有 sudo
+
+sudo apt update
+sudo apt install -y openssh-server
+sudo systemctl enable ssh --now
+```
+
+接著加入 Tailscale 的 apt repository 並安裝：
+
+```bash
+sudo apt install -y curl gnupg
+curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/noble.noarmor.gpg | \
+  sudo tee /usr/share/keyrings/tailscale-archive-keyring.gpg > /dev/null
+curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/noble.tailscale-keyring.list | \
+  sudo tee /etc/apt/sources.list.d/tailscale.list
+sudo apt update
+sudo apt install -y tailscale
+```
+
+playbook 用的是手動加 apt repo 的方式（指定 Ubuntu 24.04「noble」）。Tailscale 官方的 Linux 安裝也可以直接一行搞定，會自動偵測發行版：
+
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+```
+
+兩者效果一樣，選哪個都行。裝完確認：
+
+```bash
+tailscale version
+sudo systemctl status tailscaled --no-pager
+```
+
+## 登入 tailnet 與 SSH 連線
+
+在 DGX Spark 上登入：
+
+```bash
+sudo tailscale up   # 照跳出的網址在瀏覽器登入（Google、GitHub、Microsoft 等）
+```
+
+接著在筆電／手機上也裝 Tailscale、用**同一個帳號**登入，讓兩台進同一個 tailnet。之後就能用 Tailscale 主機名稱 SSH 進去（playbook 建議另外用 SSH key，不要用密碼）：
+
+```bash
+ssh -i ~/.ssh/tailscale_spark <使用者>@<spark-主機名稱>
+ssh -i ~/.ssh/tailscale_spark <使用者>@<spark-主機名稱> 'nvidia-smi'   # 驗證
+```
+
+`tailscale status`、`tailscale ping <主機名稱>` 可以用來確認兩台都 online、走直連還是中繼。直連與 DERP 的判讀見 [直連與 DERP 的差異](/troubleshooting/direct-vs-derp/)。
+
+## 更省事：直接用 Tailscale SSH
+
+playbook 用傳統 SSH（自己產 key、自己塞 `authorized_keys`）。如果你不想要這套 key 管理，可以直接開 [Tailscale SSH](/features/tailscale-ssh/)：它用 Tailscale 身分做登入驗證，不必分發或保管 SSH key。
+
+```bash
+sudo tailscale set --ssh          # 在 DGX Spark 上開 Tailscale SSH
+ssh <使用者>@<spark-主機名稱>     # 之後直接 SSH，不用 key
+```
+
+Tailscale SSH 的好處是權限跟著 Tailscale 身分與 grants 走（誰能 SSH 到哪台、用哪個帳號，都在 policy 裡管），key 輪替、key 外洩這類問題直接消失。設定細節見 [Tailscale SSH](/features/tailscale-ssh/)。
+
+## 用 Serve 發布 Jupyter 與 Open WebUI
+
+SSH 之外，你也可以用 [Tailscale Serve](/features/serve/) 把 Jupyter 或 Open WebUI 直接以 HTTPS 發布到 tailnet，只用瀏覽器就開得了，不必每次 SSH tunnel。
+
+### Jupyter
+
+DGX Spark 的 JupyterLab 由 DGX Dashboard 服務管理（預設在 localhost 的 1102 埠，dashboard 本身是 11000）。要用 Serve 發布，把 Serve 指到本機的 Jupyter 埠：
+
+```bash
+tailscale serve --bg http://127.0.0.1:1102
+```
+
+之後 tailnet 內開 `https://<spark-主機名稱>.<tailnet>.ts.net` 就會到 JupyterLab。注意兩點：Serve 的反向代理固定轉給 `http://127.0.0.1`，所以後端要聽在 IPv4 的 loopback；而且 Serve 只做「HTTPS + 只對 tailnet」，**不幫你登入**——Jupyter 記得要設 token 或密碼，否則 tailnet 上誰都能開你的 notebook。
+
+### Open WebUI
+
+Open WebUI 常拿來接 DGX Spark 上跑的本地模型（Ollama 等）。它預設綁 `0.0.0.0:8080`，這等於開給整個網路，要改綁 loopback 再交給 Serve：
+
+```bash
+tailscale serve --bg http://127.0.0.1:8080
+```
+
+Open WebUI 綁定位址、只開 tailnet、以及它讀 `Tailscale-User-Login` 做 SSO 的細節，見 [在外面用家裡的 Ollama／LM Studio／Open WebUI](/ai/local-llm-remote/)。Serve 的完整用法與「為什麼後端要只聽 loopback」見 [Tailscale Serve](/features/serve/) 與 [Serve 的身分標頭](/features/serve-identity-headers/)。
+
+## tag 與最小權限 grants
+
+DGX Spark 是常駐的伺服器，該給它 **tag 身分**（不是某個使用者的身分），再寫 grants 限制誰能連。假設 tag 是 `tag:spark`，只有你和它能連進來：
+
+```json
+"tagOwners": {
+  "tag:spark": ["autogroup:admin"],
+},
+"grants": [
+  // 只有你自己能 SSH 到 DGX Spark
+  {
+    "src": ["autogroup:admin"],
+    "dst": ["tag:spark"],
+    "ip": ["tcp:22", "tcp:443"],
+  },
+],
+```
+
+- 打上 tag 後，DGX Spark 不再綁某個人，人員異動也不會把它踢出 tailnet（見 [Tags 與 auth key](/admin/tags-auth-keys/)）。
+- `src` 用 `autogroup:admin` 表示管理員；要「只開給自己」就換成你自己的帳號 email。
+- Jupyter／Open WebUI 走 Serve 的 443，SSH（含 Tailscale SSH）走 22；**後端原始埠（1102、8080）不要寫進 grants**，tailnet 上就沒人能直連。
+- 確認 policy 沒有殘留的 `"*"` 到 `"*"` 全開規則，否則上面的限制形同虛設。規則寫法見 [ACL / Grants 入門](/admin/acl-grants/)。
+
+## 華碩 Ascent GX10 的差異
+
+華碩 Ascent GX10 與 DGX Spark 是同一平台，所以上面整套（含 playbook）**直接適用**。以 ASUS 官方產品頁與 FAQ 核對，幾點差異／補充：
+
+- 硬體同一顆 GB10：20 核 Arm CPU + Blackwell GPU、128 GB 統一記憶體、1 PFLOP（FP4）、ConnectX-7（2×QSFP 200Gb/s）、10 GbE、HDMI 2.1b、1TB／2TB／4TB SSD。
+- 出廠一樣預載 DGX OS（Ubuntu 為基礎）；ASUS FAQ 明說 **DGX OS 是唯一測試並建議的作業系統**（「只支援 DGX OS」）。
+- 關於「出廠是哪個版本的 DGX OS」，ASUS FAQ 的答案是「版本尚未定案（產品仍在開發中）」——所以**本文不寫具體 DGX OS 版本號**，以出貨當下的版本為準。
+- 尺寸約 150×150×51 mm，峰值功耗 240 W（GB10 TDP 140 W）。
+
+除此之外，ASUS 官方資料沒有列出會影響 Tailscale 安裝的硬體差異；如果後續官方文件補充了作業系統或網路卡的特定限制，以那時的文件為準。
+
+## 小結
+
+DGX Spark／Ascent GX10 就是一台上好 DGX OS（Ubuntu 系）的小電腦，Tailscale 裝法與一般 Linux 完全一樣。playbook 給了「apt repo 安裝 + SSH key」的起點；要更省事，補上 Tailscale SSH、Serve 發布 Jupyter／Open WebUI，再記得打 tag、寫最小權限 grants，這台個人 AI 超級電腦就能安全地隨時接回家用。
+
+## 參考資料
+
+- [Set up Tailscale on Your Spark（NVIDIA DGX Spark playbook）](https://github.com/NVIDIA/dgx-spark-playbooks/tree/main/nvidia/tailscale)
+- [DGX Spark User Guide（NVIDIA）](https://docs.nvidia.com/dgx/dgx-spark/)
+- [ASUS Ascent GX10（產品頁）](https://www.asus.com/networking-iot-servers/desktop-ai-supercomputer/ultra-small-ai-supercomputers/asus-ascent-gx10/)
+- [ASUS Ascent GX10 FAQ（官方支援）](https://www.asus.com/support/faq/1056142)
+- [Install Tailscale on Linux（官方）](https://tailscale.com/kb/1031/install-linux)
+- [Tailscale SSH：用 tailnet 身分登入伺服器](/features/tailscale-ssh/)
+- [Tailscale Serve：在 tailnet 內分享本機服務](/features/serve/)
+- [Serve 的身分標頭：讓自架服務直接認得 tailnet 使用者](/features/serve-identity-headers/)
+- [在外面用家裡的 Ollama／LM Studio／Open WebUI](/ai/local-llm-remote/)
+- [Tags 與 auth key：給伺服器用的非互動登入](/admin/tags-auth-keys/)
+- [ACL / Grants 入門](/admin/acl-grants/)
