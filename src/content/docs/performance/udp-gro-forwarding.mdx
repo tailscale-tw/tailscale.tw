@@ -169,6 +169,7 @@ ExecMainStatus=0
 - **雲端 VM 上從來沒看過警告？** 虛擬網卡或 TUN 不支援這些 offload 時，檢查會直接略過、不會有警告——這時也沒有可設的東西，不用理會。
 - **需要重啟 tailscaled 嗎？** 不用，`ethtool` 的修改即時生效；重跑 `tailscale up` 只是為了讓它再檢查一次。
 - **和 BBR 有關係嗎？** 沒有。UDP GRO forwarding 加速的是**轉送**的 UDP；BBR 是 TCP 擁塞控制，只影響本機發起或終止的連線，見[下一篇](/performance/bbr/)。
+- **想量設定前後的差異？** 用 iperf3 量 UDP 吞吐，記得先確認直連／DERP 並控制 datagram 大小（MTU 1280），方法見〈[用 iperf3 量 Tailscale 吞吐量的正確方法](/performance/iperf-methodology/)〉。
 
 ## 參考資料
 
