@@ -15,7 +15,7 @@ sidebar:
 | 升級           | 作用                                                   | v1.104                             | 平台                            |
 | -------------- | ------------------------------------------------------ | ---------------------------------- | ------------------------------- |
 | 小封包緩衝     | 減少封包拷貝、降低記憶體用量                           | 有，自動生效                       | Linux／Android                  |
-| multi-queue    | subnet router／app connector／exit node 多通道平行處理 | 沒有，v1.104 之後                  | Linux（規劃）                   |
+| multi-queue    | subnet router／app connector／exit node 多通道平行處理 | 沒有，v1.104 之後                  | 官方未明寫                      |
 | netmap caching | 控制平面不通時用磁碟快取加速啟動                       | 有，預設開、受 node attribute 控管 | 桌面端（Linux／Windows／macOS） |
 
 ## 小封包緩衝：64 KiB 的浪費
@@ -27,7 +27,7 @@ v1.104 的改法是「就地處理」：封包落在哪個大緩衝裡，就直�
 - WireGuard allocates a single packet buffer for batched I/O, improving throughput and reducing memory usage.
 - WireGuard packet queue depth scales with CPU core count, reducing peak memory usage under heavy traffic.
 
-這一項沒有開關、自動生效，Linux 與 Android 在 v1.104 起受惠。它跟 [UDP GRO forwarding](/performance/udp-gro-forwarding/) 是不同的層次：GRO forwarding 是讓 kernel 別把大封包拆散，這篇的小封包緩衝是讓 Tailscale 別把小封包放大。
+這一項沒有開關、自動生效：單一封包 buffer 那條是 Linux 與 Android 在 v1.104 起受惠，「佇列深度依 CPU 核心數」那條官方 changelog 則歸在 All Platforms。它跟 [UDP GRO forwarding](/performance/udp-gro-forwarding/) 是不同的層次：GRO forwarding 是讓 kernel 別把大封包拆散，這篇的小封包緩衝是讓 Tailscale 別把小封包放大。同篇部落格還有一項利用 Linux `writev` 的吞吐增益（2026 春季已部分實作、其餘規劃在 v1.104 之後），本文不展開。
 
 ## multi-queue：目前還在規劃，v1.104 沒有
 
@@ -50,13 +50,13 @@ netmap caching 的做法是把 netmap 快取在磁碟上：啟動時先讀快取
 
 另外有 `disable-cache-network-maps` 這個 attribute，優先於前者——讓 policy 文件可以明確「這個節點不給快取」，覆寫預設。也就是說「v1.104 預設開」指的是客戶端這側預設啟用，實際是否作用還是看控制平面有沒有授權，屬於逐步 rollout。
 
-**前置與限制**：裝置必須至少連過一次（拿過 netmap）才有東西可快取；要有持久磁碟空間放快取。超大 tailnet 更新快取時磁碟 I/O 較大，用 SD 卡這類磨損敏感儲存的裝置也不建議開。行動端（iOS／Android）要 v1.104 之後的版本才有。
+**前置與限制**：裝置必須至少連過一次（拿過 netmap）才有東西可快取；要有持久磁碟空間放快取。超大 tailnet 更新快取時磁碟 I/O 較大，用 SD 卡這類磨損敏感儲存的裝置也不建議開。還有幾點：**ephemeral 節點一律不支援**（不管 policy 怎麼設）；從快取狀態**連不到快取建立後才加入的新 peer**，要等控制平面更新快取；node key 過期也會讓快取連線失效。行動端（iOS／Android）要 v1.104 之後的版本才有。
 
 想清掉快取：`tailscale debug clear-netmap-cache`。官方部落格給的效果是：控制平面不好連的 tailnet，暖啟動（有快取）比冷啟動（無快取）快「一到兩個數量級」進入資料平面——注意這是針對「控制平面難以連上」的情境，不是所有啟動都變快。
 
 ## 怎麼驗證
 
-**netmap caching**：先確認節點有被授權快取——`tailscale status --json | jq '.Self.CapMap["cache-network-maps"]'` 有值（非 null）就代表控制平面授權了。接著量冷／暖啟動的差別：
+**netmap caching**：先確認節點有被授權快取——`tailscale status --json | jq '.Self.CapMap|has("cache-network-maps")'` 回傳 `true` 就代表控制平面授權了。接著量冷／暖啟動的差別：
 
 ```bash
 tailscale debug clear-netmap-cache   # 清掉快取，接著冷啟動
@@ -74,7 +74,7 @@ tailscale debug clear-netmap-cache   # 清掉快取，接著冷啟動
 ## 常見問題
 
 - **升級到 v1.104 就會變快嗎？** 小封包緩衝（Linux／Android）會自動生效；netmap caching 只有在控制平面不好連時才明顯有感；multi-queue 還沒有。別期待換個版本吞吐就翻倍。
-- **怎麼知道我這台有沒有開 netmap caching？** 用 `tailscale status --json | jq '.Self.CapMap["cache-network-maps"]'` 看有沒有被授權；`TS_USE_CACHED_NETMAP=0` 可強制關閉，`tailscale debug clear-netmap-cache` 清快取。
+- **怎麼知道我這台有沒有開 netmap caching？** 用 `tailscale status --json | jq '.Self.CapMap|has("cache-network-maps")'` 看有沒有被授權；`TS_USE_CACHED_NETMAP=0` 可強制關閉，`tailscale debug clear-netmap-cache` 清快取。
 - **netmap caching 會洩漏 netmap 嗎？** 快取存在本機磁碟，內容等同於之前控制平面發給你的網路地圖；連線仍是裝置間直接協商，Tailscale 看不到流量。
 - **SD 卡跑 Raspberry Pi 當 subnet router，要開 netmap caching 嗎？** 不建議——頻繁寫入對 SD 卡壽命不友善，官方也特別點名磨損敏感儲存。桌面／一般 SSD 上則沒有這個顧慮。
 - **multi-queue 和 [UDP GRO forwarding](/performance/udp-gro-forwarding/) 有關係嗎？** 兩者都提升 subnet router／exit node 的轉送，但機制不同：GRO forwarding 是 kernel 端減少封包拆散，multi-queue 是 Tailscale 端平行處理；後者尚未落地。
@@ -83,6 +83,7 @@ tailscale debug clear-netmap-cache   # 清掉快取，接著冷啟動
 
 - [We're making Tailscale faster（官方部落格，2026-09-22）](https://tailscale.com/blog/making-tailscale-faster)
 - [Tailscale changelog](https://tailscale.com/changelog)
+- [Client-side netmap caching（官方參考文件）](https://tailscale.com/docs/reference/client-side-netmap-caching)
 - [Tailscale 原始碼：`ipn/ipnlocal/local.go`（TS_USE_CACHED_NETMAP 與快取寫入）](https://github.com/tailscale/tailscale/blob/main/ipn/ipnlocal/local.go)
 - [Tailscale 原始碼：`tailcfg/nodecap/nodecap.go`（cache-network-maps）](https://github.com/tailscale/tailscale/blob/main/tailcfg/nodecap/nodecap.go)
 - [Tailscale 原始碼：`ipn/ipnlocal/netmapcache`](https://github.com/tailscale/tailscale/blob/main/ipn/ipnlocal/netmapcache/netmapcache.go)
