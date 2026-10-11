@@ -37,6 +37,8 @@ action 的輸入都定義在 `action.yml`，比較常用的是：
 
 注意 `oauth-client-id` 一個欄位同時扛兩種用途：走 OAuth client 時放 client ID，走 workload identity federation 時放 federated identity 的 client ID。差別在第二個欄位——OAuth client 用 `oauth-secret`，federated identity 用 `audience`。
 
+`tags` 的比對不只「完全相同」：指定的 tag 可以等於 trust credential 上的 tag，也可以是 credential 的 tag 所 own 的其他 tag（README 的 Troubleshooting）。若遇到 `requested tags [tag:...] are invalid or not permitted`，多半是 credential 沒有 `auth_keys` scope、或 tag 不符合這條規則。
+
 ## 三種認證方式
 
 ### 方式一：OAuth client（最常用）
@@ -122,6 +124,7 @@ jobs:
 
 - GitHub 代管 runner 每次都是乾淨的 VM，跑完就丟；self-hosted runner 是**持續存在**的機器，跑完 workflow 後 action 只會停掉 Tailscale 背景程序、把二進位檔留在機器上，不會整台重置。
 - 代管 runner 節點 ephemeral、離線即移除；self-hosted runner 若不特別處理，可能以 tag 身分一直掛在 tailnet 上，等於一台常駐的 CI 機器——權限要另做考量。
+- **runner 映像檔版本**：action 以 `node24` 發布（`action.yml` 的 `runs.using`），README 要求 runner image >= 2.237.1 才能跑 Node.js 24。GitHub 代管 runner 會自動更新，最常踩到這點的是 self-hosted runner——版本太舊要先升級 runner 映像檔。
 - 官方文件對「self-hosted runner 持續存在的差異」講得不多，部署前以當時的 [action README](https://github.com/tailscale/github-action) 為準。
 
 ## 小結
