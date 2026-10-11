@@ -10,7 +10,7 @@ Aperture by Tailscale 是 Tailscale 推出的 AI gateway：它把你的 LLM 流�
 
 這篇講 Aperture 到底是什麼、個人免費方案能不能用、怎麼買 token、怎麼用它控制 tailnet，以及它和自架 LiteLLM 這類方案怎麼選。
 
-> 本文依 2026 年 10 月的 Tailscale 官方文件、部落格與 KB 整理，以 Tailscale v1.104 為準。Aperture 於 2026 年 8 月 26 日 GA；Aperture CLI 為 alpha（CLI 文件 2026-09-29 驗證）。價格與 token 數字查詢日期為 2026 年 10 月，以官方定價頁與 buy-tokens 頁為準。LiteLLM 的比較以其官方文件為準。本文未實機操作 Aperture，屬文件整理。
+> 本文依 2026 年 10 月的 Tailscale 官方文件、部落格與 KB 整理，以 Tailscale v1.104 為準。Aperture 於 2026 年 8 月 26 日 GA；Aperture CLI 為 alpha（CLI 文件 2026-09-29 驗證）。價格與 token 數字查詢日期為 2026 年 10 月，以官方定價頁與 buy-tokens 頁為準。LiteLLM 的比較以其 2026 年 10 月查詢的官方文件為準（repo 最新 release **v1.104.2**，2026-10-08）。本文未實機操作 Aperture，屬文件整理。
 
 ## 它是怎麼長出來的
 
@@ -36,16 +36,20 @@ Aperture 起初是一個 [private alpha 的 LLM proxy](https://tailscale.com/blo
 
 有一點要誠實標註：官方定價頁的 FAQ 另外寫著「Platform Extensions 目前需洽業務、自助式近期才會開放」。這句和 get-started 的「免費註冊」並陳時略有出入，本文以較具體的 get-started 與 GA 部落格（明說給個人與 homelab、可立即加入）為準，實際以 aperture.tailscale.com 註冊頁當下的流程為準。
 
+順帶一提：官方定價 FAQ 也寫「Tailscale 與 Aperture 合作得很好，但 Aperture 也可以當 standalone 產品用」——所以「完全沒有 tailnet 能不能只用 Aperture」的答案是**可以**。不過本文主軸是把它放在 tailnet 裡的用法，standalone 的細節以官方 FAQ 為準。
+
 ## token 購買
 
 GA 讓 Aperture 免掉「先有第三方 API key 或自架模型」的門檻：**每個新 Aperture 實例附一些初始 token，也可以直接在 Aperture 內為各家主要模型（開源權重與閉源都有）加購 token**。這樣你不必先去 Anthropic／OpenAI／Google 各開一個帳號，就能開始用。
 
-官方 [buy-tokens 頁](https://tailscale.com/docs/aperture/buy-tokens-through-aperture)（2026-08-20 驗證）的具體數字（查詢日期 2026 年 10 月）：
+官方 [buy-tokens 頁](https://tailscale.com/docs/aperture/buy-tokens-through-aperture)（2026-09-28 驗證）的具體數字（查詢日期 2026 年 10 月）：
 
 - 每個使用者起始附 **$1** 的 token，可以立刻測試。
 - 單次購買**最低 $10、最高 $25**。
 - 支援付款的地區：US、CA、歐盟成員國、GB、CH、NO、AU、NZ、SG、TW、JP。
 - 可設 auto top-up（餘額低於門檻自動加值）。
+
+有一點新手容易誤會：**新 gateway 的 Chat 預設只開 `openai/gpt-5.6-luna` 一個模型**，要完成第一次 token 購買之後，Aperture 才會解鎖更多可用的模型。所以只註冊、還沒買過 token 時，在 gateway 只看到一個模型是正常的，不是設定錯。
 
 要不要買 token 是選項，不是必備：你也可以帶自己的 provider key 或訂閱（Claude Pro、ChatGPT Plus 等透過 passthrough 模式）。Aperture 會依模型用量扣 token，成本估算可在 dashboard 看到。**token 本身的加價幅度官方沒有在公開頁列出**，實際以購買頁為準。
 
@@ -83,7 +87,7 @@ GA 的 MCP 是這次對 homelab 玩家最有意思的部分：官方加了兩個
 
 ## 小結
 
-Aperture 給的答案是「**兩者皆是**」：它確實是給個人與 homelab 的 AI gateway（免費註冊、內建買 token、MCP 控制 tailnet），同時也是企業的 AI governance 平台（cost control、hooks、guardrails、記錄、SSO）。如果你是 Tailscale 重度使用者、不想再分發 API key，Aperture 是最省事的路；如果你要自主可控、廣度優先、也願意自己營運，自架 LiteLLM 這類方案才對味。要不要買 token、用哪種方案，都以當下的官方頁為準。
+Aperture 給的答案是「**兩者皆是**」：它確實是給個人與 homelab 的 AI gateway（免費註冊、內建買 token、MCP 控制 tailnet），同時也是企業的 AI governance 平台（cost control、hooks、guardrails、記錄與 session 錄影）。如果你是 Tailscale 重度使用者、不想再分發 API key，Aperture 是最省事的路；如果你要自主可控、廣度優先、也願意自己營運，自架 LiteLLM 這類方案才對味。要不要買 token、用哪種方案，都以當下的官方頁為準。
 
 ## 參考資料
 
