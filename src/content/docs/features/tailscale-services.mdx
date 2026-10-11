@@ -1,0 +1,222 @@
+---
+title: Tailscale Services：一個名稱、一個 TailVIP、多台後端
+description: 用 Tailscale Services 把資料庫、網站這類內部資源發布成 tailnet 上的邏輯服務，以固定的 MagicDNS 名稱與 TailVIP 連線，背後接一台或多台 tag 身分的後端主機，自動容錯。說明 Service host、svc 名稱與 tag、ACL／grants、自動核准，以及與 Serve、Subnet Router 的差異
+sidebar:
+  order: 2.5
+  label: Tailscale Services
+---
+
+要開放資料庫、網站這類內部資源給 tailnet 使用時，傳統做法是「連到某一台跑著這個服務的機器」，用它的 MagicDNS 名稱或 Tailscale IP。但服務不見得只跑在一台機器上：資料庫有主從備援、網站可能多台後端做負載平衡、容器每次重啟都會換 IP。把「服務」綁死在「機器」上，每次搬機器、加後端、或容器換 IP，就得改連線位址、改 policy。
+
+**Tailscale Services** 把服務和機器解耦：你替一個邏輯服務建立固定的 MagicDNS 名稱與一對虛擬 IP（**TailVIP**），再讓一台或多台機器當它的後端。其他人永遠用同一個名稱連線，Tailscale 自動把流量導到目前可用、最近的後端。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件與原始碼整理，以 Tailscale v1.104 為準。指令、旗標與 `svc:` 名稱的格式都對照過原始碼（`cmd/tailscale/cli/serve_v2.go`、`cmd/tailscale/cli/service.go`、`tailcfg/tailcfg.go`）。Tailscale Services 於 2025 年 10 月公開 beta、2026 年 2 月轉為 GA；本文範例未實機跑過整套設定，屬文件整理。
+
+## 名詞先講清楚
+
+| 名詞         | 是什麼                                                                            |
+| ------------ | --------------------------------------------------------------------------------- |
+| Service      | 你定義的邏輯資源：一個名稱 + 一對 TailVIP + 端點定義 + 一台或多台後端主機         |
+| TailVIP      | Service 專屬的虛擬 IP（IPv4 + IPv6 一對），不屬於任何一台機器，跟著 Service 走    |
+| Service host | 實際廣告（advertise）這個 Service 端點的 Tailscale 裝置，負責收連線並轉給後端資源 |
+| `svc:` 名稱  | Service 的唯一名稱，形如 `svc:dns-label`；指令與 policy 都用它指稱 Service        |
+
+TailVIP 和一般節點一樣，落在 Tailscale 的位址範圍內（IPv4 為 `100.64.0.0/10`，IPv6 為 `fd7a:115c:a1e0::/48`）。Service 的 MagicDNS 名稱是去掉 `svc:` 前綴後的標籤接上 tailnet 網域，例如 `svc:web-server` 對應 `web-server.<tailnet>.ts.net`。
+
+## 前置條件
+
+- 已有一個 tailnet。
+- 當後端的機器跑 Tailscale v1.86.0 或更新版本（或 unstable 的 v1.87.x）。
+- 定義與核准 Service 需要 Owner、Admin 或 Network admin 角色。
+- 想發布的資源跑在某台 tailnet 裝置上，或跑在 host 連得到的遠端位置（例如托管資料庫、子網內的機器）。
+- **Service host 必須是 tag 身分**：用使用者帳號登入的裝置不能當 host，這是官方文件明寫、原始碼裡也有的限制（`serve_v2.go` 會直接回 `service hosts must be tagged nodes`）。
+
+## 快速開始
+
+### 1. 定義 Service
+
+1. 打開 Admin console 的 [Services](https://console.tailscale.com/admin/services) 頁面，選 **Advertise → Define a Service**。
+2. 填入名稱與描述。名稱就是 MagicDNS 名稱的前綴（例如 `web-server`），加上 `svc:` 前綴成為 `svc:web-server`。
+3. 指定要發布的端點，例如 `tcp:443`。目前只支援 TCP。
+4. （可選）替 Service 加上 tag，方便之後在 policy 裡整批指稱多個 Service。
+5. 選 **Add service**。
+
+### 2. 設定 Service host
+
+在要當後端的機器（必須是 tag 身分）上，用 `tailscale serve` 的 `--service` 旗標，把端點指向本機資源：
+
+```bash
+tailscale serve --service=svc:web-server --https=443 127.0.0.1:8080
+```
+
+指令會回傳類似輸出，表示這台機器已設定成 host、但還需要管理員核准：
+
+```text
+This machine is configured as a service host for `svc:web-server`, but approval from an admin is required. Once approved, it will be available in your Tailnet as:
+
+https://web-server.<tailnet-name>.ts.net:443/
+|-- proxy http://127.0.0.1:8080
+```
+
+用 `tailscale serve --service=...` 會自動進入背景模式（一般 `tailscale serve` 需要另外加 `--bg`，Service 模式預設就是背景執行）。
+
+### 3. 核准 Service host
+
+Service host 需要管理員核准後才會生效（和 subnet route 的核准類似）。到 Admin console 的 Services 頁面，點進該 Service，在 **Service hosts** 區段找到待核准的廣告，選 **Approve**。想自動核准見下方「自動核准」。
+
+### 4. 其他裝置連線
+
+Tailscale v1.94 之後的用戶端不需要開啟 `accept-routes`，會自動取得 Service 的路由。Linux 上跑 v1.93 或更舊版本的裝置，預設不會發現 Service 路由，要先執行：
+
+```bash
+sudo tailscale set --accept-routes
+```
+
+連線方式和平常一樣：`https://web-server.<tailnet>.ts.net`，或直接連 TailVIP。
+
+## 設定 Service host 的兩種方式
+
+**CLI（官方建議）**：一條指令同時完成「設定端點」與「廣告」，例如上面範例。轉發資料庫這類 TCP 服務就用 `--tcp`：
+
+```bash
+tailscale serve --service=svc:postgres --tcp=5432 tcp://localhost:5432
+```
+
+**設定檔（適合 GitOps）**：用標準 JSON（不是 HuJSON）寫成檔案，再分兩步套用。GA 起支援宣告式設定，改檔後可經 local API 或 CLI 觸發 reload，不用重下 `serve` 指令：
+
+```json
+{
+  "version": "0.0.1",
+  "services": {
+    "svc:web-server": {
+      "endpoints": {
+        "tcp:443": "https://localhost:443"
+      }
+    }
+  }
+}
+```
+
+```bash
+tailscale serve set-config --all serveconfig.json
+tailscale serve advertise svc:web-server
+```
+
+維護時有幾個子指令要會用：
+
+| 指令                              | 用途                                                           |
+| --------------------------------- | -------------------------------------------------------------- |
+| `tailscale serve drain svc:…`     | 讓本機停止接新連線，既有連線跑完再下線（下線前一定要先 drain） |
+| `tailscale serve clear svc:…`     | 移除某個 Service 在本機的所有端點設定                          |
+| `tailscale serve advertise svc:…` | drain 之後重新廣告，把主機加回 Service                         |
+| `tailscale service list`          | 列出這個節點目前可以連到的 Service（含 IP、名稱、端點）        |
+
+查看設定可隨時用 `tailscale serve status --json` 或 `tailscale serve get-config --all`。
+
+## 自動核准（auto-approval）
+
+不想每台後端都手動核准，可以在 policy 裡用 `autoApprovers.services` 設定：符合條件的裝置自動成為某個 Service（或一群 Service）的 host。
+
+```json
+{
+  "tagOwners": {
+    "tag:db-host": ["autogroup:admin"]
+  },
+  "autoApprovers": {
+    "services": {
+      "svc:postgres": ["tag:db-host"]
+    }
+  }
+}
+```
+
+這條表示：所有帶 `tag:db-host` 的裝置，廣告 `svc:postgres` 時自動核准。key 可以用 `svc:<名稱>` 指定單一 Service，也可以用 `tag:<名稱>` 指稱「貼了這個 tag 的一群 Service」。
+
+## 存取控制（grants）
+
+Service 是 grants 的合法目的地（`dst`），可以用 `svc:` 名稱或 Service 的 tag 指稱。預設 deny-by-default，所以要讓成員連得到，必須寫 grants：
+
+```json
+{
+  "tagOwners": {
+    "tag:db-host": ["autogroup:admin"]
+  },
+  "autoApprovers": {
+    "services": {
+      "svc:postgres": ["tag:db-host"]
+    }
+  },
+  "grants": [
+    {
+      "src": ["autogroup:member"],
+      "dst": ["svc:postgres"],
+      "ip": ["tcp:5432"]
+    }
+  ]
+}
+```
+
+這份 policy 是「最小權限」的典型：`tag:db-host` 的機器能當 `svc:postgres` 的後端（自動核准），而 tailnet 成員只能連到這個 Service 的 5432 埠，碰不到後端機器上的其他東西。想整批管理時，替多個 Service 貼同一個 tag，再以 `dst: ["tag:prod-service"]` 一次授權。
+
+Service 的 `dst` 是邏輯服務，而不是某台主機——後端換機器、加機器，這條 grants 都不用改。規則的寫法見 [ACL / Grants 入門](/admin/acl-grants/)，tag 的建立見 [Tags 與 auth key](/admin/tags-auth-keys/)。
+
+## 端點類型
+
+一個 Service 可以有多個端點，依協定層分三種：
+
+| 類型         | 協定                        | 用途與限制                                                                           |
+| ------------ | --------------------------- | ------------------------------------------------------------------------------------ |
+| L7（應用層） | `http`／`https`             | 會解析應用協定，支援路徑路由（`--set-path`）與身分標頭；最常用                       |
+| L4（傳輸層） | `tcp`／`tls-terminated-tcp` | 純 TCP 轉發，不解析內容；適合資料庫、標準 TCP 服務                                   |
+| L3（網路層） | `--tun`                     | 原封不動把封包交給本機網路堆疊；可支援 UDP，但只在 Linux、需另外的 `iptables` 等設定 |
+
+想放 UDP 服務時，唯一的正規管道是 L3 端點（Linux），其餘一律只支援 TCP。這在「限制」一節有整理。
+
+## 多台後端與容錯
+
+同一個 Service 可以有多台 host 各自廣告相同或不同的端點。只要至少一台 host 處於啟用（active）狀態，Service 就算可用；Tailscale 會依網路可用性、廣告狀態與區域路由（regional routing）把流量導到可用、最近的後端。搬機器、上線新後端、滾動更新時，用戶端不用改任何設定。
+
+下線前記得先 `tailscale serve drain svc:<名稱>`，讓既有連線跑完，不要直接拔掉設定，否則正在進行的連線會被硬生生切斷。
+
+## 與 Serve、Subnet Router 的差異
+
+| 面向     | Serve                         | Services                               | Subnet Router                            |
+| -------- | ----------------------------- | -------------------------------------- | ---------------------------------------- |
+| 連線對象 | 某一台裝置上的服務            | 一個邏輯服務                           | 整個網段                                 |
+| 名稱／IP | 裝置自己的 MagicDNS 名稱與 IP | Service 專屬名稱 + TailVIP             | 區網裝置沿用自己原本的 IP                |
+| 高可用   | 無（綁單一裝置）              | 多台後端自動容錯、就近路由             | 單一 router（可多台備援）                |
+| 適用情境 | 分享開發站、單機後台          | 資料庫叢集、多副本服務、常換位址的資源 | 印表機、IP Cam 等裝不了 Tailscale 的設備 |
+
+三者其實是互補的。Services 用 `tailscale serve --service=...` 設定，底層和 Serve 同一套機制，差別在於多了 Service 的獨立名稱與 TailVIP，且一台裝置可以同時當多個 Service 的 host。當後端資源在某台裝不了 Tailscale 的機器上時，可以先靠 [Subnet Router](/features/subnet-router/) 讓 host 連得到，再把它發布成 Service。Serve 的完整說明見 [Tailscale Serve：在 tailnet 內分享本機服務](/features/serve/)。
+
+## 方案與限制
+
+**方案**：Tailscale Services 所有方案都能用，包括免費的 Personal；每個 tailnet 最多可建立 10 個 Service。beta 期間建立的用量，官方承諾至少一年內不計入這 10 個。需要更多要聯絡業務。
+
+**限制**：
+
+- **只支援 TCP**：UDP 只能經由 Linux 的 L3（`--tun`）端點，而且需要額外設定 OS 層的封包處理。
+- **TailVIP 只能接連線、不能主動發起連線**。
+- **L3 端點只在 Linux**。
+- **設定檔不支援 `text:` 或 `file:` 目的地**，這兩種只能用 CLI。
+- **多網卡 + 遠端目的地的邊角問題**：host 有多個網路介面、又把端點指到遠端資源時，特定組合下可能連不上（例如 Linux 沒開 `SO_MARK`、或 macOS 的 Mac App Store／Standalone 版）；官方建議的繞法是改用 userspace-networking 模式。
+- Service host 一定要是 tag 身分；從 Kubernetes 叢集內部「連出去」到 Service，需要 Kubernetes Operator 的 egress proxy（GA 起支援）。
+
+## 常見問題
+
+- **跑 `tailscale serve --service=...` 說 host 必須是 tagged 節點？** 正常。先把機器加上 tag（見 [Tags 與 auth key](/admin/tags-auth-keys/)），再重新下指令。
+- **其他裝置連不到 Service？** 先確認對方用戶端版本：v1.94 以上自動取得路由，Linux v1.93 以下要 `sudo tailscale set --accept-routes`。再確認 grants 有沒有放行這個 Service 的埠。
+- **換了一台後端，連線會斷嗎？** 不會。只要 `svc:` 名稱不變，後端怎麼換、加幾台，用戶端都不用改；下線前先 `drain` 讓既有連線收尾即可。
+- **Service 和 Funnel 能一起用嗎？** 不行。`--service` 旗標不支援 Funnel，Service 只存在於 tailnet 內。
+- **TailVIP 可以拿來當來源連出去嗎？** 不行，TailVIP 只接受連入，無法主動發起連線。
+
+## 參考資料
+
+- [Tailscale Services（官方文件）](https://tailscale.com/docs/features/tailscale-services)
+- [Tailscale Services is now generally available（官方部落格，2026-02-19）](https://tailscale.com/blog/services-ga)
+- [Introducing Tailscale Services（官方部落格，2025-10-28，beta 發布）](https://tailscale.com/blog/services-beta)
+- [Grants 語法參考（官方文件）](https://tailscale.com/docs/reference/syntax/grants)
+- [Tailscale 原始碼：`cmd/tailscale/cli/serve_v2.go`](https://github.com/tailscale/tailscale/blob/main/cmd/tailscale/cli/serve_v2.go)
+- [Tailscale 原始碼：`tailcfg/tailcfg.go`（ServiceName 與 VIPService）](https://github.com/tailscale/tailscale/blob/main/tailcfg/tailcfg.go)
+- [Tailscale Serve：在 tailnet 內分享本機服務](/features/serve/)
+- [Subnet Router：存取整個區網內沒裝 Tailscale 的設備](/features/subnet-router/)

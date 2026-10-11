@@ -161,6 +161,8 @@ tailscale serve --bg text:"網站維護中，09:00 UTC 回來"
 
 同一個連接埠不能同時是 Serve 又是 Funnel，以最後下的那道指令為準。如果你下了 Funnel 指令，該連接埠就變成公開的；要收回來就重下一次 `serve`。怎麼把服務公開到網際網路、要注意哪些限制與安全問題，見 [Tailscale Funnel：把服務公開到網際網路](/features/funnel/)。
 
+如果想分享的對象是「一個邏輯服務」而不是「某一台裝置」——例如資料庫背後有多台後端、想要一個固定名稱與虛擬 IP、後端可以隨時增減——那是 [Tailscale Services](/features/tailscale-services/) 的領域：它一樣用 `tailscale serve` 指令，只是多一個 `--service` 旗標，把服務和特定裝置解耦，同一台裝置也能同時當多個 Service 的後端。
+
 ## 常見問題
 
 - **跑 `tailscale serve` 被導去開網頁？** 表示 HTTPS 或相關設定還沒啟用，照著 CLI 給的 consent 網址點開同意即可。
