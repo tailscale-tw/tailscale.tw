@@ -1,0 +1,211 @@
+---
+title: 把 MCP server 放在 tailnet：Serve、bearer token 與 tsidp
+description: 用 streamable HTTP 的 MCP server 以 Tailscale Serve 只開給 tailnet，Claude Code／Claude Desktop 的遠端 MCP 設定方式，bearer token 與 tsidp 當 OAuth authorization server（DCR）的實驗性做法
+sidebar:
+  order: 5
+  label: MCP over Tailscale
+---
+
+MCP（Model Context Protocol）讓 Claude Code、Claude Desktop 這類 agent 用戶端，透過標準化的方式呼叫外部的工具與資料來源。最常見的用法是 **stdio**：用戶端把 MCP server 當子行程啟動，透過標準輸入輸出溝通。但如果你想把 MCP server 放在另一台機器上（例如家裡那台常開的 agent 主機），讓多台裝置共用，就要改用 **streamable HTTP** 傳輸——MCP server 跑成一個獨立的 HTTP 服務，用戶端用網址連過去。
+
+問題是，一個能讀檔案、查資料庫、執行工具呼叫的 MCP server，絕對不能直接開在公網。這篇講怎麼把它放在 tailnet 裡：用 [Tailscale Serve](/features/serve/) 只對 tailnet 開放，再依規模選 **bearer token**（簡單的靜態憑證）或 **tsidp**（OAuth authorization server，支援 DCR）。身分標頭與「為什麼後端要只聽 loopback」的基礎，先看 [Serve 的身分標頭](/features/serve-identity-headers/)。
+
+> 本文依 2026 年 10 月的 Tailscale、Anthropic、MCP 規格與 tsidp 官方文件整理，以 Tailscale v1.104 為準。MCP 的 streamable HTTP 傳輸以 2025-11-25 版規格、Authorization 以 draft 版規格為準；Claude Code 以核對時點的 v2.1.x 為準（官方 changelog 於 2026 年 9 月底已到 v2.1.283，更新頻繁）；Claude Desktop 沒有單一的公開版本號（各平台 build 編號不一，例如 MacUpdate 列的 2.9939.2 與 Debian 套件的 1.52386.6），其設定以 2026 年 10 月核對的文件為準；tsidp 為實驗性專案（版本尚未滿 1.0.0）。本文未實機跑過整套設定，屬文件整理。
+
+## MCP 的 streamable HTTP 傳輸
+
+MCP 規格目前定義了兩種標準傳輸：**stdio**（子行程、標準輸入輸出）與 **streamable HTTP**（獨立 HTTP 服務）。streamable HTTP 取代了舊的 HTTP+SSE 傳輸，特點是：
+
+- MCP server 提供**單一一個 HTTP 端點**（例如 `https://example.com/mcp`），同時接受 `POST` 與 `GET`。
+- 用戶端用 `POST` 送出 JSON-RPC 訊息，server 可以回傳單一 JSON，或開一條 SSE（Server-Sent Events）串流回傳多則訊息。
+- 規格給實作者三條安全要求：**驗證 `Origin` 標頭**（防 DNS rebinding）、本機執行時**只綁 `127.0.0.1`**、以及**對所有連線做驗證**。
+
+這三條正是「放在 tailnet」的切入點：把 server 綁在 loopback，再由 Serve 轉發出去，tailnet 上的其他人只能走 Serve 進來，不能直連後端；驗證則交給下一節的 bearer token 或 tsidp。
+
+## 第一步：MCP server 只聽 loopback
+
+和 [Serve 的身分標頭](/features/serve-identity-headers/) 裡講的原則一樣，MCP server 要綁 `127.0.0.1`，不要綁 `0.0.0.0`。綁 loopback 之後，能直接碰到它的只剩同一台主機上的程式，tailnet 上的人都得經 Serve 轉發。
+
+另外注意 Serve 的反向代理永遠轉給 `http://127.0.0.1`，所以 server 必須聽在 IPv4 的迴路位址，只綁 IPv6 的 `[::1]` 會被拒絕（細節見 [Tailscale Serve](/features/serve/)）。你的 MCP server 若以 `localhost` 起，記得確認它實際綁的是 `127.0.0.1`。
+
+## 第二步：用 Serve 發布
+
+假設 MCP server 跑在本機 `9933` 連接埠（tsidp 官方範例也是用這個埠）：
+
+```bash
+tailscale serve --bg http://127.0.0.1:9933
+```
+
+之後 tailnet 內用 `https://<你的主機>.tailxxxxx.ts.net` 就能連到它。streamable HTTP 的 `POST`／`GET` 與 SSE 串流都是標準 HTTP，Serve 的 HTTP 代理可以正常轉發，不需要特別的旗標。想讓多個服務共用同一個主機名稱時，可以用 `--set-path` 把 MCP 端點掛在子路徑（例如 `--set-path=/mcp`），此時用戶端的網址就是 `https://<你的主機>.tailxxxxx.ts.net/mcp`。
+
+## 第三步：設定 Claude Code
+
+Claude Code 對遠端 MCP server 的官方做法是 HTTP 傳輸：
+
+```bash
+claude mcp add --transport http <名稱> <網址>
+```
+
+以「有 bearer token」的 server 為例：
+
+```bash
+claude mcp add --transport http my-mcp https://mcp.tailxxxxx.ts.net \
+  --header "Authorization: Bearer <你的-token>"
+```
+
+- `--transport http`：這個 server 是放在網址上的 HTTP 服務，不是本機子行程。
+- `--header`：把靜態憑證（bearer token）帶上，每次請求都會送出。
+- 不加 `--scope` 時寫進本機專案；`--scope user` 對所有專案生效，`--scope project` 寫進可提交進版本控制的 `.mcp.json`。
+
+用 JSON 設定檔（`.mcp.json`、`~/.claude.json`，或 `claude mcp add-json`）時的寫法：
+
+```json
+{
+  "mcpServers": {
+    "my-mcp": {
+      "type": "http",
+      "url": "https://mcp.tailxxxxx.ts.net",
+      "headers": {
+        "Authorization": "Bearer <你的-token>"
+      }
+    }
+  }
+}
+```
+
+兩個要點：`type` 必填，可以寫 `http` 或規格裡的 `streamable-http`（兩者等價）；只有 `url` 沒有 `type` 會被當成 stdio server 而失敗。要確認連線狀態，用 `claude mcp list`，或在 Claude Code 裡開 `/mcp` 面板看。
+
+如果你的 server 走 OAuth（下一節的 tsidp 就是），指令一樣，但不用帶 `--header`：
+
+```bash
+claude mcp add --transport http my-mcp https://mcp.tailxxxxx.ts.net
+```
+
+加了之後 `claude mcp list` 會顯示 `! Needs authentication`，接著在 Claude Code 裡開 `/mcp` 完成瀏覽器登入即可。
+
+## Claude Desktop 的遠端 MCP
+
+Claude Desktop 的設定檔 `claude_desktop_config.json`（macOS 在 `~/Library/Application Support/Claude/`）是給**本機 stdio** server 用的（`command`／`args`）。遠端 MCP server 走的是另一條路：**Connectors UI**——Settings → Connectors → Add → Add custom connector → 貼上網址，接著照提示完成驗證（通常是 OAuth）。
+
+所以對 Claude Desktop 來說，放在 tailnet 的 MCP server 就貼上它的 Serve 網址，讓它對 tsidp 跑 OAuth 登入。要注意的是，Claude Desktop 的原生 connector 主要走 OAuth；如果你用的是純 bearer token（靜態憑證）驗證，Anthropic 官方把這種 `static_headers` 型標為 beta、只開放給部分組織。要用最直接、跨平台穩定的靜態憑證做法，Claude Code 的 `--header` 是更簡單的路線。
+
+## bearer token 與「為什麼不要 Funnel」
+
+把上面的設定攤開看，其實是兩層防護疊在一起：
+
+- **網路層**：Serve 只對 tailnet 開放，公網連不到。這層由 Tailscale 把關。
+- **應用層**：bearer token，用戶端每次請求都帶 `Authorization: Bearer <token>`，server 驗證後才放行。token 怎麼設是**每個 MCP server 各自定義的**（可能是啟動旗標、環境變數或反代設定），要查該 server 自己的文件。
+
+bearer token 適合小規模、只有你自己和少數信任裝置的情境。它把「誰能連」簡化成「誰有這把鑰匙」——鑰匙洩漏就要換，且沒有使用者身分、沒有權限細分。
+
+為什麼不用 [Funnel](/features/funnel/)？Funnel 是把服務**公開到整個網際網路**，對一個能讀你檔案、執行工具呼叫的 MCP server 來說，這是完全錯誤的暴露等級。Funnel 不帶 tailnet 身分標頭，公開後你就得獨自承擔 MCP 規格裡警告的那些風險（DNS rebinding、惡意 Origin、暴力破解 token）。MCP server 除非是給外部 SaaS 呼叫，否則一律走 Serve。tsidp 自己也有 `--funnel` 旗標，但那只是為了讓跑在 tailnet 外的 SaaS 應用能用它登入，跟「把 MCP server 開出去」是兩回事。
+
+## 更進一步：tsidp 當 OAuth authorization server（DCR）
+
+bearer token 的「一把鑰匙」模型，在多人、多 agent、或需要轉發的中間架構下會不夠用。MCP 的 [Authorization 規格](https://modelcontextprotocol.io/specification/draft/basic/authorization)（選用，HTTP 傳輸建議遵循）定義了一套 OAuth 2.1 流程：MCP server 當 resource server，用戶端當 OAuth client，再交給一個 authorization server 發 access token，之後每次請求帶 `Authorization: Bearer <access-token>`。
+
+[tsidp](https://github.com/tailscale/tsidp) 就是 Tailscale 開源、跑在 tailnet 裡的 OIDC／OAuth 身分提供者。它用 `tsnet` 與 LocalAPI 的 `whois` 直接拿 tailnet 身分，宣稱支援 MCP Authorization 規格要求的端點，包括 **DCR（Dynamic Client Registration，RFC 7591）**。
+
+DCR 解決的是「手動建立 OAuth client」的麻煩：用戶端第一次連線時，自動向 authorization server 的 `/register` 端點註冊自己、拿回 client ID。多數大型 IdP（Google、GitHub、Microsoft Entra ID）至今不支援 DCR，所以 MCP 這種大量動態註冊的情境，是 DCR 少見的實際應用場域。Tailscale 在[這篇部落格](https://tailscale.com/blog/dynamic-client-registration-dcr-for-mcp-ai)說明瞭這個設計。
+
+有一點要留意：MCP Authorization 的 draft 版規格已把 DCR（RFC 7591）標為 **deprecated**——保留給不支援 Client ID Metadata Documents 的 authorization server 做向後相容，長期方向是以 Client ID Metadata Documents 作為建議做法。所以 DCR 是「現階段 tsidp 已支援、能動」的機制，但不是規格長期首選，寫進產品規劃時要一併考慮。
+
+**tsidp 是實驗性專案**，這是本文最重要的提醒：
+
+- 官方文件與 README 都標示「experimental、actively developed、可能隨時有 breaking changes」。
+- 跑起來需要設 `TAILSCALE_USE_WIP_CODE=1`，這個環境變數就是為了「版本還沒到 1.0.0」而設的門檻。
+- 它屬於[社群專案](https://tailscale.com/kb/1531/community-projects)，官方不提供支援，有問題到 GitHub repo 發 issue。
+- app capability 的 schema 仍在開發中，可能隨時改。
+
+部署 tsidp 需要：MagicDNS、HTTPS 憑證、一把 auth key（或 OAuth client）讓節點註冊，以及一個 `tailscale.com/cap/tsidp` 的 app capability grant。**預設 admin UI 與 DCR 端點都是拒絕存取的**，要分別用 `allow_admin_ui` 與 `allow_dcr` 兩個欄位打開（見下一節的 grants 範例）。tsidp 需要持久化狀態（`-dir`／`TS_STATE_DIR`），無狀態部署每次重啟都會遺失 DCR 註冊的 client。
+
+DCR 的運作方式，官方有 [MCP client/server](https://github.com/tailscale/tsidp/blob/main/examples/mcp-server/README.md) 與 [MCP gateway](https://github.com/tailscale/tsidp/blob/main/examples/mcp-gateway/README.md) 兩個範例可照著做。
+
+## 最小權限的 grants 範例
+
+MCP 的 OAuth 流程要求用戶端帶 **resource indicator**（RFC 8707），指定要存取哪個 MCP server 的 canonical URI；tsidp 會拿 grant 的 `resources` 欄位比對這個值，決定要不要發 token。而 DCR 端點由 `allow_dcr` 控制，兩者**各自獨立**——`users`／`resources` 只管「誰能為哪些資源拿到 token」，`allow_dcr`／`allow_admin_ui` 才是「誰能註冊 client／用後台」。
+
+所以範例拆成三條 grant：成員能連 MCP server、成員能拿 token、只有管理員能 DCR 註冊：
+
+```json
+"tagOwners": {
+  "tag:mcp-server": ["autogroup:admin"],
+  "tag:tsidp": ["autogroup:admin"],
+},
+"grants": [
+  // 成員可以連到 MCP server 的 Serve 443（後端原始埠不開放）
+  {
+    "src": ["autogroup:member"],
+    "dst": ["tag:mcp-server"],
+    "ip": ["tcp:443"],
+  },
+  // 成員可以為這個 MCP server 拿 access token（users 用 "*" 或實際 login 名稱）
+  {
+    "src": ["autogroup:member"],
+    "dst": ["tag:tsidp"],
+    "ip": ["tcp:443"],
+    "app": {
+      "tailscale.com/cap/tsidp": [
+        {
+          "users": ["*"],
+          "resources": ["https://mcp.tailxxxxx.ts.net"],
+        },
+      ],
+    },
+  },
+  // 只有管理員能透過 DCR 註冊 client（要後台管理就一併開 allow_admin_ui）
+  {
+    "src": ["autogroup:admin"],
+    "dst": ["tag:tsidp"],
+    "ip": ["tcp:443"],
+    "app": {
+      "tailscale.com/cap/tsidp": [
+        {
+          "allow_dcr": true,
+          "allow_admin_ui": true,
+        },
+      ],
+    },
+  },
+],
+```
+
+欄位語意（對照 tsidp 原始碼 `server/clients.go`、`server/token.go`、`server/appcap.go`）：
+
+- `allow_dcr`：DCR 端點（RFC 7591 的 `/register`）只看這個布林值。`clients.go` 的 `serveDynamicClientRegistration` 只檢查 `access.allowDCR`，與 `users`／`resources` 無關——所以它要獨立放進「管理員」那條，放進「成員」那條等於每個成員都能註冊 client。
+- `users`／`resources`：只在 token 發放時用。`token.go` 的 `validateResourcesForUser` 比對 `users` 是否含 `"*"` 或使用者的 login 名稱、`resources` 是否含請求的 resource。**`users` 不支援 autogroup**——寫 `autogroup:admin` 永遠不會 match，要嘛用 `"*"`，要嘛用實際登入名稱（email）。
+- 多條 grant 的 app capability 會**累積合併**：`appcap.go` 的 `addGrantAccessContext` 把每條 rule 的 `allowAdminUI`／`allowDCR` OR 起來。所以管理員同時吃得到「成員」那條的 `users`／`resources` 與自己那條的 `allow_dcr`。
+
+- MCP server 與 tsidp 各自打上 tag，身分不再綁在個人帳號上（見 [Tags 與 auth key](/admin/tags-auth-keys/)）。
+- 上面 `users` 用 `"*"` 表示「tailnet 內任何成員都能為這個 MCP server 拿 token」；要更收緊就換成具體的 login 名稱（例如 `alice@example.com`）。
+- 如果 tsidp 要當「gateway 中間層」做 token exchange（RFC 8693），才需要額外開 `TSIDP_ENABLE_STS=1`；單純的 client ↔ server 流程用不到。
+- tsidp 的 app capability schema 仍在開發中，欄位可能變動，部署前以當時的 README 為準。規則寫法見 [ACL / Grants 入門](/admin/acl-grants/)。
+
+## 小結
+
+| 驗證方式        | 適用情境                       | 把關層          |
+| --------------- | ------------------------------ | --------------- |
+| Serve（網路層） | 所有情境，一律要做             | 只有 tailnet 內 |
+| bearer token    | 小規模、自己用                 | 應用層靜態憑證  |
+| tsidp（OAuth）  | 多人、多 agent、需要身分與轉發 | OAuth 2.1 + DCR |
+
+無論選哪一種，骨架都一樣：MCP server 綁 loopback → Serve 只開 tailnet → 應用層再補驗證。bearer token 是把事情做小的選擇，tsidp 是往標準 OAuth 走的選擇，但後者還掛著「實驗性」的牌子，要放進正式環境前先評估那份 breaking changes 的風險。
+
+## 參考資料
+
+- [MCP 規格：Transports（streamable HTTP，2025-11-25）](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
+- [MCP 規格：Authorization（draft）](https://modelcontextprotocol.io/specification/draft/basic/authorization)
+- [Connect Claude Code to tools via MCP（Anthropic 官方文件）](https://code.claude.com/docs/en/mcp)
+- [Connect to remote MCP Servers（modelcontextprotocol.io，Claude Desktop 的 Connectors）](https://modelcontextprotocol.io/docs/2026-07-28/develop/connect-remote-servers)
+- [Authentication for connectors（Anthropic，OAuth 與 static_headers）](https://claude.com/docs/connectors/building/authentication)
+- [tsidp（GitHub，實驗性、DCR 與範例）](https://github.com/tailscale/tsidp)
+- [tsidp（Tailscale 官方文件）](https://tailscale.com/docs/features/tsidp)
+- [tsidp 原始碼：`server/appcap.go`（app capability 欄位與累積合併）](https://github.com/tailscale/tsidp/blob/main/server/appcap.go)
+- [tsidp 原始碼：`server/clients.go`（DCR 只看 `allow_dcr`）](https://github.com/tailscale/tsidp/blob/main/server/clients.go)
+- [tsidp 原始碼：`server/token.go`（`users`／`resources` 的 token 驗證）](https://github.com/tailscale/tsidp/blob/main/server/token.go)
+- [Easy, Secure Dynamic Client Registration for MCP & AI Agents（Tailscale 部落格）](https://tailscale.com/blog/dynamic-client-registration-dcr-for-mcp-ai)
+- [Dynamic Client Registration：RFC 7591](https://www.rfc-editor.org/rfc/rfc7591.html)
+- [Tailscale Serve：在 tailnet 內分享本機服務](/features/serve/)
+- [Serve 的身分標頭：讓自架服務直接認得 tailnet 使用者](/features/serve-identity-headers/)
+- [OpenClaw／Hermes Agent 個人助理只開給自己：Serve 模式與身分驗證](/ai/openclaw-hermes/)
+- [ACL / Grants 入門](/admin/acl-grants/)
