@@ -1,0 +1,175 @@
+---
+title: OAuth client：給 CI、operator 與雲端 agent 用的憑證
+description: 用 OAuth client 讓 CI、Kubernetes operator 與雲端 agent 以最小權限的 scope 與 tag 存取 Tailscale API、產生 auth key 或註冊節點。說明與 auth key、API access token 的差異、scope、tag 必填、client secret 註冊節點與輪替，以及 workload identity federation
+sidebar:
+  order: 2.5
+  label: OAuth client
+---
+
+自動化工具要用 Tailscale，不外乎兩件事：**呼叫 Tailscale API**（管理裝置、policy、DNS），或**把機器加進 tailnet**（CI runner、Kubernetes pod、雲端 agent）。用管理員個人帳號的 API access token 雖然能動，但那是「完整權限 + 綁在某個人身上」，一旦外洩或那個人離職，影響面很大。
+
+**OAuth client** 就是為這種情境設計的：以「最小權限」把 Tailscale API 的存取權委派出去，還能把 OAuth client secret 直接拿來當 auth key 註冊裝置。這篇講它和 auth key、API access token 的差別，以及 scope、tag、輪替和更進一步的 workload identity federation。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件與原始碼整理，以 Tailscale v1.104 為準。`--client-secret`、`--client-id`、`--id-token`、`--audience` 等旗標與 `?ephemeral=&preauthorized=` 參數都對照過 v1.104 原始碼（`cmd/tailscale/cli/up.go`、`feature/oauthkey/oauthkey.go`、`feature/identityfederation/identityfederation.go`）。範例未實機跑過整套設定，屬文件整理。
+
+## 三種憑證怎麼選
+
+Tailscale 有幾種長相類似、用途不同的憑證，先分清楚：
+
+|          | auth key                    | OAuth client                            | API access token       |
+| -------- | --------------------------- | --------------------------------------- | ---------------------- |
+| 前綴     | `tskey-auth`                | `tskey-client`                          | `tskey-api`            |
+| 主要用途 | 把裝置加入 tailnet          | 呼叫 API、產生 auth key、註冊裝置       | 呼叫 API               |
+| 權限     | 跟著產生 key 的使用者或 tag | 精細的 scope + tag                      | 完整權限（跟著使用者） |
+| 效期     | 1–90 天，一次性或可重複     | 憑證到撤銷前都有效；產出的 token 1 小時 | 最多 90 天             |
+| 綁定對象 | 使用者或 tag                | tailnet（不綁個人）                     | 使用者                 |
+
+- **auth key** 只做一件事：免瀏覽器把裝置加入 tailnet，身分是產生 key 的使用者或預設的 tag。它不能呼叫 API。詳見 [Tags 與 auth key](/admin/tags-auth-keys/)。
+- **API access token** 是「人」在用的：一個使用者在 Admin console 產生，拿到的就是這個人帳號的完整 API 權限，最多 90 天到期。適合自己寫 script，不適合委派給 CI。
+- **OAuth client** 是「機器」在用的：權限縮到建立時選的 scope 與 tag，產出的 access token 只有 1 小時效期，而且不綁在某個使用者身上（建立的人離職了 client 還是能用，由 tailnet 管理）。
+
+CI、operator、雲端 agent 這類長期自動化，選 OAuth client（或下面會講的 workload identity federation）。
+
+## OAuth client 是什麼
+
+OAuth client 就是一組 **client ID + client secret**，走 OAuth 2.0 的 client credentials flow：程式拿這組 ID 和 secret，向 `https://api.tailscale.com/api/v2/oauth/token` 換取一個 **API access token**（效期 1 小時），再用這個 token 呼叫 Tailscale API。token 到期前再換一個新的即可，多數語言的 OAuth 函式庫會自動處理。
+
+client secret 前綴是 `tskey-client-`，和 auth key（`tskey-auth-`）、API access token（`tskey-api-`）一眼就能分出來。
+
+## 建立 OAuth client
+
+1. 到 Admin console 的 [Trust credentials](https://console.tailscale.com/admin/settings/trust-credentials) 頁面，選 **Credential → OAuth**。
+2. 勾選這個 client 能做的操作（**Read**／**Write**），每個操作對應一個 scope（下一節）。
+3. 需要 `auth_keys` 這類 scope 時，會要求你選一或多個 tag。
+4. 選 **Generate credential**，把 **client ID** 和 **client secret** 複製下來。**secret 只會顯示一次**，關掉頁面就看不到了，而且區分大小寫。
+
+建立、撤銷需要 Owner、Admin、Network admin 或 IT admin。Owner 和 Admin 可以用任何 scope 和任何 tag；其他角色只能用自己權限範圍內的 scope 和 tag。
+
+## Scope 是最小權限的關鍵
+
+scope 決定「這個 client 產出的 token 能碰哪些 API 端點」。常用的幾個：
+
+| scope             | 能做什麼                                  |
+| ----------------- | ----------------------------------------- |
+| `auth_keys`       | 讀取、產生、刪除 auth key（用來註冊裝置） |
+| `devices:core`    | 讀取裝置清單、核准／移除裝置、改 tag      |
+| `dns:read`／`dns` | 讀取（或修改）tailnet 的 DNS 設定         |
+| `policy_file`     | 讀取、驗證、修改 tailnet policy file      |
+| `all:read`／`all` | 整個 tailnet 的唯讀／完整權限             |
+
+尾綴 `:read` 表示唯讀。每個 scope 都只開到它需要的幾個端點，例如 `dns:read` 就只能碰 DNS 相關的 GET 端點。建立 client 時**只勾需要的 scope**，不要圖方便選 `all`；tag 也一樣，只給這個 client 會用到的 tag。
+
+## 用 OAuth client 產生 auth key
+
+auth key 最長 90 天、又不能永久有效，所以「長期、反覆產生裝置」的情境，正解是：建一個帶 `auth_keys` scope 的 OAuth client，需要時再靠它產生新的 auth key。
+
+最直接的是呼叫 Tailscale API：先用 client ID 和 secret 換一個 access token，再拿 token 呼叫產生 auth key 的端點（`-` 代表自己的 tailnet）：
+
+```bash
+TOKEN=$(curl -s -d "client_id=${OAUTH_CLIENT_ID}" -d "client_secret=${OAUTH_CLIENT_SECRET}" \
+  "https://api.tailscale.com/api/v2/oauth/token" | jq -r .access_token)
+
+curl -X POST "https://api.tailscale.com/api/v2/tailnet/-/keys" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"capabilities":{"devices":{"create":{"reusable":false,"ephemeral":false,"preauthorized":true,"tags":["tag:ci"]}}}}'
+```
+
+tag 要是建立 client 時選過的那些，或是由這些 tag 所 own 的其他 tag（需另外設定 tag ownership）。官方也提供一個小工具 `get-authkey`，讀環境變數 `TS_API_CLIENT_ID`／`TS_API_CLIENT_SECRET`，直接吐一把 key 到 stdout：
+
+```bash
+export TS_API_CLIENT_ID=<clientID> TS_API_CLIENT_SECRET=<secret>
+go run tailscale.com/cmd/get-authkey@latest -tags tag:ci
+```
+
+`-tags` 必填，另外可加 `-reusable`、`-ephemeral`、`-preauth`（`get-authkey` 需要 Go 1.23 以上）。注意 `-preauth` 的預設是 `true`——不帶就會產生 pre-authorized key、跳過 device approval；這和下一節 `?preauthorized=`（預設 `false`）方向相反，有開 device approval 的 tailnet 要留意。
+
+## 直接用 client secret 註冊節點
+
+不想先產生 auth key、再拿 auth key 去登入，也可以把 OAuth client secret **直接當 auth key 用**。v1.104 有專門的 `--client-secret` 旗標：
+
+```bash
+tailscale up --client-secret="${OAUTH_CLIENT_SECRET}?ephemeral=false&preauthorized=true" \
+  --advertise-tags=tag:ci
+```
+
+也可以用 `--auth-key` 放同一個值（官方文件用的是 `--auth-key=${OAUTH_CLIENT_SECRET}...`），兩者都吃 client secret；secret 也可以存成檔案用 `file:/path/to/secret` 讀入，避免出現在 shell 歷史紀錄。
+
+幾個重點：
+
+- client 要有 `auth_keys` scope，且 `--advertise-tags` **必填**，tag 要是建立 client 時選過的、或由這些 tag 所 own 的其他 tag。原始碼會直接以「`oauth authkeys require --advertise-tags`」拒絕沒帶 tag 的用法。
+- 用 client secret 加入的裝置**一定是 tag 身分**，不是某個使用者。
+- secret 後面可以接 URL 參數：`ephemeral`（離線後自動移除，預設 `true`）、`preauthorized`（有開 device approval 時免核准，預設 `false`）、`baseURL`（預設 `https://api.tailscale.com`）。伺服器要長期保留就設 `ephemeral=false`；有開 device approval 就設 `preauthorized=true`。
+
+Docker 映像檔可以把 secret 放進 `TS_AUTHKEY`，tag 用 `TS_EXTRA_ARGS=--advertise-tags=tag:ci` 指定。
+
+## 進階：Workload identity federation
+
+OAuth client 要長期保管一把 client secret，secret 外洩等於別人能持續產生 token。如果你的機器跑在 AWS、GCP、Azure 或 GitHub Actions 上，可以用 **workload identity federation** 徹底丟掉這把長效 secret：改用雲端平台發的短效 OIDC token（JWT）證明身分。
+
+做法是在 Trust credentials 選 **Credential → OpenID Connect**，指定 issuer、subject（和可選的 custom claims）與 scope，拿到一組 **Client ID 和 audience**——這兩者**都不是秘密**。註冊節點時：
+
+```bash
+tailscale up --client-id="${CLIENT_ID}" --id-token="${IDENTITY_TOKEN}" \
+  --advertise-tags=tag:ci
+```
+
+`--client-id` 和 `--id-token` 要 v1.90.1 以上；`--client-id` 一樣能吃 `?ephemeral=false&preauthorized=true`。v1.94 起還可以用 `--audience` 讓客戶端在支援的環境（AWS、GCP、GitHub Actions）自動取得平台的 identity token，不必自己處理：
+
+```bash
+tailscale up --client-id="${CLIENT_ID}" --audience="${AUDIENCE}" \
+  --advertise-tags=tag:ci
+```
+
+兩種方式都要求 federated identity 有 `auth_keys` scope，`--advertise-tags` 要符合設定時的 tag。需要 token 的雲端平台要能公開存取（issuer 的 JWKS 要抓得到）。
+
+## 輪替與撤銷
+
+OAuth client secret 不像 webhook secret 有「原地 rotate」的按鈕。要輪替就是：**建一個新的 client → 更新程式裡的 client ID 和 secret → 撤銷舊 client**。secret 只顯示一次，弄丟了也只能重來一次這個流程。
+
+撤銷在 Trust credentials 頁面選 **Revoke**。**撤銷 client 會連帶撤銷它發出的所有 access token**；但已經用它的 auth key 加入的裝置不會被踢掉，要另外到 [Machines](https://console.tailscale.com/admin/machines) 刪除。Client 本身由 tailnet 擁有，建立的人離職後 client 仍可繼續用，記得在離職流程裡一併盤點。
+
+## 安全提醒
+
+- **secret 等於「產生 auth key 的能力」（限定在你給的 scope 與 tag 內）**，別放進 repository、聊天或文件，用密鑰管理工具存放。
+- **只給需要的 scope 和 tag**。CI 只要產生 `tag:ci` 的節點，就別給 `devices:core` 或 `all`。
+- 搭配 grants 把 tag 的權限也收緊，雙重最小權限——client 只管「能建什麼 tag 的節點」，grants 管「那個 tag 的節點能連到哪裡」：
+
+```json
+{
+  "tagOwners": {
+    "tag:ci": ["autogroup:admin"]
+  },
+  "grants": [
+    {
+      "src": ["tag:ci"],
+      "dst": ["tag:build-server"],
+      "ip": ["tcp:22", "tcp:443"]
+    }
+  ]
+}
+```
+
+- 有開 [device approval](/admin/device-security/) 時，沒設 `preauthorized=true` 的節點都要等核准，多一層保險。
+- 外洩時：撤銷 client → 到 configuration audit logs 查這個 client（以 client ID 為 actor）在洩漏期間用了哪些 API → 檢查 Machines 有沒有多出來的裝置 → 建立新 client 並更新程式。
+
+## 常見問題
+
+- **OAuth client secret 和 API access token 差在哪？** secret 是一組 client ID + secret，走 OAuth 換短效（1 小時）token，權限只有你選的 scope + tag；API access token 是個人完整權限、最多 90 天。前者給機器、後者給人。
+- **能不能產生「永久有效」的 auth key？** 不能。但 OAuth client 本身到撤銷前都有效，可以無限次產生新的 auth key，取代永久 key 的需求。
+- **用 client secret 註冊的裝置一定要 tag 嗎？** 是。這類裝置一定是 tag 身分，且 `--advertise-tags` 必填、tag 要符合 client 設定。
+- **`ephemeral` 預設值是多少？** `true`——用 client secret 加入的裝置離線後會自動移除，要長期保留記得設 `ephemeral=false`。
+- **可以用 OAuth client 做 device provisioning、讓裝置掛某個使用者身分嗎？** OAuth client 註冊的裝置一律是 tag 身分；要掛個人使用者身分是另一套 OAuth apps 的 device provisioning 機制，不屬於本文範圍。
+
+## 參考資料
+
+- [OAuth clients（官方文件）](https://tailscale.com/docs/features/oauth-clients)
+- [Trust credentials（官方文件，含 scope 清單）](https://tailscale.com/docs/reference/trust-credentials)
+- [Workload identity federation（官方文件）](https://tailscale.com/docs/features/workload-identity-federation)
+- [Key prefixes（官方文件）](https://tailscale.com/docs/reference/key-prefixes)
+- [Key and secret management（官方文件）](https://tailscale.com/docs/reference/key-secret-management)
+- [Tailscale 原始碼：`cmd/tailscale/cli/up.go`](https://github.com/tailscale/tailscale/blob/main/cmd/tailscale/cli/up.go)
+- [Tailscale 原始碼：`feature/oauthkey/oauthkey.go`](https://github.com/tailscale/tailscale/blob/main/feature/oauthkey/oauthkey.go)
+- [Tailscale 原始碼：`feature/identityfederation/identityfederation.go`](https://github.com/tailscale/tailscale/blob/main/feature/identityfederation/identityfederation.go)
+- [Tags 與 auth key：給伺服器用的非互動登入](/admin/tags-auth-keys/)
+- [裝置核准、金鑰到期與 Tailnet Lock](/admin/device-security/)
