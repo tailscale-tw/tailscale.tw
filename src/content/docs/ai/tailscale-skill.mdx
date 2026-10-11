@@ -1,0 +1,130 @@
+---
+title: 讓 coding agent 懂 Tailscale：官方 skill 與社群 skill
+description: 安裝官方 Tailscale skill（npx skills add）讓 Claude Code、Cursor、Codex 等 agent 懂 Tailscale，說明它的涵蓋範圍與 public alpha 不支援聲明，並介紹社群 tailscale-superpowers 與 API skill，以及用 skill 寫 grants 時的審核提醒
+sidebar:
+  order: 5.5
+  label: Tailscale skill
+---
+
+coding agent 對 Tailscale 的了解，跟你丟給它的 context 一樣好。與其每次問問題都複製貼上一堆文件，不如裝一個 **skill**：它把 Tailscale 的參考資料整理好，agent 在回答涉及 Tailscale 的問題時自己會去讀。這篇講官方 skill 怎麼裝、涵蓋什麼、有哪些限制，以及兩個社群 skill 的差別與風險。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件與 GitHub 原始碼整理，以 Tailscale v1.104 為準。官方 skill（github.com/tailscale/tailscale-skill）為 public alpha，核對時 commit 為 `4f05d35`；社群 skill 於 2026 年 10 月核對——tailscale-superpowers commit `302e989`、0oAstro/tailscale-skill commit `e38f2a2`，兩者皆為非官方專案。本文未在 Claude Code 實機跑過安裝流程，屬文件整理。
+
+## 官方 skill：tailscale/tailscale-skill
+
+[Tailscale skill](https://github.com/tailscale/tailscale-skill) 是 Tailscale 官方（github.com/tailscale）發布的 skill，BSD-3-Clause 授權。它給 agent 一套 Tailscale 的參考資料，讓它幫你設定 exit node、配置 Kubernetes operator、用 `tsnet` 寫程式、甚至接 Aperture。
+
+### 安裝
+
+用 [skills](https://skills.sh/) CLI 透過 `npx` 安裝：
+
+```bash
+npx skills add https://github.com/tailscale/tailscale-skill
+```
+
+前置條件：一個支援 [Agent Skills 標準](https://agentskills.io/) 的 coding agent，以及提供 `npx` 的 Node.js。不想用 `skills` 指令的話，也可以手動安裝：clone 這個 repo，把裡面的 `skills/tailscale` 子目錄複製到 agent 的 skills 目錄（Claude Code 是 `~/.claude/skills/`）。裝完如果 agent 沒有自動載入新 skill，重啟它。
+
+### 支援哪些 agent
+
+README 列出的支援對象是 **Claude Code、Cursor、OpenCode、OpenAI Codex、Pi**，以及任何遵循 Agent Skills 標準的 agent。所以它不是只綁某一套工具。
+
+### 怎麼觸發
+
+有兩種方式：
+
+- **明確**：輸入 `/tailscale` 接你的問題，裝了就會叫出這個 skill。
+- **隱含**：直接口語問 agent（例如「怎麼在家裡設 subnet router？」），agent 依 skill 的描述自行判斷要不要參考它。
+
+隱含路徑依賴 agent 的判斷，不是 100% 可靠；不確定時就用 `/tailscale`。
+
+### 涵蓋範圍
+
+`SKILL.md` 是一個主題索引，把 agent 導到 `references/` 目錄下各自的參考檔。涵蓋的主題有：
+
+| 主題              | 內容                                                                    |
+| ----------------- | ----------------------------------------------------------------------- |
+| 核心 mesh VPN     | exit node、subnet router、MagicDNS、grants（與舊式 ACL）、tag           |
+| 連線診斷          | DERP、NAT traversal、peer relay、`tailscale netcheck`／`ping`／`status` |
+| 分享與發布        | Taildrop、Taildrive、Serve（私有）、Funnel（公開）                      |
+| 容器與 Kubernetes | operator、Docker sidecar、ProxyGroup、Connector CRD                     |
+| 企業部署          | SCIM、MDM（Jamf／Intune）、device posture、device approval、auth key    |
+| 工作階段錄影      | `tsrecorder`、S3 目的地、fail-closed、SSH／Kubernetes 錄影              |
+| Aperture          | LLM API key 集中管理、配額、用量儀表板、coding agent 整合               |
+| CLI               | 每個 `tailscale` 子指令的旗標與範例                                     |
+| REST API          | 驗證、裝置管理、policy file、webhook                                    |
+| 用 Go 開發        | `tsnet`——把 Tailscale client 嵌進你的應用程式                           |
+
+`SKILL.md` 裡有一個對本文讀者特別有用的「寫作預設」：**寫 policy 時用 grants，不要用舊式 ACL**，並把 agent 導到 `references/access-control.md`。也就是說，叫 agent 幫你寫 grants 是這個 skill 直接內建支援的情境（見最後一節）。
+
+### 官方「不支援」聲明
+
+這是裝之前一定要知道的一點：**它是 public Alpha，官方不提供支援**。README 原文是「Please don't file Tailscale support tickets for issues you discover with it, and treat its output as a starting point rather than a final answer」——別為它開 support ticket，把它的輸出當起點、不是最終答案。官方文件頁也寫「alpha release and is not supported」。skill 本身的問題（參考檔有誤、建議不好、安裝失敗）請到 [repo 的 issue](https://github.com/tailscale/tailscale-skill/issues) 回報；產品本身的問題走正常的 Tailscale 支援管道。
+
+## 社群 skill：不是官方，裝之前先看來源
+
+除了官方 skill，社群也有人做了自己的 skill。這些**不是 Tailscale 官方出品、不受官方支援**，內容與安全性要自己判斷。下面兩個是目前常見的：
+
+### tailscale-superpowers：日常情境的安全配方
+
+[tailscale-superpowers](https://github.com/cathrynlavery/tailscale-superpowers)（作者 Cathryn Lavery，MIT 授權）是給「日常使用」的 skill，官方 tagline 是「everyday jobs, like safe hotel wifi, printing at home from anywhere」。它的特色是**每條指令都標了安全層級**：
+
+- **Run freely**：唯讀指令（`tailscale status`、`tailscale ping`）。
+- **Ask first**：先給你看指令、等你同意（設 exit node、傳檔案、開 SSH）。
+- **Ask first + 說風險**：除了問，還用一句話講風險（公開服務、關閉連線、開 Remote Login）。
+- **Never**：auth key、手改 policy、使用者管理、admin console、key expiry——這些它會叫你**自己**去點。
+
+它共有 16 個配方（旅行 Wi-Fi、家用印表機、Taildrop 傳檔、給外包商暫時權限等），安裝方式是複製 `skills/tailscale-superpowers` 資料夾到 agent 的 skills 目錄。README 明說「independent, community-made skill. It isn't made by, affiliated with, or endorsed by Tailscale Inc.」。核對時 commit 為 `302e989`（2026 年 10 月）。
+
+### 0oAstro/tailscale-skill：透過 REST API 管理 tailnet
+
+[0oAstro/tailscale-skill](https://github.com/0oAstro/tailscale-skill)（MIT 授權）是「API skill」的代表：讓 agent 用 Tailscale v2 REST API 管理 tailnet，號稱涵蓋 85 個 API 操作、用確定性的 bash script（`curl`＋`jq`）呼叫，不用跑任何 server。它對寫入操作要求先 `--dry-run` 預覽、再 `--yes` 才真正執行，並有 `validateAndTestPolicyFile` 可以驗證 policy。
+
+安裝方式因 agent 而異：Claude Code 用 `/plugin marketplace add 0oAstro/tailscale-skill` 與 `/plugin install tailscale`；其他 agent 就 clone repo，設 `TS_API_KEY='tskey-api-...'`，需要 `curl` 與 `jq`。它一樣是社群專案，README 沒有官方背書；核對時 commit 為 `e38f2a2`（2026 年 10 月）。
+
+> 兩個社群 skill 的 repo 規模、維護狀況都會變，上面的 commit 只是核對當下的快照。社群 skill 建議先看過它的 `SKILL.md` 與 script 再決定要不要讓 agent 跑——尤其那些會碰 policy、auth key 的指令。
+
+## 用 skill 讓 agent 寫 grants，然後自己審
+
+skill 最實用的用法之一，是讓 agent 幫你把「要開什麼權限」寫成 grants。官方 skill 的 `SKILL.md` 明確要求 agent 用 grants 而不是舊式 ACL，並指向 `references/access-control.md`。示意流程：
+
+```text
+你：幫我寫一條 grant，讓 tag:agent 只能連到 tag:internal-api 的 443。
+
+agent（載入 /tailscale skill，參考 references/access-control.md）：
+{
+  "src": ["tag:agent"],
+  "dst": ["tag:internal-api"],
+  "ip": ["tcp:443"],
+}
+```
+
+然後——重點來了——**不要直接貼進 policy**。skill 是 alpha、輸出只是起點，套用前自己核對幾件事：
+
+- **確認沒有殘留的全開規則**：Tailscale 的 grants 只放行、不阻擋，policy 裡若還留著 `"*"` 到 `"*"` 的預設規則，上面這條等於沒寫。先移除全開規則，grant 才會生效。
+- **`tagOwners` 要先定義**：用到的 `tag:agent`、`tag:internal-api` 得先在 `tagOwners` 定義，否則產生 auth key 或套用時選不到。
+- **連線對象的連接埠要對**：agent 可能給出 `ip: ["*"]` 這種過寬的寫法，確認只開需要的埠（這裡是 `tcp:443`）。
+- **tag 身分的限制**：tag 裝置的請求不帶 `Tailscale-User-Login` 等身分標頭，如果後端靠標頭做授權，記得處理這個缺口（見 [Serve 的身分標頭](/features/serve-identity-headers/)）。
+
+規則的完整寫法、`tests` 驗證與常見錯誤，見 [ACL / Grants 入門](/admin/acl-grants/)。要給 agent 一把受限的憑證再讓它碰 API，見 [OAuth client](/admin/oauth-clients/)。
+
+## 小結
+
+| skill                     | 出處 | 重點                              | 授權         |
+| ------------------------- | ---- | --------------------------------- | ------------ |
+| tailscale/tailscale-skill | 官方 | 參考資料全集、寫 grants 用 grants | BSD-3-Clause |
+| tailscale-superpowers     | 社群 | 日常配方 + 每條指令的安全層級     | MIT          |
+| 0oAstro/tailscale-skill   | 社群 | REST API 管理、dry-run + --yes    | MIT          |
+
+先裝官方 skill 當底，社群 skill 依需求加、且務必先看來源。不管是哪個，都把 agent 的輸出當起點——尤其是會動到 policy、auth key、裝置的指令——自己核對過再套用。
+
+## 參考資料
+
+- [tailscale/tailscale-skill（官方 repo）](https://github.com/tailscale/tailscale-skill)
+- [Tailscale skill for coding agents（官方文件）](https://tailscale.com/docs/features/tailscale-skill)
+- [tailscale-superpowers（社群 repo，非官方）](https://github.com/cathrynlavery/tailscale-superpowers)
+- [0oAstro/tailscale-skill（社群 repo，非官方）](https://github.com/0oAstro/tailscale-skill)
+- [Agent Skills 標準](https://agentskills.io/)
+- [skills CLI（skills.sh）](https://skills.sh/)
+- [ACL / Grants 入門](/admin/acl-grants/)
+- [OAuth client：給 CI、operator 與雲端 agent 用的憑證](/admin/oauth-clients/)
+- [Serve 的身分標頭：讓自架服務直接認得 tailnet 使用者](/features/serve-identity-headers/)
