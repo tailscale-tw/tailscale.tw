@@ -49,10 +49,10 @@ TailVIP 和一般節點一樣，落在 Tailscale 的位址範圍內（IPv4 為 `
 tailscale serve --service=svc:web-server --https=443 127.0.0.1:8080
 ```
 
-指令會回傳類似輸出，表示這台機器已設定成 host、但還需要管理員核准：
+指令會回傳類似輸出，表示這台機器已設定成 host、但還需要管理員核准（v1.104 的實際訊息是 service proxy，官方文件範例寫成 service host，兩者同義）：
 
 ```text
-This machine is configured as a service host for `svc:web-server`, but approval from an admin is required. Once approved, it will be available in your Tailnet as:
+This machine is configured as a service proxy for `svc:web-server`, but approval from an admin is required. Once approved, it will be available in your Tailnet as:
 
 https://web-server.<tailnet-name>.ts.net:443/
 |-- proxy http://127.0.0.1:8080
@@ -66,7 +66,7 @@ Service host 需要管理員核准後才會生效（和 subnet route 的核准�
 
 ### 4. 其他裝置連線
 
-Tailscale v1.94 之後的用戶端不需要開啟 `accept-routes`，會自動取得 Service 的路由。Linux 上跑 v1.93 或更舊版本的裝置，預設不會發現 Service 路由，要先執行：
+Tailscale v1.94.1 之後的用戶端不需要開啟 `accept-routes`，會自動取得 Service 的路由。Linux 上跑 v1.93 或更舊版本的裝置，預設不會發現 Service 路由，要先執行：
 
 ```bash
 sudo tailscale set --accept-routes
@@ -82,7 +82,7 @@ sudo tailscale set --accept-routes
 tailscale serve --service=svc:postgres --tcp=5432 tcp://localhost:5432
 ```
 
-**設定檔（適合 GitOps）**：用標準 JSON（不是 HuJSON）寫成檔案，再分兩步套用。GA 起支援宣告式設定，改檔後可經 local API 或 CLI 觸發 reload，不用重下 `serve` 指令：
+**設定檔（適合 GitOps）**：用標準 JSON 格式寫成檔案，再分兩步套用。GA 起支援宣告式設定，改檔後可經 local API 或 CLI 觸發 reload，不用重下 `serve` 指令：
 
 ```json
 {
@@ -134,7 +134,7 @@ tailscale serve advertise svc:web-server
 
 ## 存取控制（grants）
 
-Service 是 grants 的合法目的地（`dst`），可以用 `svc:` 名稱或 Service 的 tag 指稱。預設 deny-by-default，所以要讓成員連得到，必須寫 grants：
+Service 是 grants 的合法目的地（`dst`），用 `svc:` 名稱指稱。預設 deny-by-default，所以要讓成員連得到，必須寫 grants：
 
 ```json
 {
@@ -156,7 +156,19 @@ Service 是 grants 的合法目的地（`dst`），可以用 `svc:` 名稱或 Se
 }
 ```
 
-這份 policy 是「最小權限」的典型：`tag:db-host` 的機器能當 `svc:postgres` 的後端（自動核准），而 tailnet 成員只能連到這個 Service 的 5432 埠，碰不到後端機器上的其他東西。想整批管理時，替多個 Service 貼同一個 tag，再以 `dst: ["tag:prod-service"]` 一次授權。
+這份 policy 是「最小權限」的典型：`tag:db-host` 的機器能當 `svc:postgres` 的後端（自動核准），而 tailnet 成員只能連到這個 Service 的 5432 埠，碰不到後端機器上的其他東西。
+
+官方文件另有一個 tip，示範替多個 Service 貼同一個 tag 後整批指稱（tag 放在 `src`、Service 放在 `dst`）：
+
+```json
+{
+  "src": ["tag:prod-service"],
+  "dst": ["svc:database"],
+  "ip": ["5432"]
+}
+```
+
+注意：grants 的 `dst` 若寫 `tag:`，指的是「有這個 tag 的**裝置**」，不是 Service。要授權到 Service，`dst` 一定要寫 `svc:` 名稱——照上面這個 tip 抄，目的地才是 Service、不是裝置。
 
 Service 的 `dst` 是邏輯服務，而不是某台主機——後端換機器、加機器，這條 grants 都不用改。規則的寫法見 [ACL / Grants 入門](/admin/acl-grants/)，tag 的建立見 [Tags 與 auth key](/admin/tags-auth-keys/)。
 
@@ -174,7 +186,7 @@ Service 的 `dst` 是邏輯服務，而不是某台主機——後端換機器�
 
 ## 多台後端與容錯
 
-同一個 Service 可以有多台 host 各自廣告相同或不同的端點。只要至少一台 host 處於啟用（active）狀態，Service 就算可用；Tailscale 會依網路可用性、廣告狀態與區域路由（regional routing）把流量導到可用、最近的後端。搬機器、上線新後端、滾動更新時，用戶端不用改任何設定。
+同一個 Service 可以有多台 host 各自廣告相同或不同的端點。只要至少一台 host 處於啟用（active）狀態，Service 就算可用；Tailscale 會依網路可用性、廣告狀態與區域路由（regional routing）把流量導到可用、最近的後端——regional routing 需先在管理後台啟用，才有同區域的負載平衡。搬機器、上線新後端、滾動更新時，用戶端不用改任何設定。
 
 下線前記得先 `tailscale serve drain svc:<名稱>`，讓既有連線跑完，不要直接拔掉設定，否則正在進行的連線會被硬生生切斷。
 
@@ -199,13 +211,13 @@ Service 的 `dst` 是邏輯服務，而不是某台主機——後端換機器�
 - **TailVIP 只能接連線、不能主動發起連線**。
 - **L3 端點只在 Linux**。
 - **設定檔不支援 `text:` 或 `file:` 目的地**，這兩種只能用 CLI。
-- **多網卡 + 遠端目的地的邊角問題**：host 有多個網路介面、又把端點指到遠端資源時，特定組合下可能連不上（例如 Linux 沒開 `SO_MARK`、或 macOS 的 Mac App Store／Standalone 版）；官方建議的繞法是改用 userspace-networking 模式。
+- **多網卡 + 遠端目的地的邊角問題**：host 有多個網路介面、又把端點指到遠端資源時，特定組合下可能連不上（例如 Linux 沒開 `SO_MARK`、或 macOS 的 Mac App Store／Standalone 版）。官方建議的繞法：macOS 改用開源 macOS 版（預設就是 userspace-networking），Linux 則把 `tailscaled` 跑成 userspace-networking 模式。
 - Service host 一定要是 tag 身分；從 Kubernetes 叢集內部「連出去」到 Service，需要 Kubernetes Operator 的 egress proxy（GA 起支援）。
 
 ## 常見問題
 
 - **跑 `tailscale serve --service=...` 說 host 必須是 tagged 節點？** 正常。先把機器加上 tag（見 [Tags 與 auth key](/admin/tags-auth-keys/)），再重新下指令。
-- **其他裝置連不到 Service？** 先確認對方用戶端版本：v1.94 以上自動取得路由，Linux v1.93 以下要 `sudo tailscale set --accept-routes`。再確認 grants 有沒有放行這個 Service 的埠。
+- **其他裝置連不到 Service？** 先確認對方用戶端版本：v1.94.1 以上自動取得路由，Linux v1.93 以下要 `sudo tailscale set --accept-routes`。再確認 grants 有沒有放行這個 Service 的埠。
 - **換了一台後端，連線會斷嗎？** 不會。只要 `svc:` 名稱不變，後端怎麼換、加幾台，用戶端都不用改；下線前先 `drain` 讓既有連線收尾即可。
 - **Service 和 Funnel 能一起用嗎？** 不行。`--service` 旗標不支援 Funnel，Service 只存在於 tailnet 內。
 - **TailVIP 可以拿來當來源連出去嗎？** 不行，TailVIP 只接受連入，無法主動發起連線。
