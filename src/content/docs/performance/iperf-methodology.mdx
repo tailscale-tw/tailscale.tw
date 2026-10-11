@@ -6,7 +6,7 @@ sidebar:
   label: iperf3 量測方法
 ---
 
-量 Tailscale 的速度，最容易踩的坑不是 iperf3 不會用，而是**沒先確認量的是哪條路**。同樣兩台機器，直連和走 DERP 中繼可以差上十倍；單流慢不代表網路慢，常常是單顆 CPU 先到頂。這篇給前面幾篇效能調校文一個共同的量測基準，講怎麼用 iperf3 量出能互相對照的數字。
+量 Tailscale 的速度，最容易踩的坑不是 iperf3 不會用，而是**沒先確認量的是哪條路**。同樣兩台機器，直連和走 DERP 中繼的表現可以差上一個數量級；單流慢不代表網路慢，常常是單顆 CPU 先到頂。這篇給前面幾篇效能調校文一個共同的量測基準，講怎麼用 iperf3 量出能互相對照的數字。
 
 > 本文依 2026 年 10 月的 Tailscale 官方文件與原始碼整理，以 Tailscale v1.104 為準；iperf3 參數以官方 man page（iperf3 3.20）核對。直連／DERP 判讀與 MTU 1280 對照過 v1.104 原始碼（`cmd/tailscale/cli/ping.go`、`net/tstun/mtu.go`）。量測範例未實機跑過，屬文件整理。
 
@@ -31,13 +31,13 @@ pong from nas (100.101.102.103) via DERP(hkg) in 25ms    ← 走中繼
 pong from nas (100.101.102.103) via 203.0.113.7:41641 in 4ms  ← 直連
 ```
 
-`via DERP(區域代碼)` 表示走官方中繼，`via 一個 IP:埠` 表示已直連。`tailscale ping` 預設最多 10 次、一旦直連成功就停；`tailscale status` 也會顯示 `direct` 或 `relay`。三種連線方式與改善方法見 [直連與 DERP 中繼](/troubleshooting/direct-vs-derp/)，判讀網路的工具見 [netcheck 與 ping](/troubleshooting/netcheck-and-ping/)。
+`via DERP(區域代碼)` 表示走官方中繼，`via 一個 IP:埠` 表示已直連。`tailscale ping` 預設最多 10 次、一旦直連成功就停；`tailscale status` 也會顯示 `direct`、`relay` 或 `peer-relay`。三種連線方式與改善方法見 [直連與 DERP 中繼](/troubleshooting/direct-vs-derp/)，判讀網路的工具見 [netcheck 與 ping](/troubleshooting/netcheck-and-ping/)。
 
-量測的鐵則：**直連和 DERP 分開量、分開記**。想量「Tailscale 的上限」就在直連時量；想量「你實際會遇到的速度」就各量一次並註明路徑。強制走 DERP 比較麻煩（Tailscale 會盡量打直連），可以在直連還沒建立時量第一筆、或用防火牆暫時擋掉直連路徑。
+量測的鐵則：**直連和 DERP 分開量、分開記**。想量「Tailscale 的上限」就在直連時量；想量「你實際會遇到的速度」就各量一次並註明路徑。強制走 DERP 比較麻煩（Tailscale 會盡量打直連），可以在直連還沒建立時量第一筆、或用防火牆暫時擋掉直連路徑。量測中想持續確認當下路徑，用 `tailscale ping -c 10 --until-direct=false` 讓它在直連建立後也不停，逐次看 `via`。
 
 ## 第二步：搞清楚在量哪種模式
 
-- **kernel 模式（Linux 預設）**：有 `tailscale0` 這張 TUN 介面，`ip link show tailscale0` 看得到。封包由 kernel 的 WireGuard 模組處理，這是效能天花板最高的組態。
+- **kernel 模式（Linux 預設）**：有 `tailscale0` 這張 TUN 介面，`ip link show tailscale0` 看得到。封包由 kernel 的 TUN 介面轉發，WireGuard 的加解密仍由 userspace 的 wireguard-go 處理。這是效能天花板最高的組態。
 - **userspace（netstack）模式**：沒有 `tailscale0`，封包在 userspace 的 netstack 處理。容器沒給 `NET_ADMIN`、macOS App Store 版等情境會用到，性能特性不同，量到的數字不能拿來代表 kernel 模式。
 
 量測前先 `ip link show tailscale0` 確認。另外，轉送型節點（subnet router、exit node）的 UDP 上限要看 [UDP GRO forwarding](/performance/udp-gro-forwarding/) 有沒有設好；TCP 的擁塞控制情境見 [BBR](/performance/bbr/)。
@@ -55,7 +55,7 @@ pong from nas (100.101.102.103) via 203.0.113.7:41641 in 4ms  ← 直連
 | `-t n`            | 持續秒數（預設 10）                                 |
 | `-O n`            | 略過前 n 秒不計（跳過 TCP slow start）              |
 | `-i n`            | 報表間隔（預設 1 秒）                               |
-| `-Z`              | zerocopy，省 CPU                                    |
+| `-Z`              | zerocopy（sendfile 這類 zero copy 送法，減少拷貝）  |
 | `-w n`            | socket 緩衝／TCP window                             |
 | `-C <algo>`       | 指定壅塞控制演算法（Linux／FreeBSD）                |
 | `-A n`            | 綁定 CPU core                                       |
@@ -96,7 +96,7 @@ iperf3 -c <對方 Tailscale IP> -u -b 100M -l 1200 -t 10 -i 1
 三個重點：
 
 - **`-b` 一定要設**：UDP 預設只有 1 Mbit/s，不設就量到 1M 的上限。
-- **`-l` 控制 datagram 大小**：Tailscale 的 MTU 是 1280，datagram 加 UDP/IP header 後超過 1280 就會分段，掉包與 jitter 數字會失真。`-l 1200` 這類「datagram 塞得進一個隧道封包」的大小才量得到乾淨的 loss／jitter。
+- **`-l` 控制 datagram 大小**：iperf3 的 UDP 預設會依 path MTU 自動決定 datagram 大小（判斷不出來時用 1460），但 Tailscale 的隧道 MTU 是 1280，datagram 加 UDP/IP header 後超過 1280 就會分段、掉包與 jitter 失真。自己顯式設 `-l 1200` 這類「塞得進一個隧道封包」的大小，才量得到乾淨的 loss／jitter。
 - 解讀看**掉包率與 jitter**，不是只看頻寬；掉包率偏高通常代表路徑或 buffer 有問題。
 
 轉送型節點（subnet router、exit node）量 UDP 前，記得先照 [UDP GRO forwarding](/performance/udp-gro-forwarding/) 設定好，否則量到的不是這台機器的最佳值。
