@@ -123,6 +123,8 @@ tailscale up --client-id="${CLIENT_ID}" --audience="${AUDIENCE}" \
 
 兩種方式都要求 federated identity 有 `auth_keys` scope，`--advertise-tags` 要符合設定時的 tag。需要 token 的雲端平台要能公開存取（issuer 的 JWKS 要抓得到）。
 
+要一次看到 OAuth client 與 federation 兩種用法套進 CI 的完整 workflow 範例，見〈[GitHub Actions 進 tailnet：用 OAuth client 建 ephemeral runner](/ai/github-actions/)〉。
+
 ## 輪替與撤銷
 
 OAuth client secret 不像 webhook secret 有「原地 rotate」的按鈕。要輪替就是：**建一個新的 client → 更新程式裡的 client ID 和 secret → 撤銷舊 client**。secret 只顯示一次，弄丟了也只能重來一次這個流程。
