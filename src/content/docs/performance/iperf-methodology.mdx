@@ -1,0 +1,128 @@
+---
+title: 用 iperf3 量 Tailscale 吞吐量的正確方法
+description: 用 iperf3 正確量測 Tailscale 的吞吐量：先確認直連或 DERP、控制 kernel 與 userspace、MTU 1280 等變因，再依 TCP 單流／多流、UDP、上傳／下載／雙向與 CPU 瓶頸判讀來解讀數字，附 iperf3 參數速查
+sidebar:
+  order: 2.5
+  label: iperf3 量測方法
+---
+
+量 Tailscale 的速度，最容易踩的坑不是 iperf3 不會用，而是**沒先確認量的是哪條路**。同樣兩台機器，直連和走 DERP 中繼可以差上十倍；單流慢不代表網路慢，常常是單顆 CPU 先到頂。這篇給前面幾篇效能調校文一個共同的量測基準，講怎麼用 iperf3 量出能互相對照的數字。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件與原始碼整理，以 Tailscale v1.104 為準；iperf3 參數以官方 man page（iperf3 3.20）核對。直連／DERP 判讀與 MTU 1280 對照過 v1.104 原始碼（`cmd/tailscale/cli/ping.go`、`net/tstun/mtu.go`）。量測範例未實機跑過，屬文件整理。
+
+## 為什麼 Tailscale 的吞吐量特別容易量錯
+
+- **路徑不固定**：兩台裝置之間可能是直連、Peer Relay 或 DERP，效能天差地遠。不先確認路徑，量到的數字沒意義。
+- **CPU 常是瓶頸**：WireGuard 的加解密吃 CPU。單一條串流只能吃到一個核心，多條串流才能把多核用完——所以「單流慢、多流快」通常是 CPU 受限，不是網路慢。
+- **MTU 是 1280**：Tailscale 的 TUN MTU 預設 1280，比一般乙太網路的 1500 小。TCP 會自動協商 MSS，UDP 不會，datagram 開太大會分段、掉包數字失真。
+- **kernel 與 userspace 是兩種量測對象**：Linux 預設 kernel 模式（有 `tailscale0`），效率高；userspace（netstack）模式沒有 TUN，性能特性不同。量之前要搞清楚在量哪一種。
+- **GRO／GSO 沒開，就量不到最佳 UDP**：subnet router／exit node 轉送 UDP 的上限受 [UDP GRO forwarding](/performance/udp-gro-forwarding/) 影響，沒設好就量不到最佳值。
+
+## 第一步：先確認連線方式
+
+每次量測前後，都用 `tailscale ping` 確認對方走的哪條路：
+
+```bash
+tailscale ping nas
+```
+
+```text
+pong from nas (100.101.102.103) via DERP(hkg) in 25ms    ← 走中繼
+pong from nas (100.101.102.103) via 203.0.113.7:41641 in 4ms  ← 直連
+```
+
+`via DERP(區域代碼)` 表示走官方中繼，`via 一個 IP:埠` 表示已直連。`tailscale ping` 預設最多 10 次、一旦直連成功就停；`tailscale status` 也會顯示 `direct` 或 `relay`。三種連線方式與改善方法見 [直連與 DERP 中繼](/troubleshooting/direct-vs-derp/)，判讀網路的工具見 [netcheck 與 ping](/troubleshooting/netcheck-and-ping/)。
+
+量測的鐵則：**直連和 DERP 分開量、分開記**。想量「Tailscale 的上限」就在直連時量；想量「你實際會遇到的速度」就各量一次並註明路徑。強制走 DERP 比較麻煩（Tailscale 會盡量打直連），可以在直連還沒建立時量第一筆、或用防火牆暫時擋掉直連路徑。
+
+## 第二步：搞清楚在量哪種模式
+
+- **kernel 模式（Linux 預設）**：有 `tailscale0` 這張 TUN 介面，`ip link show tailscale0` 看得到。封包由 kernel 的 WireGuard 模組處理，這是效能天花板最高的組態。
+- **userspace（netstack）模式**：沒有 `tailscale0`，封包在 userspace 的 netstack 處理。容器沒給 `NET_ADMIN`、macOS App Store 版等情境會用到，性能特性不同，量到的數字不能拿來代表 kernel 模式。
+
+量測前先 `ip link show tailscale0` 確認。另外，轉送型節點（subnet router、exit node）的 UDP 上限要看 [UDP GRO forwarding](/performance/udp-gro-forwarding/) 有沒有設好；TCP 的擁塞控制情境見 [BBR](/performance/bbr/)。
+
+## iperf3 參數速查
+
+| 參數              | 用途                                                |
+| ----------------- | --------------------------------------------------- |
+| `-s`／`-c <host>` | 跑 server／client（預設埠 5201，`-p` 可改）         |
+| `-P n`            | 平行串流數（CPU 受限時多流總和會更高）              |
+| `-R`              | 反向：server 送、client 收（量下載）                |
+| `--bidir`         | 兩方向同時測                                        |
+| `-u`              | 用 UDP（預設 TCP）                                  |
+| `-b n`            | 目標速率。UDP 預設 1M、**一定要指定**；TCP 預設不限 |
+| `-t n`            | 持續秒數（預設 10）                                 |
+| `-O n`            | 略過前 n 秒不計（跳過 TCP slow start）              |
+| `-i n`            | 報表間隔（預設 1 秒）                               |
+| `-Z`              | zerocopy，省 CPU                                    |
+| `-w n`            | socket 緩衝／TCP window                             |
+| `-C <algo>`       | 指定壅塞控制演算法（Linux／FreeBSD）                |
+| `-A n`            | 綁定 CPU core                                       |
+| `-l n`            | buffer 長度；UDP 下就是 datagram 大小               |
+| `-M n`            | 指定 TCP MSS                                        |
+| `-N`              | 關閉 Nagle                                          |
+| `-J`              | JSON 輸出                                           |
+
+`-b` 在多串流（`-P`）時是**每個串流**各自套用，不是總和；加 `/數字` 是 burst mode。要徹底不設速限（例如 UDP 測上限）用 `-b 0`。
+
+## 量 TCP
+
+先量單流，做 baseline：
+
+```bash
+iperf3 -c <對方 Tailscale IP> -t 10 -O 2 -i 1
+```
+
+`-O 2` 略過前 2 秒的 TCP slow start，數字會穩定些。接著量多流，看總和有沒有比單流高：
+
+```bash
+iperf3 -c <對方 Tailscale IP> -t 10 -P 4
+```
+
+- 單流就逼近網卡速率 → 路徑和 CPU 都不是瓶頸。
+- 單流低、多流總和明顯更高 → **CPU 受限**（單一核心的加解密到頂），不是網路慢。官方 man page 也明寫「在網路吞吐受 CPU 限制時，多串流可能比單串流更高」。
+
+量下載用 `-R`，雙向同時用 `--bidir`。要排除 CPU 因素，可以對照 `-Z`（zerocopy）前後、或 `-A` 綁核，同時開另一個視窗 `top` 看兩端 CPU 有沒有單核頂到 100%。
+
+## 量 UDP
+
+UDP 沒有擁塞控制，量的是「這條路能塞多少、掉多少」：
+
+```bash
+iperf3 -c <對方 Tailscale IP> -u -b 100M -l 1200 -t 10 -i 1
+```
+
+三個重點：
+
+- **`-b` 一定要設**：UDP 預設只有 1 Mbit/s，不設就量到 1M 的上限。
+- **`-l` 控制 datagram 大小**：Tailscale 的 MTU 是 1280，datagram 加 UDP/IP header 後超過 1280 就會分段，掉包與 jitter 數字會失真。`-l 1200` 這類「datagram 塞得進一個隧道封包」的大小才量得到乾淨的 loss／jitter。
+- 解讀看**掉包率與 jitter**，不是只看頻寬；掉包率偏高通常代表路徑或 buffer 有問題。
+
+轉送型節點（subnet router、exit node）量 UDP 前，記得先照 [UDP GRO forwarding](/performance/udp-gro-forwarding/) 設定好，否則量到的不是這台機器的最佳值。
+
+## CPU 瓶頸判讀速記
+
+- 單流慢、多流快 → CPU 受限，看 `top` 單核是否 100%。
+- `-Z` 有明顯幫助 → CPU 是瓶頸。
+- 兩端 CPU 都閒、頻寬還是低 → 看路徑（是不是 DERP）與 buffer／window（`-w`）。
+- 部分雲端實例對單一 TCP 連線有頻寬上限（官方效能文件的 AWS single-flow bandwidth limitation），這種環境單流數字會低估，要併多流量。
+
+## 常見問題
+
+- **為什麼同樣兩台機器，量出來的數字差很多？** 先 `tailscale ping` 看路徑：一次直連、一次 DERP，數字自然差很多。把路徑寫進紀錄再比較。
+- **單流只有幾十 Mbps，是 Tailscale 太慢嗎？** 不一定。跑 `-P 4` 看總和；總和上得去就是單核 CPU 到頂，不是網路問題。
+- **UDP 掉包率一直很高？** 檢查 `-l` 是不是太大（超過 1280 會分段）；順便確認轉送節點的 GRO forwarding。
+- **`-b` 沒設 UDP 量出來都 1M？** 正常，UDP 預設目標速率就是 1 Mbit/s，量之前要設 `-b`。
+- **userspace 模式量得比 kernel 慢？** 正常，兩者不是同一件事。Linux 要量天花板請用 kernel 模式（有 `tailscale0`）。
+
+## 參考資料
+
+- [iperf3 man page（iperf3 3.20）](https://manpages.debian.org/testing/iperf3/iperf3.1.en.html)
+- [iperf3 官方網站（es.net）](https://software.es.net/iperf/)
+- [Tailscale performance best practices（官方文件）](https://tailscale.com/kb/1320/performance-best-practices)
+- [Tailscale 原始碼：`cmd/tailscale/cli/ping.go`（tailscale ping 路徑判讀）](https://github.com/tailscale/tailscale/blob/main/cmd/tailscale/cli/ping.go)
+- [Tailscale 原始碼：`net/tstun/mtu.go`（TUN MTU 1280）](https://github.com/tailscale/tailscale/blob/main/net/tstun/mtu.go)
+- [直連與 DERP 中繼：為什麼連線變慢、怎麼改善](/troubleshooting/direct-vs-derp/)
+- [UDP GRO forwarding：加速 Subnet Router 與 Exit Node 的 UDP 轉送](/performance/udp-gro-forwarding/)
+- [BBR：擁塞控制在 Tailscale 節點上的實際效果](/performance/bbr/)
