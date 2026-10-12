@@ -42,6 +42,10 @@ jobs:
     steps:
       - name: "☁️ Checkout repository"
         uses: actions/checkout@v6
+        with:
+          # 完整歷史：`getLastUpdated` 的 git log 與 sitemap 的 <lastmod> 都要
+          # 每個檔案的實際最後修改時間，shallow clone 會讓所有頁面拿到同一時間。
+          fetch-depth: 0
 
       - name: "⬢ Setup Node.js"
         uses: actions/setup-node@v6
