@@ -4,6 +4,7 @@ import nimbus, {
   defineConfig as defineNimbusConfig,
 } from "@cloudflare/nimbus-docs";
 import { tableScroll } from "@cloudflare/nimbus-docs/markdown";
+import { createSitemapSerialize } from "./src/lib/sitemap-lastmod";
 
 const nimbusConfig = defineNimbusConfig({
   // Canonical origin. Drives canonical URLs, absolute OG image URLs,
@@ -44,6 +45,12 @@ export default defineConfig({
       rules: {
         "nimbus/frontmatter-shape": "error",
         "nimbus/internal-link": "error",
+      },
+      // Add <lastmod> to the sitemap for content pages, sourced the same way
+      // as the page/JSON-LD dates (frontmatter `lastUpdated` → git). Non-doc
+      // URLs keep no lastmod.
+      sitemap: {
+        serialize: createSitemapSerialize(),
       },
       // Wrap wide tables so they scroll instead of overflowing the page
       // (styled by `.nb-table-scroll` in src/styles/prose.css).
