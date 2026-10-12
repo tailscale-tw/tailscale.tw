@@ -24,14 +24,19 @@ type SitemapItem = {
   links?: { lang: string; url: string }[];
 };
 
+// Normalize to forward slashes so paths from `walk()` (which uses `path.join`)
+// line up with `git log --relative` output, which always uses `/` regardless
+// of platform. Same idea as Nimbus's `_internal/git-last-updated.ts` `norm()`.
+const norm = (p: string) => p.replace(/\\/g, "/");
+
 // Relative to the project root so the paths line up with `git log --relative`
 // output (which is what Nimbus's `getLastUpdated` keys on).
-const CONTENT_DIR = path.join("src", "content", "docs");
+const CONTENT_DIR = "src/content/docs";
 const CONTENT_PATHSPEC = "src/content";
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const full = path.join(dir, entry.name);
+    const full = norm(path.join(dir, entry.name));
     if (entry.isDirectory()) {
       walk(full, out);
     } else if (entry.name.endsWith(".mdx") || entry.name.endsWith(".md")) {
@@ -41,12 +46,19 @@ function walk(dir: string, out: string[] = []): string[] {
   return out;
 }
 
-/** `src/content/docs/features/serve.mdx` → `/features/serve/`; `index.mdx` → `/`. */
+/**
+ * `src/content/docs/features/serve.mdx` → `/features/serve/`; `index.mdx` → `/`.
+ *
+ * Derives the URL purely from the file path. It does NOT read a frontmatter
+ * `slug` override, so if a page's slug is ever decoupled from its file path,
+ * that URL won't map back here and simply gets no `<lastmod>` (rather than a
+ * wrong date).
+ */
 function filePathToUrlPath(filePath: string): string {
-  const rel = path
-    .relative(CONTENT_DIR, filePath)
-    .replace(/\.(mdx|md)$/, "")
-    .replace(/\\/g, "/");
+  const rel = filePath
+    .slice(CONTENT_DIR.length)
+    .replace(/^\//, "")
+    .replace(/\.(mdx|md)$/, "");
   if (rel === "index") return "/";
   if (rel.endsWith("/index")) return `/${rel.slice(0, -"/index".length)}/`;
   return `/${rel}/`;
@@ -91,13 +103,21 @@ function buildGitLastUpdated(): Map<string, Date> {
     if (currentMs === null) continue;
     const tab = line.lastIndexOf("\t");
     if (tab === -1) continue;
-    const filePath = line.slice(tab + 1);
+    const filePath = norm(line.slice(tab + 1));
     if (filePath && !map.has(filePath)) map.set(filePath, new Date(currentMs));
   }
   return map;
 }
 
-/** Frontmatter `lastUpdated` (a date scalar), parsed minimally to avoid a YAML dep. */
+/**
+ * Frontmatter `lastUpdated` (a date scalar), parsed minimally to avoid pulling
+ * in a YAML dependency.
+ *
+ * Only a plain single-line scalar is supported: `lastUpdated: 2024-01-15` or
+ * `lastUpdated: "2024-01-15"`. Inline YAML comments, folded/multi-line
+ * scalars, and non-scalar values are NOT parsed — those fall through to the
+ * git date instead of being honored.
+ */
 function readFrontmatterLastUpdated(filePath: string): Date | undefined {
   let raw: string;
   try {
