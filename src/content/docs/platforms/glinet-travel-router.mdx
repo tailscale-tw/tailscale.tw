@@ -1,0 +1,203 @@
+---
+title: GL.iNet 旅行路由器：整個旅館房間接回家
+description: 用 GL.iNet 旅行路由器把旅館 Wi-Fi 接成自己的小網路，路由器以 repeater 模式連上旅館 Wi-Fi 後加入 tailnet，再選家裡的 Exit Node，房間內的電視、Switch、手機等所有裝置就全部走家裡出口上網。說明內建 Tailscale 的綁定、Allow Remote Access LAN、Custom Exit Node、韌體 4.8.x 已知問題、guest Wi-Fi 隔離與側邊滑動按鈕的自訂腳本
+sidebar:
+  order: 4.5
+  label: GL.iNet 旅行路由器
+---
+
+旅館 Wi-Fi 通常一間房只給你一、兩台裝置的額度，而且是公開網路。帶一台 GL.iNet 旅行路由器（例如 Beryl AX／GL-MT3000、Slate AX／GL-AXT1800）出門，讓它連上旅館 Wi-Fi、自己再發一個 Wi-Fi，房間裡的電視、Switch、手機、筆電就全部接在這一台後面；旅館只看到路由器一台裝置，你卻可以接無限多台。
+
+更進一步，GL.iNet 韌體**內建 Tailscale**（韌體 v4.2 起）：路由器加入你的 tailnet 之後，選家裡的 [Exit Node](/features/exit-node/)，整個房間的上網流量就全部經由家裡的出口出去——電視上看台灣串流、手機走家裡的 IP，彷彿人根本沒出國。這篇講怎麼設定，以及幾個旅行路由器特有的坑。
+
+> 本文依 2026 年 10 月的 GL.iNet 官方文件（docs.gl-inet.com）與 Tailscale 官方文件整理，未實際驗證。以 GL.iNet 韌體 v4.11（2026 年 10 月）、Tailscale v1.104 為準；文中標註「v4.9 起」的選項在更早的 4.x 韌體上名稱或功能不同。
+
+## 前置：你需要什麼
+
+- **一台支援 Tailscale 的 GL.iNet 路由器**。Tailscale 功能自韌體 v4.2 起提供，但官方文件標註它是 beta，且**部分記憶體較小的型號不支援**（官方文件在 Tailscale 頁面有「Supported Models／Unsupported Models」兩份清單）。買之前先到 GL.iNet 的 [Firmware Download Center](https://dl.gl-inet.com/) 或 Tailscale 文件頁確認你的型號。
+- **家裡一台常開的 exit node**。可以是 Raspberry Pi、NAS、Apple TV、另一台 GL.iNet 路由器（v4.9 起可開 **Run Exit Node**）或任何 Linux 主機。設定方式見 [Exit Node](/features/exit-node/)。
+- **先在家裡把整段跑通**：旅行時旅館網路環境不可控，出發前先把路由器、exit node、Admin console 的核准都弄好，到旅館只剩「連 Wi-Fi、開 Tailscale」兩步。
+
+官方文件另外提醒：Tailscale 底層是 WireGuard，**不要**和 OpenVPN Client、WireGuard Client、GoodCloud Site to Site、ZeroTier、AstroWarp 同時使用，否則會路由衝突。
+
+## 底層是 OpenWrt：GL.iNet UI 與原生 OpenWrt 的差異
+
+GL.iNet 韌體本質上是客製化的 OpenWrt，所以底下的 `tailscaled`、`tailscale0` 介面、防火牆 nftables 都和原生 OpenWrt 一樣。差別在於 GL.iNet 把設定包進了自己的 Web Admin Panel：
+
+- **原生 OpenWrt**：要自己建立 `tailscale0` 的 unmanaged 介面、專用防火牆 zone、forwarding、masquerade，完整步驟見 [OpenWrt 裝 Tailscale](/platforms/openwrt/)。
+- **GL.iNet UI**：`APPLICATIONS → Tailscale` 一個頁面就包辦了綁定、subnet route、exit node；防火牆 zone 由韌體自動建立，你通常不用（也不該）進 LuCI 手動改。v4.9 起更把 subnet route 的 masquerade 抽成一個 **IP Masquerading** 開關。
+
+這也帶出一個常見陷阱：韌體 4.8.0–4.8.3 改過 Tailscale 的防火牆規則後，有使用者發現在 LuCI 手動把 `tailscale0` 加進 WAN zone 的舊做法，反而和新 zone 衝突、導致區網裝置連不到 tailnet（見下方「韌體 4.8.x 的已知問題」）。**除非你很確定自己在做什麼，否則不要在 GL.iNet 上沿用原生 OpenWrt 的防火牆設定**——UI 已經幫你處理好了。
+
+## 啟用 Tailscale 並綁定帳號
+
+1. 進入路由器的 Web Admin Panel（預設 `192.168.8.1`），到 **APPLICATIONS → Tailscale**。
+2. 把 **Enable Tailscale** 切到開，點 **Apply**。
+3. 稍候畫面會出現一個 **Device Bind Link**（裝置綁定連結）。點開它，會跳出一個 Tailscale 網址，點下去登入你的 Tailscale 帳號。
+4. 登入後 Tailscale 會要你確認把這台裝置加進 tailnet，點 **Connect**。
+5. 連線成功後會自動跳到 [Tailscale Admin console](https://console.tailscale.com/admin/machines)，可以看到這台路由器拿到了 `100.x.y.z` 的位址。
+
+綁定之後，你就能從任何在 tailnet 裡的裝置，用這個 `100.x.y.z` 直接 ping、SSH 或開啟路由器的管理介面——這本身就是旅行時遠端排障的利器。
+
+## Allow Remote Access LAN：把房內裝置廣告進 tailnet
+
+預設路由器自己會進 tailnet，但接在它後面的裝置（電視、Switch）不會。想讓 tailnet 裡的裝置反過來連到房內的裝置，開啟 **Allow Remote Access LAN**（**v4.9 起改名為 Advertise LAN Subnets**）並 **Apply**：
+
+1. 到 **APPLICATIONS → Tailscale**，啟用 **Allow Remote Access LAN**，點 **Apply**。
+2. 到 [Admin console](https://console.tailscale.com/admin/machines) 找到這台路由器，點右邊三點選 **Edit route settings**，會看到它廣告的子網段（例如 `192.168.8.0/24`）。
+3. 勾選核准這些網段。
+
+這其實就是把它當 [Subnet Router](/features/subnet-router/) 用。同頁的 **Allow Remote Access WAN**（v4.9 起改名 **Advertise WAN Subnets**）廣告的是 WAN 側網段——旅行接旅館 Wi-Fi 時沒什麼用，那是給「路由器串在上游路由器後面」的情境（例如把 GL.iNet 接在家裡主路由器後面，從外面連回家裡其他裝置）用的。
+
+## Custom Exit Nodes：讓整個房間走家裡出口
+
+這是旅行的主角。設定前，先確認家裡的 exit node 已經設定好、在 Admin console 裡核准過（[Exit Node](/features/exit-node/) 有完整步驟）。接著：
+
+1. 在 Admin console 找到**這台 GL.iNet 路由器**，進 **Edit route settings** 把它的子網段核准（和上一節一樣）。官方文件的 Troubleshooting 特別強調：**沒核准路由就開 exit node，房內裝置會集體斷網**。
+2. 回到路由器的 **APPLICATIONS → Tailscale**，啟用 **Custom Exit Nodes**。
+3. 點 **refresh**（重新整理）按鈕，從下拉選單選出家裡 exit node 的 IP，點 **Apply**。
+
+之後，接在路由器後面的所有裝置，上網流量都會先經由 Tailscale 送到家裡的 exit node 再出去，對外 IP 會變成家裡的 IP。電視、Switch 這類**本身裝不了 Tailscale 的裝置**，就靠路由器這一層「整個房間一起回家」。
+
+兩個官方文件提醒的坑：
+
+- **DNS 用私有 IP 會斷網**：如果路由器的 DNS 指向某個只有區網內連得到的私有位址，開了 exit node 之後可能連不上網。到 **NETWORK → DNS** 把 DNS 手動改成公開伺服器（例如 `8.8.8.8`）即可。
+- **速度與延遲**：整房流量都要繞回家再出去，直連和 DERP 中繼的差異會直接反映在體驗上。旅行網路的 NAT 若只能走中繼，串流會明顯變慢，見 [直連與 DERP 中繼](/troubleshooting/direct-vs-derp/)。
+
+## Run Exit Node：把 GL.iNet 本身當出口（v4.9 起）
+
+上面的用法是「旅行路由器當 client、連家裡的出口」。反過來，如果你有另一台 GL.iNet 放在家裡（或任何定點），韌體 **v4.9 起**可以讓它自己當 exit node：**APPLICATIONS → Tailscale → Run Exit Node**，再到 Admin console 核准 **Use as exit node**。官方文件建議順手 **Disable key expiry**（停用金鑰到期），避免出口斷線。這在「兩地各放一台 GL.iNet、互相把對方當出口」的情境特別實用。
+
+## IP Masquerading（v4.9 起）
+
+**v4.9 起** Tailscale 頁面多了 **IP Masquerading** 開關：開啟後，路由器的 LAN 裝置要連 tailnet 時，來源位址會被改寫成路由器的 Tailscale IP，**不需要另外在 Admin console 核准子網段路由**就能直接連。官方文件建議在兩個情境用它：不想設定 subnet route、只想讓裝不了 Tailscale 的 LAN 裝置能上 tailnet；以及自訂 exit node 想用更簡單的方式轉送流量。
+
+它其實就是原生 OpenWrt 文章裡講的 masquerade／SNAT（見 [OpenWrt 裝 Tailscale](/platforms/openwrt/) 的 `--snat-subnet-routes` 一節），只是 GL.iNet 把它做成一個開關。代價也一樣：對端看到的來源是路由器而非真正的 client，ACL、紀錄都會失去原本的來源資訊。
+
+## 韌體 4.8.x 的已知問題
+
+計劃裡點名的「韌體 4.8.1 已知問題」，依 GL.iNet 官方論壇的官方回覆整理如下：
+
+- **4.8.1 被官方下架**。GL.iNet 員工在論壇回覆：「我們發現 4.8.1 有若干問題，已從官網下架，不建議繼續使用，可考慮退回 4.7.7。」（[Give us 4.8.1 or give us fixed 4.8.2](https://forum.gl-inet.com/t/give-us-4-8-1-or-give-us-fixed-4-8-2-for-mt6000/64030)）
+- **在路由器上直接跑 Tailscale 的效能問題**。官方在 [Flint 3 - Firmware 4.8.1 and Tailscale](https://forum.gl-inet.com/t/flint-3-firmware-4-8-1-and-tailscale/64748) 回覆：4.8.1 有 CPU 排程相關問題，會影響直接在路由器上跑 Tailscale（含 exit node）的表現，新版已修正；這個問題**只影響在路由器上跑 Tailscale**，不影響路由器只當普通 client。
+- **Tailscale 專用防火牆 zone 的相容性問題（4.8.0–4.8.3）**。官方在 [Improvement on Tailscale for SDK v4.8](https://forum.gl-inet.com/t/improvement-on-tailscale-for-sdk-v4-8-and-potential-issue-notifications/65834) 說明：4.8.0–4.8.3 替 Tailscale 建立了專屬防火牆 zone（加了 `mtu_fix`），但先前有使用者手動把 `tailscale0` 加進 WAN zone，升級後兩套規則衝突，導致 LAN 裝置連不到 tailnet。官方在 4.8.5（及之後）加入腳本，升級時自動把 `tailscale0` 從 WAN zone 移除、歸到專屬 zone；v4.9 起更直接在 UI 提供 **IP Masquerading** 開關，不必再進 LuCI 手動改。
+
+簡單說：**別停留在 4.8.1，盡量升到最新穩定版**；如果你在 4.8.x 上遇到「路由器自己連得上、區網裝置連不上 tailnet」，先檢查是不是舊的 WAN zone 手動設定在作怪，再考慮升版或開 IP Masquerading。
+
+## guest Wi-Fi 不走 Tailscale
+
+GL.iNet 的 Guest Network 設計上就和主要網路隔離（見官方 [Guest Network](https://docs.gl-inet.com/router/en/4/interface_guide/guest_network/) 文件：「Isolated from the primary network」），v4.8 起還有 **Block WAN Subnets** 選項讓 guest 連不到上游網段。對應到 Tailscale，GL.iNet 員工在論壇明確說明：**只有主要網路（primary/main LAN）的 client 能存取 tailnet 與子網段，guest client 不能**（同上篇 [Improvement on Tailscale for SDK v4.8](https://forum.gl-inet.com/t/improvement-on-tailscale-for-sdk-v4-8-and-potential-issue-notifications/65834)）。
+
+所以旅行時如果讓家人或朋友連你路由器的 guest Wi-Fi，他們走的是旅館網路的原始出口、**不會**經由你的 exit node 回家，也看不到你的 tailnet。這對你其實是種保護（guest 流量不經你家出口、也碰不到你的裝置），但如果你預期「整個房間包括 guest 都走出口」，這點和你想的不一樣——官方韌體目前沒有把 guest 流量導進 exit node 的選項。
+
+## 用側邊滑動按鈕切換 Tailscale／exit node
+
+GL.iNet 很多型號有實體側邊滑動開關（toggle switch），可以拿來快速切換功能。到 **SYSTEM → Toggle Button Settings** 設定。官方提供的選項（v4.8 起）是：
+
+- No Function、Repeater、Wi-Fi（Main/Guest Wi-Fi）、VPN、Tor、AdGuard Home、LED
+
+**注意：Tailscale 不在內建選項裡**，也不能直接綁「切換 exit node」。要讓側邊開關控制 Tailscale，只能走自訂腳本：
+
+GL.iNet 韌體有一個**未寫進官方文件**的掛勾：把可執行腳本放進 `/etc/gl-switch.d/`，開關撥動時韌體會以 `on`／`off` 當參數呼叫它，再用 `uci` 把開關指定到這個腳本。這點在官方論壇有 GL.iNet 員工回覆確認（[Request official documentation/support for custom Toggle Button scripts](https://forum.gl-inet.com/t/request-official-documentation-support-for-custom-toggle-button-scripts/70799)），但官方至今沒有把自訂腳本寫進文件，屬進階、未正式支援的用法。
+
+腳本的骨架如下（放在 `/etc/gl-switch.d/`，記得 `chmod +x`）：
+
+```sh
+#!/bin/sh
+# /etc/gl-switch.d/your-script.sh
+action="$1"   # 撥動時會收到 "on" 或 "off"
+
+if [ "$action" = "on" ]; then
+  # 在這裡開啟 Tailscale（或選定 exit node）
+  logger "gl-switch: tailscale on"
+elif [ "$action" = "off" ]; then
+  # 在這裡關閉 Tailscale（或取消 exit node）
+  logger "gl-switch: tailscale off"
+fi
+```
+
+再把開關指到這個腳本：
+
+```bash
+uci set switch-button.@main[0].func="your-script"
+uci commit switch-button
+```
+
+`func` 的值就是腳本名稱（不含路徑、不含 `.sh`）。注意兩點：
+
+- **具體的開／關 Tailscale 指令，官方文件沒有說明**。GL.iNet 韌體內部用 UCI（`/etc/config/tailscale`）與自己的 hotplug 腳本管理 Tailscale，這些鍵值與路徑沒有正式文件，會隨韌體版本變動。上面骨架的 `on`／`off` 分支裡要執行的實際指令，請以你當下韌體上的實際機制為準，動工前先在 SSH 手動測試，不要照網路舊文照抄。
+- 腳本放在 overlay 裡，**韌體升級可能被清掉**；要跨升級保留，把它加進 `/etc/sysupgrade.conf`（論壇也提醒這點）。
+
+如果你只是要「手動快速開關」，其實最穩的做法仍是進 **APPLICATIONS → Tailscale** 切開關——側邊按鈕自訂腳本適合已經很熟 OpenWrt 的人。
+
+## 旅館 captive portal 的順序
+
+旅館 Wi-Fi 常有 captive portal（要先在登入頁認證才能上網）。官方 FAQ [Connect to public hotspot with Captive Portal](https://docs.gl-inet.com/router/en/4/faq/connect_to_a_hotspot_with_captive_portal/) 的順序是：
+
+1. 讓路由器以 **Repeater** 模式連上旅館 Wi-Fi（[Repeater](https://docs.gl-inet.com/router/en/4/interface_guide/internet_repeater/)）。
+2. 用手機或筆電連到路由器發的 Wi-Fi，開瀏覽器，完成旅館的 captive portal 認證——認證完成的是**路由器**，之後房內所有裝置都算已認證。
+3. 認證完成、確認能上網之後，**再**到 **APPLICATIONS → Tailscale** 開 Tailscale（或啟用 Custom Exit Node）。
+
+順序反了會失敗：官方 FAQ 在「連不上 captive portal」的排障步驟裡，第一條就是**先關閉所有 VPN 連線**（v4.8 以上是 VPN Dashboard 的全部 tunnel）。Tailscale 通了之後流量都導回你家，captive portal 根本跳不出來，所以一定要「**先過認證、再開 Tailscale**」。若跳不出認證頁，還可以用韌體 v4.6 起的 **Auto-Enable Login Mode for Public Hotspots** 與 **Enable Camouflage**（偽裝成你手機的 MAC），或乾脆 **MAC Clone** 成手機的位址；都失敗就請旅館櫃檯把路由器的出廠 MAC 加入白名單。
+
+## 存取規則
+
+預設 policy 下，tailnet 裡所有人都能用你核准的 exit node 與 subnet route。GL.iNet 的綁定流程是「以你的帳號把裝置加進來」，UI 上沒有 tag 或 auth key 的選項（要 tag 得走 SSH 的 `tailscale up --advertise-tags=...`），所以旅行路由器本身是普通帳號裝置。
+
+要收緊，重點是**限制 exit node 只能走你指定的出口**，在家裡 exit node 打上 tag、再寫最小權限：
+
+```json
+{
+  "tagOwners": {
+    "tag:home-exit": ["autogroup:admin"]
+  },
+  "grants": [
+    {
+      "src": ["autogroup:member"],
+      "dst": ["autogroup:internet"],
+      "ip": ["*"],
+      "via": ["tag:home-exit"]
+    }
+  ]
+}
+```
+
+這條 grant 放行「經由打上 `tag:home-exit` 的出口上網」——目的地寫 `autogroup:internet` 而不是那台裝置，`via` 指定只能走這台出口（`via` 只接受 tag）。路由器的 subnet route 則在 Admin console 手動核准（GL 的 UI 流程本來就是這樣），或改用 v4.9 的 IP Masquerading 免核准。完整語法見 [ACL / Grants 入門](/admin/acl-grants/)、[Tags 與 auth key](/admin/tags-auth-keys/)，以及 [Exit Node](/features/exit-node/) 的「自訂 ACL 時要注意」一節。
+
+## 小結
+
+| 步驟                          | 做什麼                                                                          |
+| ----------------------------- | ------------------------------------------------------------------------------- |
+| 連旅館 Wi-Fi + captive portal | Repeater 模式連上，先過認證、確認能上網，再開 Tailscale                         |
+| 啟用 Tailscale                | `APPLICATIONS → Tailscale` 開啟，點 **Device Bind Link** 綁定帳號               |
+| Allow Remote Access LAN       | 把房內網段廣告進 tailnet（等同 subnet router），Admin console 核准路由          |
+| Custom Exit Nodes             | 啟用、refresh、選家裡 exit node 的 IP，整房流量走家裡出口                       |
+| Run Exit Node（v4.9 起）      | 反過來把 GL.iNet 本身當出口                                                     |
+| IP Masquerading（v4.9 起）    | 免核准路由的簡化轉送（等同 masquerade），代價是失去來源 IP                      |
+| 側邊滑動開關                  | 內建選項沒有 Tailscale，要用 `/etc/gl-switch.d/` 自訂腳本（進階、未正式文件化） |
+| 存取規則                      | 出口打 tag + `via` 限制，路由手動核准或開 IP Masquerading                       |
+
+最容易踩的坑：韌體停在 4.8.1（官方已下架）、captive portal 沒過就先開 Tailscale（跳不出認證頁）、沒核准 subnet route 就開 exit node（整房斷網）、以及沿用原生 OpenWrt 的防火牆改法（和 GL 的專屬 zone 衝突）。
+
+## 延伸
+
+- 底下的 OpenWrt 細節（防火牆 zone、masquerade、`--snat-subnet-routes`）見 [OpenWrt 裝 Tailscale](/platforms/openwrt/)；這篇只講 GL.iNet UI 的差異，不重複防火牆設定。
+- 出口與網段的完整觀念、`--accept-routes`、grants 寫法，見 [Exit Node](/features/exit-node/) 與 [Subnet Router](/features/subnet-router/)。
+- 延遲敏感（串流、遊戲）要留意直連或中繼，見 [直連與 DERP 中繼](/troubleshooting/direct-vs-derp/)。
+- 其他平台：[華碩路由器（Asuswrt-Merlin + Entware）](/platforms/asus-merlin/)、[Docker 官方映像檔](/platforms/docker/)、[手機端設定](/platforms/ios-android/)。
+
+## 參考資料
+
+- [Tailscale（GL.iNet Router Docs 4）](https://docs.gl-inet.com/router/en/4/interface_guide/tailscale/)
+- [Toggle Button Settings（GL.iNet Router Docs 4）](https://docs.gl-inet.com/router/en/4/interface_guide/toggle_button_settings/)
+- [Guest Network（GL.iNet Router Docs 4）](https://docs.gl-inet.com/router/en/4/interface_guide/guest_network/)
+- [Connect to public hotspot with Captive Portal（GL.iNet Router Docs 4）](https://docs.gl-inet.com/router/en/4/faq/connect_to_a_hotspot_with_captive_portal/)
+- [Firmware v4.9（GL.iNet Router Docs 4）](https://docs.gl-inet.com/router/en/4/features_update/firmware_v4.9/)
+- [Improvement on Tailscale for SDK v4.8 and potential issue notifications（GL.iNet 官方論壇）](https://forum.gl-inet.com/t/improvement-on-tailscale-for-sdk-v4-8-and-potential-issue-notifications/65834)
+- [Give us 4.8.1 or give us fixed 4.8.2 for MT6000（GL.iNet 官方論壇）](https://forum.gl-inet.com/t/give-us-4-8-1-or-give-us-fixed-4-8-2-for-mt6000/64030)
+- [Flint 3 - Firmware 4.8.1 and Tailscale（GL.iNet 官方論壇）](https://forum.gl-inet.com/t/flint-3-firmware-4-8-1-and-tailscale/64748)
+- [Request official documentation/support for custom Toggle Button scripts（GL.iNet 官方論壇）](https://forum.gl-inet.com/t/request-official-documentation-support-for-custom-toggle-button-scripts/70799)
+- [Exit Nodes (route all traffic)（官方）](https://tailscale.com/kb/1103/exit-nodes)
+- [Subnet routers（官方）](https://tailscale.com/kb/1019/subnets)
+- [Exit Node：讓所有流量經由指定裝置出去](/features/exit-node/)
+- [Subnet Router：存取整個區網內沒裝 Tailscale 的設備](/features/subnet-router/)
