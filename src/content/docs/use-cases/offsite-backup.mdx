@@ -1,0 +1,146 @@
+---
+title: 異地備份放朋友家：PBS、restic 與 Hyper Backup 走 Tailscale
+description: 把異地備份放到朋友家或第二據點，用 Tailscale 在兩邊建立加密連線，不必開任何對外的埠。說明 3-2-1 原則、對方只開備份埠的最小權限 grants、append-only 與憑證分離，以及 PBS、restic 與群暉 Hyper Backup 三種做法的分工
+sidebar:
+  order: 2.5
+  label: 異地備份放朋友家
+---
+
+備份的 3-2-1 原則是老生常談：資料至少要有 **3** 份副本，存放在 **2** 種不同的儲存媒體，其中 **1** 份放在異地。「異地」的用意是：火災、淹水、竊盜、勒索軟體這些事，通常不會同時發生在兩個相隔夠遠的地方。放在同一間屋子的第二台 NAS，只算「2」，還不是完整的 3-2-1。
+
+真正的異地備份通常得租雲端，或找一台機器放到別處。這篇講第三種選擇：和信任的朋友**互相提供空間**——你把備份放到他家，他也把備份放到你家。兩邊都裝上 Tailscale，備份經由 tailnet 加密傳輸，不用在任一路由器上轉送任何埠。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件與各軟體官方文件整理，以 Tailscale v1.104、Proxmox Backup Server 4.2、restic 0.19.1、rest-server 0.14.0、Synology DSM 7 為準。三個工具的做法取自官方文件，未在實機驗證。
+
+## 先決定：同一 tailnet，還是裝置分享
+
+你和朋友要先決定兩台機器怎麼「看得到」彼此，有兩種做法：
+
+- **同一 tailnet**：其中一個人建一個 tailnet（個人方案最多 6 位使用者，見 [方案與限制比較](/getting-started/plans/)），邀請對方加入，兩台機器都進同一個 tailnet。最簡單，但會占用使用者名額，對方和他的其他裝置也會出現在這個 tailnet 裡。
+- **裝置分享（node sharing）**：各自保留自己的 tailnet，只把收備份的那台機器分享給對方。對方接受後，那台機器會出現在他的 tailnet 裡，但他看不到你的其他裝置。做法見 [分享裝置給 tailnet 以外的人](/admin/sharing/)，站上另一個走 node sharing 的實例是 [跟朋友開 Minecraft／Palworld 私服](/use-cases/game-server-with-friends/)。
+
+兩種做法都能做異地備份，但 grants 的寫法不同。下面「核心設計」的範例用 tag 當 `src`／`dst`，那是**同一 tailnet** 專用的寫法；裝置分享時，Tailscale 會把 tag 從分享出去、分享進來的機器上剝掉——帶 tag 的機器不能分享出去，你 tailnet 裡帶 tag 的機器也連不到分享來的機器，所以兩邊機器都**不能打 tag**。這種做法要把規則寫在分享方（朋友）的 policy 裡，用你接受分享的 email（或 `autogroup:shared`）當 `src`、那台機器的 Tailscale IP 當 `dst`，只開備份埠。
+
+## 核心設計：只開備份埠，其餘全拒
+
+不管用哪個工具，異地備份的存取規則只有一句話：**對方那台機器只開放備份用的那一個埠給你的備份來源，其他全部拒絕**。這樣即使你的備份來源機器被入侵，攻擊者從它身上能連到對方機器的，也就只有備份埠，進不了管理介面、SSH 或其他服務。
+
+假設你在 tailnet 裡放了一台備份來源（`tag:backup`），朋友放了一台收備份的機器（`tag:offsite`），policy 這樣寫（這是「同一 tailnet」的寫法，裝置分享請改用 email／IP，見上一節）：
+
+```json
+{
+  "tagOwners": {
+    "tag:backup": ["autogroup:admin"],
+    "tag:offsite": ["autogroup:admin"]
+  },
+  "grants": [
+    {
+      "src": ["tag:backup"],
+      "dst": ["tag:offsite"],
+      "ip": ["tcp:8007", "tcp:8000", "tcp:6281", "tcp:22"]
+    }
+  ]
+}
+```
+
+- 上面四個埠是各做法的備份埠，**實際用哪種就只留哪一個**：PBS 用 `tcp:8007`、rest-server 用 `tcp:8000`、restic 走 SFTP 用 `tcp:22`、群暉 Hyper Backup Vault 用 `tcp:6281`（DSM 7 的目的地另外要放行 `tcp:5000`／`tcp:5001` 給登入驗證，見做法三）。
+- `src` 是你的備份來源，`dst` 是朋友的機器，只有這條放行的連線會通，tailnet 裡的其他人、其他埠一律連不上。
+- 記得拿掉預設的全開規則（`*` 到 `*:*`），否則這條限制沒有作用。grants 的寫法見 [ACL / Grants 入門](/admin/acl-grants/)，tag 的設定見 [Tags 與 auth key](/admin/tags-auth-keys/)。
+
+兩層權限都要收斂：Tailscale 的 grants 決定「誰能連到備份埠」，備份軟體自己的帳號權限決定「連上之後能做什麼」。下面三種做法的重點，都放在後者怎麼收斂。
+
+## 做法一：Proxmox Backup Server（PBS）
+
+如果備份來源是 Proxmox VE，最省事的是用 [Proxmox Backup Server](/pve/proxmox-backup-server/)（PBS）：把第二台 PBS 放在朋友家，用內建的 remote 與 sync job 把整個 datastore 同步過去。資料會去重、切成 chunk，傳輸量比整顆 VM 映像檔小。
+
+PBS 的 remote 設定、fingerprint、API token 最小權限、pull／push 兩種方向，都已經寫在 [Proxmox Backup Server 走 Tailscale 做異地備份](/pve/proxmox-backup-server/) 那篇，這裡不重複。從本篇的角度只要記住三件事：
+
+- **埠**：PBS 的 API 與網頁介面都監聽 **8007**，sync job 也走這個埠，grants 開 `tcp:8007`。
+- **方向**：push（你家推過去）適合朋友只是提供機器、由你主動推；pull（朋友家那台來拉）適合異地那台由你管理。差別在於誰持有誰的 token。
+- **最小權限**：remote 的登入身分用 API token，只給同步需要的角色，不要用完整帳號。
+
+防勒索方面，重點在 **push 方向**：push 時 remote 用的 token 是異地那台發的，只給「寫入」權限（`DatastoreBackup`）、不給 prune／modify。這樣你家那台機器（即使被入侵、拿到這支 token）也只能把備份「寫過去」，刪不掉異地那台已有的備份；真要清掉，得用異地那台自己的管理權限。
+
+## 做法二：restic + rest-server
+
+[restic](https://restic.readthedocs.io/) 是命令列備份工具，備份前先在來源端加密、去重，再切成 chunk 上傳，所以你放到朋友家的永遠是加密過的資料，朋友看不到內容。它支援很多後端，異地備份最常用兩種。
+
+### rest-server：內建 append-only 防勒索
+
+[rest-server](https://github.com/restic/rest-server) 是官方維護的輕量 HTTP 伺服器，實作 restic 的 REST 後端。朋友在他那台機器上跑它，你的 restic 用 `rest:` 網址連過去。
+
+重點是 **append-only 模式**：以 `--append-only` 啟動時，伺服器允許新增備份，但**拒絕刪除或修改既有備份**。這樣即使你家那台機器被勒索軟體控制，攻擊者拿到 restic 的連線憑證，也只能「加東西」，刪不掉已經備份到朋友家的副本。要清理舊快照（`restic forget`／`prune`）時，才用另一組沒開 append-only 的維護管道，或暫時關掉 append-only、由朋友操作。
+
+```bash
+# 朋友家的機器上
+rest-server --path /srv/restic --append-only --listen :8000
+```
+
+- **預設埠是 8000**（`--listen` 預設 `:8000`）。
+- 建議同時用 `.htpasswd` 做 HTTP 基本驗證，替你的備份來源單獨開一個帳號。檔名固定是 `.htpasswd`，要放在**資料目錄的根層**（此例是 `/srv/restic/.htpasswd`），或用 `--htpasswd-file` 指定別的位置；生成指令是 `htpasswd -B -c .htpasswd <使用者>`（在資料目錄下執行）。注意：沒加 `--no-auth` 時，rest-server 若開不了 `.htpasswd` 會**拒絕啟動**，所以檔案要放在它找得到的地方。append-only 加上這個帳號只授權「寫入」，是最常見的組合。
+- 也可以把 `--listen` 綁到 Tailscale IP 或 `tailscale0` 介面，避免 8000 意外暴露到區網或公網。
+
+你這邊初始化 repo 並備份：
+
+```bash
+restic -r rest:http://<使用者>:<密碼>@<朋友機器>.ts.net:8000/<你的 repo> init
+restic -r rest:http://<使用者>:<密碼>@<朋友機器>.ts.net:8000/<你的 repo> backup /path/to/data
+```
+
+restic 自己會加密內容，所以走 HTTP 時，帳號密碼只保護「驗證」、不保護「內容」（內容本來就是加密的）；而整條連線走 Tailscale 時，途中又是另一層加密。想連驗證也加密，可以給 rest-server 加 `--tls`。
+
+### SFTP 後端：不用跑額外服務
+
+朋友那台只要開 SSH（`tcp:22`），你就能用 restic 的 SFTP 後端：
+
+```bash
+restic -r sftp:<使用者>@<朋友機器>.ts.net:/srv/restic init
+```
+
+SFTP 後端沒有 append-only：對方機器上的帳號若能寫，就能刪。所以它適合「朋友完全信任你」的互放機器情境；要防來源端被入侵後刪備份，就用上面的 rest-server append-only。
+
+版本以本文寫成時的 GitHub release 為準：restic 0.19.1（2026 年 7 月）、rest-server 0.14.0（2025 年 5 月）。rest-server 要求 restic 0.7.1 以上。
+
+## 做法三：群暉 Hyper Backup 到另一台群暉
+
+兩邊都是群暉 NAS 的話，用內建的 Hyper Backup 最省事：來源 NAS 跑 Hyper Backup 建立任務，目的地 NAS 裝 **Hyper Backup Vault**，前者把備份推到後者。
+
+- **目的地要裝 Hyper Backup Vault**：它把 NAS 變成其他遠端 NAS 的備份目的地，用來收 `.hbk` 備份檔、顯示任務狀態。
+- **資料埠是 6281**，但 DSM 7 的目的地建立任務時會分兩步：登入驗證走 DSM 管理埠 **5000／5001**，通過後資料才走 **6281**（DSM 6 的 Vault 只靠 6281）。Synology 官方 KB 列出的跨網段備份埠就是 **5000、5001 與 6281**，所以走 Tailscale 時 grants 要對目的地放行 `tcp:5000`／`tcp:5001`／`tcp:6281`，只開 6281 會卡在建立任務時的登入驗證。路由器上則完全不用轉送。
+- 在 Hyper Backup 建立任務時，目的地選「遠端 Synology NAS」，位址填對方 NAS 的 Tailscale IP 或 MagicDNS 名稱，埠填 6281。
+- 建議開啟**傳輸加密**與**用戶端加密**：用戶端加密讓備份檔在對方 NAS 上是加密的，朋友看不到內容；傳輸加密保護途中資料。
+
+兩台 NAS 都要先裝 Tailscale。DSM 7 上若要讓 NAS 能主動連出到 tailnet（Hyper Backup 是來源端主動推，通常需要），依 [DSM 7 讓 NAS 上的其他服務也能連出去：TUN 與 configure-host](/synology/dsm7-outbound-tun/) 設定；更多群暉遠端存取與 Tailscale 的比較見 [QuickConnect 與 Tailscale：什麼時候用哪一個](/synology/quickconnect-vs-tailscale/)。
+
+Hyper Backup 沒有 rest-server 那種嚴格的 append-only 模式，但異地那台 NAS 是朋友管理的另一個管理網域，你家的備份來源被入侵，不會自動拿到對方 Vault 的刪除權限。再搭配多版本輪替與快照，可以補強「刪不掉」這點。
+
+## 不可變備份與憑證分離：被勒索也刪不掉
+
+這篇反覆提到的 append-only，背後是兩件事：
+
+1. **備份端（來源）被入侵時，刪不掉異地副本**。勒索軟體拿到你家機器的權限後，第一件事就是刪備份、加密資料再要錢。如果異地那台對「你家這個來源」只開放 append-only（只能寫、不能刪），攻擊者能做的就只剩「多寫一些垃圾」，既有的異地副本保住了。
+2. **憑證分離**。真正能刪異地資料的權限（rest-server 的維護帳號、PBS 的 prune 權限、對方 NAS 的管理員），不要放在會被入侵的那台來源機器上。restic 的 repository password（解密資料用的金鑰）也只留在你自己手上：朋友只有儲存端的寫入帳號，所以他看不到內容，你也不用怕他偷看。
+
+把「誰能寫」和「誰能刪」拆成不同的人、不同的憑證，是異地備份防勒索的關鍵。三個工具裡 rest-server 的 append-only 最直接，PBS 靠 token 權限做到類似效果，Hyper Backup 則靠異地管理網域分離加版本輪替。
+
+## 確認與注意事項
+
+- **先確認直連**：異地備份要傳大量資料，如果兩邊之間走 DERP 中繼，吞吐量會受限、備份時間拉長。在來源機器上執行 `tailscale ping <對方>`，看到 `via DERP(...)` 代表走中繼。原因與改善方法見 [直連與 DERP 中繼](/troubleshooting/direct-vs-derp/)。
+- **頻寬**：異地備份的瓶頸通常是兩邊住家的**上傳**頻寬，尤其台灣常見上下行不對稱的寬頻。第一次完整備份量最大，可以先把機器帶回家、在區網完成初次備份，之後只同步增量。
+- **定期驗證還原**：備份能不能用，要真的還原一次才知道。每隔一段時間從異地副本還原幾個檔案，確認沒壞。
+- **測試 grants 有沒有收斂**：用 [ACL / Grants 入門](/admin/acl-grants/) 提到的 `tests` 區段，寫下「來源連得到備份埠、連不到 22／管理埠」的測試，避免改壞規則。
+
+## 參考資料
+
+- [Proxmox Backup Server 走 Tailscale 做異地備份](/pve/proxmox-backup-server/)
+- [Managing Remotes & Sync（PBS 官方）](https://pbs.proxmox.com/docs/managing-remotes.html)
+- [rest-server（restic 官方，含 `--append-only` 與預設埠 8000）](https://github.com/restic/rest-server)
+- [Preparing a new repository（restic 手冊）](https://restic.readthedocs.io/en/latest/030_preparing_a_new_repo.html)
+- [restic releases](https://github.com/restic/restic/releases)、[rest-server releases](https://github.com/restic/rest-server/releases)
+- [Synology 系統的服務使用哪些網路連接埠？（Synology KB）](https://kb.synology.com/zh-tw/DSM/tutorial/What_network_ports_are_used_by_Synology_services)
+- [Hyper Backup Vault（Synology KB）](https://kb.synology.com/zh-tw/DSM/help/HyperBackupVault/HyperBackupVault)
+- [目的地 | Hyper Backup（Synology KB）](https://kb.synology.com/zh-tw/DSM/help/HyperBackup/data_backup_destination)
+- [分享裝置給 tailnet 以外的人](/admin/sharing/)
+- [ACL / Grants 入門](/admin/acl-grants/)
+- [Tags 與 auth key：給伺服器用的非互動登入](/admin/tags-auth-keys/)
+- [直連與 DERP 中繼](/troubleshooting/direct-vs-derp/)
