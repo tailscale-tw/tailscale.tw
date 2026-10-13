@@ -47,18 +47,18 @@ Sunshine 預設綁定所有網路介面（`bind_address` 留空＝`0.0.0.0`）�
 
 Sunshine 預設用一組固定的埠（可在 Web UI 的 **Network** 改基準埠，其他埠會跟著平移）：
 
-| 埠         | 協定 | 用途                                 |
-| ---------- | ---- | ------------------------------------ |
-| 47984      | TCP  | HTTPS，Moonlight 配對與串流          |
-| 47989      | TCP  | HTTP（基準埠）                       |
-| 47990      | TCP  | Web UI（HTTPS）                      |
-| 48010      | TCP  | RTSP 控制                            |
+| 埠          | 協定 | 用途                                 |
+| ----------- | ---- | ------------------------------------ |
+| 47984       | TCP  | HTTPS，Moonlight 配對與串流          |
+| 47989       | TCP  | HTTP（基準埠）                       |
+| 47990       | TCP  | Web UI（HTTPS）                      |
+| 48010       | TCP  | RTSP 控制                            |
 | 47998–48000 | UDP  | 影片、音訊與控制串流                 |
-| 5353       | UDP  | mDNS，區網自動發現（tailnet 用不到） |
+| 5353        | UDP  | mDNS，區網自動發現（tailnet 用不到） |
 
 這些埠在 tailnet 內使用即可，不用對外開。**47990 是唯一需要特別控管的**：它是管理介面。
 
-> **關於 48002 與 UDP 48010**：這兩個埠出現在 Moonlight 官方文件的「手動轉發」與防火牆清單裡，但那是給 GeForce Experience（GameStream 舊協定）相容用的。Sunshine 本身不監聽 UDP 48002，RTSP 的 48010 也是走 TCP；Sunshine 原始碼的 UPnP 轉發清單就只有上表的 TCP 47984／47989／48010 與 UDP 47998–48000。所以走 Sunshine 時不需要開這兩個埠，只要讓上表列出的埠在 tailnet 內可達即可。
+> **關於 48002 與 UDP 48010**：這兩個埠出現在 Moonlight 官方文件的「手動轉發」與防火牆清單裡，但那是給 GeForce Experience（GameStream 舊協定）相容用的。Sunshine 本身不監聽 UDP 48002，RTSP 的 48010 也是走 TCP；Sunshine 原始碼的 UPnP 轉發清單就只有 TCP 47984／47989／47990／48010 與 UDP 47998–48000。所以走 Sunshine 時不需要開這兩個埠，只要讓上表列出的埠在 tailnet 內可達即可。
 
 Sunshine 有個 `origin_web_ui_allowed` 設定，控制誰能開 Web UI，預設是 `lan`（只允許區域網路裝置）。這裡有個容易誤判的細節：Sunshine 原始碼把 Tailscale 的 `100.64.0.0/10` 也歸在「LAN」範圍內，所以 tailnet 裝置**預設就能開到 Web UI**。換句話說，`lan` 擋的是公網，擋不住你自己的 tailnet；要限制只能靠 Tailscale 的 grants（見最後一節）。
 
