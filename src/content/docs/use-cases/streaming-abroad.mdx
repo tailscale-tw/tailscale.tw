@@ -1,0 +1,174 @@
+---
+title: 人在海外用家裡的 exit node：台灣限定串流與網銀
+description: 人在海外時，用家裡的 Tailscale Exit Node 讓所有上網流量從家裡的 IP 出去，觀看台灣限定串流、使用台灣網銀。說明 exit node 的選擇、DNS 也要走家裡的設定、家用上傳頻寬與直連／中繼對速度的影響，以及反向情境（在台灣用海外 VPS 當出口）的保守做法
+sidebar:
+  order: 5.5
+  label: 海外用家裡的 exit node
+---
+
+人在海外，想看台灣的串流、用台灣的網銀，常會遇到「地區限制」或「海外登入限制」。Tailscale 的 [Exit Node](/features/exit-node/) 可以把你的所有上網流量導回家裡的 IP 出去，對外看起來就像人還在台灣。
+
+這篇講的不是 Exit Node 的基礎設定（那在 [Exit Node](/features/exit-node/) 一文），而是這個情境下的三個關鍵問題：**家裡拿哪台機器當出口**、**DNS 也要一起走家裡**、以及**速度和直連**。最後補一段反向情境：在台灣用海外 VPS 當出口。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件整理，以 Tailscale v1.104 為準。本文未在實機驗證，屬文件整理。串流平台與網銀的可用性，依各服務的條款、偵測方式與各銀行的公開規定而定，**不在本文保證範圍**；文中不列舉特定平台或銀行。
+
+## 先講清楚：Exit Node 做得到什麼、不保證什麼
+
+Exit Node 是技術工具，它的保證範圍很清楚：
+
+- **對外 IP 變成家裡的 IP**：所有上網流量（預設路由 `0.0.0.0/0` 與 `::/0`）經由家裡的出口出去，網站看到的來源 IP 是家裡的。
+- **DNS 查詢也從家裡出去**：預設連 DNS 都交給出口解析（見下面的 [DNS 也要走家裡](#dns-也要走家裡)），查詢結果反映台灣的解析。
+
+它**不保證**的是：
+
+- **串流平台一定可以看**。各平台有自己的服務條款，也持續在偵測 VPN、機房 IP、共享 IP 等行為。用家裡的 IP 通常比用機房 IP 更像一般使用者，但沒人能保證特定平台不會擋；平台的偵測方式隨時在變，本文不列舉特定平台、也不預測結果。
+- **網銀一定不會被擋**。台灣網銀的海外登入限制，以各銀行的公開說明為準；查得到的規則請以銀行官網為準，本文只寫一般性說明（見 [網銀：海外登入限制](#網銀海外登入限制)）。
+
+簡言之：Exit Node 讓流量「從家裡的 IP 出去」這件事是可靠的；但「因此某個服務一定可以用」，取決於那個服務，不是 Tailscale。
+
+## 前置：家裡拿哪台機器當出口
+
+Exit Node 需要一台**一直開著、一直在線**的機器。選擇時的重點不是效能多強，而是穩定、有線、別睡著。站內已有幾篇對應的實作，依你手邊有的設備選：
+
+| 家裡的設備                | 適合程度 | 參考文章                                                                     |
+| ------------------------- | -------- | ---------------------------------------------------------------------------- |
+| **Apple TV**              | 最佳     | [一台 Apple TV 就是家裡的 exit node](/use-cases/apple-tv-exit-node/)         |
+| **Linux 主機／小主機**    | 最佳     | [Exit Node：讓所有流量經由指定裝置出去](/features/exit-node/)                |
+| **PVE 上的 LXC**          | 好       | [在 LXC 中使用 Tailscale](/pve/tailscale-on-lxc/)（LXC 上跑 Tailscale）      |
+| **NAS（Synology／QNAP）** | 視機種   | 依 [Exit Node](/features/exit-node/) 的 Linux 步驟，注意各平台 outbound 限制 |
+| **GL.iNet 路由器**        | 定點可用 | [GL.iNet 旅行路由器](/platforms/glinet-travel-router/)（v4.9 起可當出口）    |
+
+幾個選機器的共通原則：
+
+- **接有線、別讓它睡著**。Apple TV 要確認設成 home hub；macOS／Windows 要防止睡眠，否則出口會斷（細節見 [Exit Node](/features/exit-node/) 的常見問題）。
+- **Linux 是最成熟的出口平台**。macOS 與 Windows 目前以 userspace 路由實作、仍在最佳化，要穩定當出口，Linux（含 LXC、NAS 上的 Linux 核心）仍是最穩的選擇。
+- **能順手當出口就好，不需要高效能**。出口的瓶頸通常是家用網路的**上傳頻寬**，不是 CPU（見 [速度與直連](#速度與直連家用上傳是瓶頸)）。
+
+設定出口的三步——開啟 IP forwarding、`tailscale set --advertise-exit-node`、到 Admin console 核准——都在 [Exit Node](/features/exit-node/) 有完整步驟，這裡不重複。
+
+### 只放行給自己用的最小權限
+
+Exit Node 是「把流量導到你家出去」的設施，預設 policy 下，tailnet 裡所有人都能用已核准的出口。如果是個人 tailnet，通常沒問題；但想收緊時，替出口打上 tag，再寫最小權限的 grant，讓「經由這台出口上網」只限於你指定的對象：
+
+```json
+{
+  "tagOwners": {
+    "tag:home-exit": ["autogroup:admin"]
+  },
+  "grants": [
+    {
+      "src": ["autogroup:member"],
+      "dst": ["autogroup:internet"],
+      "ip": ["*"],
+      "via": ["tag:home-exit"]
+    }
+  ]
+}
+```
+
+目的地寫 `autogroup:internet` 而不是那台裝置的 IP；`via` 指定只能走打上 `tag:home-exit` 的出口（`via` 只接受 tag）。完整的語法與說明見 [Exit Node](/features/exit-node/) 的「自訂 ACL 時要注意」一節，tag 的建立見 [Tags 與 auth key](/admin/tags-auth-keys/)。
+
+## DNS 也要走家裡
+
+串流和網銀這類情境，**光有台灣 IP 還不夠，DNS 也要在台灣解析**：很多服務會依你查詢 DNS 時所在的網路，回傳不同地區的 CDN 或不同的網站入口。如果 IP 是台灣的、DNS 卻還是國外的，可能拿到錯誤的解析結果。
+
+好消息是，這點 Tailscale 預設就幫你處理好了——但前提是你要知道它的行為，否則反而會踩坑。
+
+### 預設行為：DNS 交給出口
+
+使用 Exit Node 時，**預設所有網域的 DNS 查詢都交給出口解析**，不管你設定了什麼 global nameserver 或 split DNS。原始碼裡對應的邏輯是「使用 exit node 時，把所有的 DNS 流量都送到 exit node」。出口用自己的系統 DNS 解析，查詢結果和其他流量一樣從出口的網路出去，所以會反映台灣的解析。
+
+也就是說，最簡單的用法其實是「什麼都不用設」：選了家裡的出口，DNS 自然就跟著走家裡。
+
+### MagicDNS 名稱不受影響
+
+tailnet 內部的名稱解析（`nas`、`nas.tail1234.ts.net`）由每台裝置上的 `100.100.100.100` 轉發器就地處理，**不經過出口**。所以用出口上網時，連 tailnet 裡其他裝置照樣用名稱就行。這部分的機制見 [MagicDNS](/features/magicdns/)。
+
+### 如果你設了 global nameserver（NextDNS、Control D、Pi-hole）
+
+在 Admin console 設過 global nameserver（例如 [NextDNS 或 Control D](/use-cases/nextdns-control-d/)、[Pi-hole](/use-cases/pi-hole/)）的話，要注意：**使用出口時，這些 nameserver 預設不會被使用**——DNS 直接交給出口了。
+
+如果你希望某台 nameserver 在使用出口時仍然生效（例如公司內網網域的 split DNS），到 Admin console 的 [DNS](https://console.tailscale.com/admin/dns) 頁面編輯這台 nameserver，打開 **Use with exit node**。這個開關對 NextDNS、Control D、Pi-hole 等一律適用，細節見 [MagicDNS](/features/magicdns/) 的「使用 Exit Node 時的 DNS」與 [用 NextDNS 或 Control D 過濾整個 tailnet 的 DNS](/use-cases/nextdns-control-d/)。
+
+### IPv6
+
+出口的預設路由同時涵蓋 IPv4（`0.0.0.0/0`）和 IPv6（`::/0`）。如果家裡的網路有 IPv6、出口也走得到 IPv6 對外，IPv6 流量同樣會經由出口出去；家裡的網路沒有 IPv6 時，IPv6 流量則無法經由出口送達。台灣的固網與行動業者多數已提供 IPv6，開通後等於多一條路，相關說明見 [台灣 ISP 與 NAT](/troubleshooting/taiwan-isp-nat/)。
+
+### 手機上的「Allow LAN access」
+
+使用出口時，**預設連不到自己所在的區網**（旅館房間的印表機、電視等都連不到）。旅途中想一邊走家裡出口、一邊連房間裡的裝置，把手機 app 的 **Allow LAN access**（Android；iOS 在出口清單裡對應選項）打開。Linux 對應的旗標是 `--exit-node-allow-lan-access=true`，完整說明見 [Exit Node](/features/exit-node/)。
+
+## 速度與直連：家用上傳是瓶頸
+
+這個情境下，速度的第一個瓶頸不是 Tailscale，而是**家裡的網路上傳頻寬**。所有流量都要先繞回家、再從家裡的網路出去，所以你實際能拿到的下載速度，不會超過家裡的**上傳**頻寬（例如家裡上傳 40 Mbps，那看串流的天花板就是 40 Mbps，還不含額外開銷）。
+
+第二個瓶頸是**直連還是中繼**：
+
+- **直連（direct）**：封包直接在你和出口之間傳送，延遲最低。
+- **DERP 中繼**：直連失敗時，封包繞到 Tailscale 的 DERP 伺服器再轉，台灣最近的區域通常是香港或東京，延遲高、頻寬也受限。
+
+在使用的裝置上執行 `tailscale ping <出口名稱>`，看最後一行：`via <IP>:<埠>` 是直連，`via DERP(hkg)` 是中繼。`tailscale status` 的 `direct`／`relay "hkg"` 也是同一件事。判讀方法見 [用 tailscale netcheck 與 tailscale ping 診斷連線](/troubleshooting/netcheck-and-ping/)。
+
+旅館、公共 Wi-Fi 常擋 UDP 或躲在 hard NAT 後面，只能走中繼；這種情況下串流會明顯變慢。改善直連、架 [Peer Relay](/features/peer-relay/) 讓中繼改走自己的機器、以及台灣各網路環境的直連條件，見 [直連與 DERP 中繼](/troubleshooting/direct-vs-derp/)、[Peer Relay](/features/peer-relay/) 與 [台灣 ISP 與 NAT](/troubleshooting/taiwan-isp-nat/)。想先量出吞吐量的天花板，用 [iperf3 量 Tailscale 吞吐量的正確方法](/performance/iperf-methodology/)。
+
+## 台灣限定串流：保守的幾點說明
+
+用家裡的出口看台灣串流，是這個情境最常見的用途。這裡只做一般性說明，不點名特定平台：
+
+- **服務條款是另一回事**。串流平台的條款多半規範「只能在其授權地區使用」或對 VPN 有不同態度。能不能用、用了是否違反條款，以各平台的條款為準，本文不替任何平台背書。
+- **平台會偵測 VPN 與代理**。偵測的方式很多：已知的 VPN 或機房 IP 清單、來源 IP 的型態、DNS 與 IP 的所在地是否一致、甚至裝置的行為。家裡的住宅 IP 通常比機房 IP 更接近一般使用者，但這不代表一定不會被偵測。
+- **DNS 與 IP 要一致**。如果只讓 IP 走台灣、DNS 卻還是國外的，一些平台的「地區判斷」會因此失敗。上一節說明的「預設 DNS 跟著出口」，正好避免這種不一致。
+
+總之：這個做法「讓你看起來像從台灣上網」是成立的；「因此某個平台一定可以看」，本文無法保證。
+
+## 網銀：海外登入限制
+
+台灣網銀為了防詐與資安，不少銀行對「海外登入」有額外限制或驗證。這方面以各銀行的公開說明為準，本文不列舉具體銀行的規則，只寫一般性注意事項：
+
+- **先查銀行公告**。出發前先確認你要用的銀行對海外登入、轉帳的規定，例如是否需要開通、是否有 IP 地區判斷、是否限制只能用特定驗證方式。
+- **限制可能不只看 IP**。銀行可能的判斷因素包括：登入來源 IP 的地區、裝置、過去登入紀錄、是否開啟了額外驗證等。Exit Node 讓來源 IP 變成家裡的，但其他因素仍在銀行端。
+- **兩段式驗證與通知**。海外登入常觸發額外驗證（OTP、簡訊、App 推播）。開著這些通知，能即時知道登入是否被要求進一步確認。
+- **別把網銀和串流混為一談**。串流是內容授權的地區限制；網銀是資安與法規限制。前者用出口多半是想繞過地區，後者務必確認是否符合銀行的規定與你自己的使用情境。
+
+如果某家銀行的規則查不到公開說明，就以「一般性」的原則處理：使用家裡的出口讓來源 IP 落在台灣，其餘限制仍依銀行當時的規則。
+
+## 反向情境：在台灣用海外 VPS 當出口（未實測）
+
+反過來，人在台灣、想用日本或美國的 IP，可以用一台海外的 VPS 當出口：租一台東京（或其他地區）的 VPS，裝上 Tailscale，照 [Exit Node](/features/exit-node/) 的 Linux 步驟把它廣告為出口、核准，再把裝置的出口指向它。機制和「海外連回台灣」完全一樣，只是方向相反。
+
+這個情境的注意事項（**本文未實測，以下為文件整理與一般性判斷**）：
+
+- **機房 IP 較容易被辨識**。VPS 的 IP 屬於資料中心（datacenter）網段，串流平台對機房 IP 的偵測通常更嚴。效果因平台與 VPS 商而異，本文無法保證。
+- **延遲與路線**。從台灣連東京 VPS，直連時延遲通常比連香港、新加坡略高；能否直連一樣取決於兩邊的 NAT 條件，用 [tailscale netcheck](/troubleshooting/netcheck-and-ping/) 判斷。
+- **出口要停用金鑰到期**。VPS 性質接近伺服器，記得在 Admin console 關掉 key expiry，避免金鑰到期後出口斷線（fail close 會讓使用它的裝置整個斷網），見 [Exit Node](/features/exit-node/)。
+- **想換國家 IP 的替代方案**：如果只是想換到其他國家的 IP、不想自己維護 VPS，Tailscale 有加購的 [Mullvad Exit Node](/features/mullvad-exit-node/)，直接用 Mullvad 的伺服器當出口（目前沒有台灣的伺服器，這點 Mullvad Exit Node 一文有說明）。
+
+計劃中原本列為「東京 VPS 反向情境實測」，但本文撰寫時無法實機驗證，故依官方文件與一般網路行為說明，不提供測速或解鎖結果。
+
+## 小結
+
+| 步驟       | 做什麼                                                                       |
+| ---------- | ---------------------------------------------------------------------------- |
+| 架出口     | 家裡一台常開、有線的機器當 exit node（Apple TV／Linux／LXC 等）              |
+| 收緊權限   | 出口打 tag + `via` 限制，只放行自己要用的對象                                |
+| DNS 走家裡 | 預設已由出口解析；有設 global nameserver 時，需要就開 **Use with exit node** |
+| 確認速度   | `tailscale ping`／`tailscale status` 看直連或中繼，量上傳頻寬天花板          |
+| 串流與網銀 | 保守看待：以各平台條款、各銀行公告為準，本文不保證結果                       |
+
+最容易踩的坑：出口那台機器睡著或斷線、DNS 沒跟著走（用了別人的 nameserver 卻沒開 Use with exit node）、以及把「有台灣 IP」誤當成「平台一定放行」。
+
+## 延伸
+
+- 出口與網段的完整觀念、各平台選擇出口的方式、grants 語法，見 [Exit Node](/features/exit-node/)。
+- 一台 Apple TV 就是現成的家庭出口，見 [一台 Apple TV 就是家裡的 exit node](/use-cases/apple-tv-exit-node/)。
+- 想讓整個旅館房間的裝置都走家裡，見 [GL.iNet 旅行路由器：整個旅館房間接回家](/platforms/glinet-travel-router/)。
+- DNS 的行為與設定，見 [MagicDNS 與自訂 DNS 設定](/features/magicdns/) 與 [用 NextDNS 或 Control D 過濾整個 tailnet 的 DNS](/use-cases/nextdns-control-d/)。
+- 直連、中繼與效能的判斷，見 [直連與 DERP 中繼](/troubleshooting/direct-vs-derp/) 與 [Peer Relay](/features/peer-relay/)。
+
+## 參考資料
+
+- [Exit nodes (route all traffic)（官方）](https://tailscale.com/docs/features/exit-nodes)
+- [DNS in Tailscale（官方）](https://tailscale.com/docs/reference/dns-in-tailscale)
+- [Tailscale 原始碼：`ipn/ipnlocal/node_backend.go`（exit node 下的 DNS 處理）](https://github.com/tailscale/tailscale/blob/main/ipn/ipnlocal/node_backend.go)
+- [Exit Node：讓所有流量經由指定裝置出去](/features/exit-node/)
+- [MagicDNS 與自訂 DNS 設定](/features/magicdns/)
