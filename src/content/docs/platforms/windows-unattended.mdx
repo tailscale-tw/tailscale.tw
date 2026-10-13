@@ -81,7 +81,7 @@ tailscale set --unattended=false
 - **切換使用者（Switch user / fast user switching）**：不會登出原本的使用者，只是把該工作階段切到背景（等同鎖定），**工作階段仍存活**，所以原本使用者的 Tailscale 會繼續在背景執行、裝置維持連線。不過新登入的使用者是獨立的工作階段，預設看不到也不能接管原本使用者的 Tailscale 設定。
 - **重開機**：等同所有使用者登出，預設斷線；開無人值守模式後，開機完成（還沒人登入）就會恢復連線。
 
-「切換使用者」這點官方文件沒有逐字說明，這裡是依 v1.104.1 原始碼對工作階段事件的處理（鎖定 → 標為背景工作階段、登出 → 刪除工作階段）與 Windows 本身的行為整理。
+「切換使用者」這點官方文件沒有逐字說明，這裡是依 v1.104.1 原始碼 `ipn/desktop/sessions_windows.go` 對工作階段事件的處理（鎖定 → 標為背景工作階段、登出 → 刪除工作階段）與 Windows 本身的行為整理。
 
 ### 驗證
 
@@ -116,7 +116,7 @@ Tailscale 用戶端「是否接受其他節點廣告的網段路由」有一個�
 
 Windows 可以當 exit node，設定方式與 Linux 不同——**不用手動開 IP forwarding**，全部在圖形介面完成（出自官方 [exit nodes](https://tailscale.com/docs/features/exit-nodes) 文件）：
 
-1. 開啟 Windows 上的 Tailscale 用戶端，選 **Exit Node** → **Run as exit node**。
+1. 開啟 Windows 上的 Tailscale 用戶端，選 **Exit node** → **Run exit node**。
 2. 到 admin console 的 [Machines](https://console.tailscale.com/admin/machines) 頁面，找到這台裝置（會出現 **Exit Node** 徽章）。
 3. 選 **Edit route settings**，勾選 **Use as exit node**，儲存。
 
