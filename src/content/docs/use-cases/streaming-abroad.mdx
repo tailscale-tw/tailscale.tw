@@ -22,7 +22,7 @@ Exit Node 是技術工具，它的保證範圍很清楚：
 它**不保證**的是：
 
 - **串流平台一定可以看**。各平台有自己的服務條款，也持續在偵測 VPN、機房 IP、共享 IP 等行為。用家裡的 IP 通常比用機房 IP 更像一般使用者，但沒人能保證特定平台不會擋；平台的偵測方式隨時在變，本文不列舉特定平台、也不預測結果。
-- **網銀一定不會被擋**。台灣網銀的海外登入限制，以各銀行的公開說明為準；查得到的規則請以銀行官網為準，本文只寫一般性說明（見 [網銀：海外登入限制](#網銀海外登入限制)）。
+- **網銀一定不會被擋**。台灣網銀的海外登入限制，以各銀行官網的公開說明為準，本文只寫一般性說明（見 [網銀：海外登入限制](#網銀海外登入限制)）。
 
 簡言之：Exit Node 讓流量「從家裡的 IP 出去」這件事是可靠的；但「因此某個服務一定可以用」，取決於那個服務，不是 Tailscale。
 
@@ -96,7 +96,7 @@ tailnet 內部的名稱解析（`nas`、`nas.tail1234.ts.net`）由每台裝置�
 
 ### 手機上的「Allow LAN access」
 
-使用出口時，**預設連不到自己所在的區網**（旅館房間的印表機、電視等都連不到）。旅途中想一邊走家裡出口、一邊連房間裡的裝置，把手機 app 的 **Allow LAN access**（Android；iOS 在出口清單裡對應選項）打開。Linux 對應的旗標是 `--exit-node-allow-lan-access=true`，完整說明見 [Exit Node](/features/exit-node/)。
+使用出口時，**預設連不到自己所在的區網**（旅館房間的印表機、電視等都連不到）。旅途中想一邊走家裡出口、一邊連房間裡的裝置，打開 Allow LAN access：Android 是 **Allow LAN access**、macOS／Windows 是 **Allow Local Network Access**，Linux 對應的旗標是 `--exit-node-allow-lan-access=true`；各平台的位置與完整說明見 [Exit Node](/features/exit-node/)。
 
 ## 速度與直連：家用上傳是瓶頸
 
@@ -105,7 +105,7 @@ tailnet 內部的名稱解析（`nas`、`nas.tail1234.ts.net`）由每台裝置�
 第二個瓶頸是**直連還是中繼**：
 
 - **直連（direct）**：封包直接在你和出口之間傳送，延遲最低。
-- **DERP 中繼**：直連失敗時，封包繞到 Tailscale 的 DERP 伺服器再轉，台灣最近的區域通常是香港或東京，延遲高、頻寬也受限。
+- **DERP 中繼**：直連失敗時，封包繞到 Tailscale 的 DERP 伺服器再轉。人在海外、出口在台灣，封包等於先到中繼點再繞回台灣（家裡出口的 DERP 區域通常是東京或香港），延遲更高、頻寬也受限。
 
 在使用的裝置上執行 `tailscale ping <出口名稱>`，看最後一行：`via <IP>:<埠>` 是直連，`via DERP(hkg)` 是中繼。`tailscale status` 的 `direct`／`relay "hkg"` 也是同一件事。判讀方法見 [用 tailscale netcheck 與 tailscale ping 診斷連線](/troubleshooting/netcheck-and-ping/)。
 
@@ -139,11 +139,11 @@ tailnet 內部的名稱解析（`nas`、`nas.tail1234.ts.net`）由每台裝置�
 這個情境的注意事項（**本文未實測，以下為文件整理與一般性判斷**）：
 
 - **機房 IP 較容易被辨識**。VPS 的 IP 屬於資料中心（datacenter）網段，串流平台對機房 IP 的偵測通常更嚴。效果因平台與 VPS 商而異，本文無法保證。
-- **延遲與路線**。從台灣連東京 VPS，直連時延遲通常比連香港、新加坡略高；能否直連一樣取決於兩邊的 NAT 條件，用 [tailscale netcheck](/troubleshooting/netcheck-and-ping/) 判斷。
+- **延遲與路線**。延遲取決於 VPS 所在地與兩端的網路路線；能否直連一樣取決於兩邊的 NAT 條件，用 [tailscale netcheck 與 tailscale ping](/troubleshooting/netcheck-and-ping/) 判斷。
 - **出口要停用金鑰到期**。VPS 性質接近伺服器，記得在 Admin console 關掉 key expiry，避免金鑰到期後出口斷線（fail close 會讓使用它的裝置整個斷網），見 [Exit Node](/features/exit-node/)。
 - **想換國家 IP 的替代方案**：如果只是想換到其他國家的 IP、不想自己維護 VPS，Tailscale 有加購的 [Mullvad Exit Node](/features/mullvad-exit-node/)，直接用 Mullvad 的伺服器當出口（目前沒有台灣的伺服器，這點 Mullvad Exit Node 一文有說明）。
 
-計劃中原本列為「東京 VPS 反向情境實測」，但本文撰寫時無法實機驗證，故依官方文件與一般網路行為說明，不提供測速或解鎖結果。
+這一段未經實機驗證，只依官方文件與一般網路行為說明，不提供測速或解鎖結果。
 
 ## 小結
 
@@ -169,6 +169,6 @@ tailnet 內部的名稱解析（`nas`、`nas.tail1234.ts.net`）由每台裝置�
 
 - [Exit nodes (route all traffic)（官方）](https://tailscale.com/docs/features/exit-nodes)
 - [DNS in Tailscale（官方）](https://tailscale.com/docs/reference/dns-in-tailscale)
-- [Tailscale 原始碼：`ipn/ipnlocal/node_backend.go`（exit node 下的 DNS 處理）](https://github.com/tailscale/tailscale/blob/main/ipn/ipnlocal/node_backend.go)
+- [Tailscale 原始碼：`ipn/ipnlocal/node_backend.go`（v1.104.1，exit node 下的 DNS 處理）](https://github.com/tailscale/tailscale/blob/v1.104.1/ipn/ipnlocal/node_backend.go#L1661)
 - [Exit Node：讓所有流量經由指定裝置出去](/features/exit-node/)
 - [MagicDNS 與自訂 DNS 設定](/features/magicdns/)
