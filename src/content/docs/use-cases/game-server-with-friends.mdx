@@ -1,0 +1,162 @@
+---
+title: 跟朋友開 Minecraft／Palworld 私服：node sharing
+description: 在家裡自架 Minecraft（Java／Bedrock）或 Palworld 私服，用 Tailscale 的裝置分享（node sharing）只把遊戲伺服器那一台分享給朋友：防火牆只在 tailscale0 開遊戲埠、朋友直接輸入 100.x 或 MagicDNS 名稱連線、用 grants 把分享來的使用者限制在遊戲埠，以及 Tailscale 身分驗證做法的限制
+sidebar:
+  order: 5
+  label: 遊戲私服
+---
+
+想跟朋友一起玩 Minecraft 或 Palworld，又不放心把伺服器公開到網際網路上。傳統做法是在路由器開埠轉送（port forwarding），等於把遊戲埠暴露給全世界，任何人都掃得到；改用 Tailscale 的**裝置分享**（node sharing），可以只把那一台遊戲伺服器分享給特定朋友，不對外開任何埠，對方也只看到那一台機器、看不到你 tailnet 裡的其他裝置。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件整理，以 Tailscale v1.104 為準。遊戲埠號以 Minecraft Wiki 與 Palworld 官方伺服器文件為準（Palworld 的 Steam 查詢埠 27015/UDP 官方文件未列，依 loef.dev 的社群文件補註）；內容未實際架設驗證。
+
+裝置分享的完整流程、限制與「和邀請使用者進 tailnet 的差異」，站上已有專文 [分享裝置給 tailnet 以外的人](/admin/sharing/)。這篇聚焦在「遊戲私服」這個情境，重複的部分只帶重點。
+
+## 先決定：裝置分享還是邀請加入
+
+兩者都能讓朋友連到遊戲伺服器，差別在範圍：
+
+- **裝置分享**：朋友用自己的 Tailscale 帳號接受邀請，之後那一台遊戲伺服器會出現在他自己的 tailnet 裡。他只連得到那一台，看不到你的其他裝置；被分享的人**不會計入你 tailnet 的使用者數**，且[所有方案都能用](https://tailscale.com/docs/features/sharing)，免費的 Personal 方案也行。
+- **邀請加入 tailnet**：朋友變成你 tailnet 的成員，看得到 tailnet 裡（依 ACL／grants 放行範圍）的裝置，會佔用一個使用者 seat——Personal 免費方案最多 6 位使用者，見 [方案與限制比較](/getting-started/plans/)。
+
+朋友已經有自己的 Tailscale（或有自己的 tailnet）、只想要那一台伺服器，用裝置分享最單純，也不用管對方會被算進你的人數。要注意的是，接受分享的人必須是**他自己 tailnet** 的 Owner、Admin 或 IT admin。
+
+## 遊戲埠一覽
+
+各遊戲的預設連接埠（有改過設定就照你改的）：
+
+| 遊戲              | 連接埠  | 協定 | 備註                                 |
+| ----------------- | ------- | ---- | ------------------------------------ |
+| Minecraft Java    | `25565` | TCP  | `server.properties` 的 `server-port` |
+| Minecraft Bedrock | `19132` | UDP  | Bedrock Dedicated Server 預設監聽埠  |
+| Palworld          | `8211`  | UDP  | 啟動參數 `-port=8211` 可改           |
+
+Palworld 還有一個 Steam 查詢埠 `27015/UDP`，用途是讓伺服器出現在 Steam 的社群伺服器瀏覽器（見 [palworld-server-docker 文件](https://github.com/thijsvanloef/palworld-server-docker)）；走 Tailscale 的私服不需要公開列表，朋友直接輸入 IP 連線即可，這個埠可以不必開。
+
+## 架好遊戲伺服器
+
+架伺服器本身與 Tailscale 無關，這裡只給起點，細節照各遊戲官方文件：
+
+- **Minecraft Java**：裝好 Java（[Minecraft Wiki](https://minecraft.wiki/w/Tutorial:Setting_up_a_Java_Edition_server) 說明各版本對應的 Java 版本），下載 `server.jar`，執行 `java -jar server.jar --nogui`，把 `eula.txt` 的 `eula` 改成 `true` 再重開。
+- **Minecraft Bedrock**：從 [官方下載頁](https://www.minecraft.net/en-us/download/server/bedrock) 抓 `bedrock_server`，解壓後執行 `LD_LIBRARY_PATH=. ./bedrock_server`。
+- **Palworld**：用 Steam 的「Palworld Dedicated Server」或 SteamCMD 安裝，啟動參數見 [Palworld 官方伺服器文件](https://docs.palworldgame.com/settings-and-operation/arguments)，預設 `-port=8211`。
+
+伺服器先在家裡區網內試到能連，再接 Tailscale。建議用獨立的低權限使用者跑伺服器，別用 root（Minecraft Wiki 也這麼提醒）。
+
+## 防火牆：遊戲埠只在 tailscale0 開
+
+重點是**不要**把遊戲埠開在對外的介面上。Ubuntu 上用 `ufw` 的寫法如下（依你架的遊戲選對應的埠）：
+
+```bash
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+# Tailscale 自己的 UDP 埠，直連穿透需要
+sudo ufw allow 41641/udp
+# 遊戲埠只在 tailscale0 介面放行，公網介面一律不放
+sudo ufw allow in on tailscale0 to any port 25565 proto tcp   # Minecraft Java
+sudo ufw allow in on tailscale0 to any port 19132 proto udp   # Minecraft Bedrock
+sudo ufw allow in on tailscale0 to any port 8211 proto udp    # Palworld
+sudo ufw enable
+```
+
+`default deny incoming` 負責擋掉公網對遊戲埠的連線，遊戲埠只透過 `tailscale0` 這張介面接受流量，而 `tailscale0` 只流通 tailnet 成員的流量。官方 [分享私服](https://tailscale.com/docs/use-cases/personal-or-at-home-use/share-private-game-server) 範例用的是比較寬鬆的 `sudo ufw allow in on tailscale0`（整張介面全開），上面改成只開遊戲埠更符合最小權限。
+
+兩個補充：
+
+- Tailscale 會自己下 iptables 規則、繞過 `ufw`，所以有時不特別寫 `allow in on tailscale0` 也通；但自己把規則寫清楚比較不會在換機器或重裝時踩雷。
+- 用雲端 VPS 架的話，除了 OS 防火牆，也要把雲端安全群組（security group）的遊戲埠對外關掉，只保留 Tailscale。
+
+## 分享給朋友
+
+在 Admin console 的 [Machines](https://console.tailscale.com/admin/machines) 頁面找到遊戲伺服器，點右邊選單的 **Share**：
+
+- **Share by email**：輸入對方 email，系統寄一次性邀請連結。對方可以用任何 Tailscale 帳號登入接受，不一定要用同一個 email。
+- **Copy invite link**：產生連結自己傳。預設一次性，勾選 **Reusable link** 可讓同一個連結被接受最多 1,000 次。
+
+沒用到的邀請連結 30 天後失效，連結要當密碼看待。對方接受後，那台機器就會出現在他的 Tailscale 用戶端，而你會在 Share 對話框看到他的頭像與 email。
+
+對方接受分享後，幾個行為要知道：
+
+- **預設隔離（quarantine）**：分享出去的機器可以回應朋友進來的連線，但**不能主動連到朋友的裝置**。所以朋友接受分享，不會讓他的 tailnet 暴露風險。
+- **要互相連**（例如你要從遊戲伺服器反向連回朋友）就**互相分享**：你把機器分享給他，他也把他的機器分享給你。
+- 只有**接受的那個人**看得到這台機器，他 tailnet 裡的其他人看不到；機器顯示的擁有者是你（分享的人）。
+- 不能用 [Taildrop](/features/taildrop/) 傳檔；你的 tag、群組與子網路資訊不會帶到對方 tailnet。
+
+## 朋友怎麼連：直接輸入 IP 或 MagicDNS 名稱
+
+遊戲的「LAN 伺服器瀏覽器」看不到這台私服。Minecraft 的區網自動發現（LAN world、Bedrock 的 Friends 列表）靠的是廣播／多播，而 Tailscale 的 WireGuard 隧道只轉送節點之間的單播流量，廣播與多播不會跨過 tailnet。所以伺服器不會自動出現，朋友要在遊戲裡手動**加入伺服器**並輸入位址。
+
+有兩種輸入方式：
+
+- **Tailscale IP**（最穩）：遊戲伺服器的 `100.x.y.z`，在 [Machines](https://console.tailscale.com/admin/machines) 頁面或那台機器上 `tailscale ip` 查。Minecraft 直接輸入 IP，Java 版可只填 IP（預設埠 25565）；Bedrock 版的「加入伺服器」介面是 Address 與 Port 兩個分開欄位，**Server Address** 填 IP、**Port** 欄填 `19132`（留預設值即可，除非伺服器改用別的埠），不要把 `:19132` 加在 IP 後面貼進 Address 欄。
+- **MagicDNS 名稱**：分享出去的機器只能用**完整名稱** `<機器名稱>.<你的 tailnet 名稱>.ts.net`，例如 `minecraft-server.yak-bebop.ts.net`，不能只打 `minecraft-server`。朋友自己的 tailnet 也要開 [MagicDNS](/features/magicdns/) 才能用名稱連線。
+
+一般先給 Tailscale IP，熟了再換 MagicDNS 名稱比較省事。
+
+## 用 grants 限制分享來的使用者只能連遊戲埠
+
+分享的連線同時受**兩邊 tailnet** 的存取規則限制。在**你**（分享者）這邊，用 `autogroup:shared` 或朋友的 email 把對方限縮到遊戲埠，是最小權限的做法：
+
+```json
+{
+  "tagOwners": {
+    "tag:game": ["autogroup:admin"]
+  },
+  "grants": [
+    // 自己 tailnet 的成員可以連遊戲伺服器
+    {
+      "src": ["autogroup:member"],
+      "dst": ["tag:game"],
+      "ip": ["tcp:25565", "udp:19132", "udp:8211"]
+    },
+    // 接受分享的朋友只能連遊戲埠
+    {
+      "src": ["autogroup:shared"],
+      "dst": ["tag:game"],
+      "ip": ["tcp:25565", "udp:19132", "udp:8211"]
+    }
+  ]
+}
+```
+
+幾點說明：
+
+- 遊戲伺服器建議打上 tag（`tag:game`）。tag 裝置的金鑰不會過期，伺服器不用每隔一陣子重登入，做法見 [Tags 與 auth key](/admin/tags-auth-keys/)。
+- 不想打 tag 也沒關係：把上面兩個規則的 `dst` 從 `["tag:game"]` 換成遊戲伺服器的 Tailscale IP（例如 `["100.101.102.103"]`），其餘不用動。
+- `autogroup:shared` 代表所有接受了裝置分享的外部使用者；想對單一朋友更精準，就把 `src` 換成他的 email。
+- 分享的使用者本來就只連得到分享給他的機器，`dst` 寫 `tag:game` 或 `*` 差異不大，`ip` 才是真正把範圍限縮到遊戲埠的地方。
+- 小心 `"src": ["*"]` 這類規則：它會連被分享的使用者一起套用。站內規則用 `autogroup:member`（不含只接受裝置分享的人）比較安全，語法見 [ACL / Grants 入門](/admin/acl-grants/)。
+
+規則的寫法、`ip` 欄位與 `tests` 驗證，見 [ACL / Grants 入門](/admin/acl-grants/)。
+
+## Tailscale 的身分驗證：只有一篇部落格示範，沒有官方 plugin
+
+有人會問：能不能連 Minecraft 的登入也交給 Tailscale，讓「誰在 tailnet 裡」直接當成「誰能進伺服器」？答案是**沒有官方維護的 plugin**。Tailscale 目前只有一篇 2022 年的部落格 [Tailscale Authentication for Minecraft](https://tailscale.com/blog/tailscale-auth-minecraft)（作者 Xe Iaso、TJ Horner）示範這個概念：用打了補丁的 [infrared](https://github.com/tjhorner/infrared)（一套 Minecraft proxy）加上 `TS_AUTHKEY` 環境變數，把玩家的 Minecraft 使用者名稱換成 Tailscale 身分。
+
+它是一篇工程示範、不是正式支援的產品，部落格自己也列出不少限制：
+
+- **只支援 Java 版**，不支援 Bedrock（主機、手機、平板那個版本）。
+- **必須關掉 Minecraft 自己的登入驗證**（`online-mode` 設成 `false`），所以伺服器一旦暴露在公網，任何人都能進來——這和我們鎖在 tailnet 裡的做法正好相反，不能兩者都想要。
+- **不能用皮膚（skin）**，除非另外裝伺服器端 mod。
+- Tailscale 使用者名稱可能含有 Minecraft 使用者名稱不允許的字元。
+
+對一般「朋友開私服」的情境，用裝置分享讓對方只能從 tailnet 連進來，再加上 Minecraft 自己的 `online-mode` 與白名單，通常就夠了；上面那套身分驗證 proxy 屬於少數想要「用 Tailscale 身分替代 Mojang 登入」的進階玩法，是否要追到 2022 年的示範與補丁，自己評估。
+
+## 常見問題
+
+- **朋友看得到伺服器，但連不上去？** 先確認他連的是完整的 MagicDNS 名稱（含 `.ts.net`）或正確的 Tailscale IP；再用名稱連線時確認他的 tailnet 有開 MagicDNS。還是不行，就請雙方各自檢查自己的存取規則有沒有擋掉。
+- **走 DERP 中繼會影響遊戲體驗嗎？** 會。兩邊無法直接打洞時流量要經 DERP 中繼，延遲明顯變高，FPS 類遊戲尤其有感。可以參考 [直連與 DERP 中繼](/troubleshooting/direct-vs-derp/) 判讀。
+
+## 參考資料
+
+- [Share a private game server with friends（官方）](https://tailscale.com/docs/use-cases/personal-or-at-home-use/share-private-game-server)
+- [Run a private Minecraft server with Tailscale（官方）](https://tailscale.com/docs/solutions/set-up-minecraft)
+- [Share your machines with other users（官方）](https://tailscale.com/docs/features/sharing)
+- [Inviting users vs sharing a device（官方）](https://tailscale.com/docs/reference/inviting-vs-sharing)
+- [Tailscale Authentication for Minecraft（官方部落格，2022）](https://tailscale.com/blog/tailscale-auth-minecraft)
+- [Tutorial: Setting up a Java Edition server（Minecraft Wiki）](https://minecraft.wiki/w/Tutorial:Setting_up_a_Java_Edition_server)
+- [Tutorial: Setting up a Bedrock Edition server（Minecraft Wiki）](https://minecraft.wiki/w/Tutorial:Setting_up_a_Bedrock_Edition_server)
+- [Configure the server（Palworld 官方伺服器文件）](https://docs.palworldgame.com/settings-and-operation/arguments)
+- [palworld-server-docker（loef.dev 社群文件，列出 27015/UDP 查詢埠）](https://github.com/thijsvanloef/palworld-server-docker)
+- [分享裝置給 tailnet 以外的人](/admin/sharing/)
+- [ACL / Grants 入門](/admin/acl-grants/)
