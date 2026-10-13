@@ -1,0 +1,305 @@
+---
+title: k3s 上的 Tailscale operator：Ingress、Connector 與 ProxyGroup
+description: 用 Tailscale Kubernetes operator 把 k3s 叢集接進 tailnet：OAuth client 與 tag 設定、Helm 安裝、三種暴露服務的方式（expose 註解、LoadBalancer、Ingress）、Connector 當 subnet router／exit node、ProxyGroup 高可用，以及與 k3s 內建 Traefik／ServiceLB 並存的注意事項
+sidebar:
+  order: 6
+  label: Kubernetes operator
+---
+
+Tailscale 官方的 [Kubernetes operator](https://tailscale.com/kb/1236/kubernetes-operator) 把 tailnet 接進 Kubernetes 叢集：在叢集內跑一個 operator，它會依你建立的資源自動開關 Tailscale 節點，把叢集裡的服務暴露給 tailnet（ingress）、讓叢集內的 Pod 連到 tailnet 上的裝置（egress）、或把 Kubernetes API server 接到 tailnet。所有暴露都用 Tailscale 的身分與存取規則控管，不必開 NodePort、不必設定防火牆。
+
+這篇以 homelab 常見的 [k3s](https://k3s.io/) 為例，走一遍安裝與三種暴露方式，再介紹 Connector 與 ProxyGroup。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件整理，以 Tailscale v1.104 為準，**未實際驗證**。欄位名稱與註解以 v1.104 原始碼的 `cmd/k8s-operator/` 與 `cmd/k8s-operator/deploy/`（Helm chart、CRD）核對；chart 的 `version`／`appVersion` 在發行時會替換成 Tailscale 版本號，原始碼內是佔位值（`version: 0.1.0`、`appVersion: stable`）。範例叢集以 k3s 為對象，寫作時最新穩定版為 v1.37.0+k3s1（Kubernetes v1.37）。
+
+## 運作方式
+
+operator 本身是一組 Deployment，裝在 `tailscale` namespace。你只要建立標準的 Kubernetes 資源（Service、Ingress，或 Tailscale 的 CRD），operator 就為它建立一個代理 Pod，代理 Pod 內跑 `tailscaled`，以 tag 身分加入 tailnet，再把流量轉給叢集內的 Service。
+
+- **Ingress（L7）**：對外以 `*.ts.net` 的 MagicDNS 名稱與 HTTPS 呈現，代理 Pod 用 [Tailscale Serve](/features/serve/) 轉發 HTTP/HTTPS。
+- **Service（L3）**：代理 Pod 用 iptables／nftables 把連到 tailnet IP 的流量 DNAT 到 Service 的 ClusterIP，適用資料庫、訊息佇列這類非 HTTP 服務。
+- **Connector**：在叢集內跑一個 subnet router、exit node 或 app connector。
+- **ProxyGroup**：一組多副本的代理，用來做高可用與共用代理。
+
+## 安裝
+
+### 1. 設定 tag
+
+先到 Admin console 的 [Access controls](https://console.tailscale.com/admin/acls) 加入兩個 tag：`tag:k8s-operator` 給 operator 自己，`tag:k8s` 給 operator 建立的代理節點。重點是讓 `tag:k8s-operator` 成為 `tag:k8s` 的 owner，operator 才有權建立帶 `tag:k8s` 的節點：
+
+```json
+{
+  "tagOwners": {
+    "tag:k8s-operator": ["autogroup:admin"],
+    "tag:k8s": ["tag:k8s-operator"]
+  }
+}
+```
+
+tag 的寫法見 [Tags 與 auth key](/admin/tags-auth-keys/)。
+
+### 2. 建立 OAuth client
+
+operator 需要 OAuth 憑證來呼叫 Tailscale API、替自己與代理節點建立 auth key。到 Admin console 的 [Trust credentials](https://console.tailscale.com/admin/settings/trust-credentials) 建立一個 OAuth client，加上以下 scope（`Read` 與 `Write`）：
+
+- **General > Services**
+- **Devices > Core**
+- **Keys > Auth Keys**
+
+並在 **Tags** 選擇 **Add tags → `tag:k8s-operator`**。產生後記下 **Client ID** 與 **Client secret**。OAuth client 的運作見 [OAuth client](/admin/oauth-clients/)。
+
+### 3. 用 Helm 安裝
+
+加入 Tailscale 的 Helm repo 並安裝（版本號跟隨 Tailscale 版本）：
+
+```bash
+helm repo add tailscale https://pkgs.tailscale.com/helmcharts
+helm repo update
+helm upgrade --install tailscale-operator tailscale/tailscale-operator \
+  --namespace=tailscale \
+  --create-namespace \
+  --set-string oauth.clientId="<OAuth client ID>" \
+  --set-string oauth.clientSecret="<OAuth client secret>" \
+  --wait
+```
+
+裝完後 operator 會建立 `tailscale` namespace、`operator` Deployment、RBAC，以及 `tailscale` IngressClass 和 Connector、ProxyGroup 等 CRD。到 Admin console 的 [Machines](https://console.tailscale.com/admin/machines) 頁面，應能看到一台名為 `tailscale-operator`、帶 `tag:k8s-operator` 的節點。
+
+## k3s 特有的注意事項
+
+k3s 預設內建兩個會跟你搶資源的元件，安裝與設定時要特別留神：
+
+- **Traefik**：k3s 預設用 Traefik 當 Ingress controller，`traefik` IngressClass 標記為**預設 class**。Tailscale operator 建立的是另一個非預設的 `tailscale` IngressClass，因此你建立的 Ingress **一定要寫 `ingressClassName: tailscale`**，否則會被 Traefik 搶去處理（在節點的 80／443 埠開對外服務）。反過來，也別把 `tailscale` IngressClass 設成預設——operator 會拒絕帶有預設標記的 `tailscale` IngressClass。
+- **ServiceLB**：k3s 預設用 ServiceLB（前身 Klipper LoadBalancer）當 LoadBalancer 實作。`type: LoadBalancer` 但**沒有指定 `loadBalancerClass`** 的 Service 會被 ServiceLB 接手、在節點上佔用 NodePort；指定 `loadBalancerClass: tailscale` 後才由 Tailscale operator 接手，不會去開 NodePort。
+
+簡單說：在 k3s 上，要接進 tailnet 的資源一律明確指定 `ingressClassName: tailscale` 或 `loadBalancerClass: tailscale`，別依賴預設值。
+
+## 暴露服務的三種方式
+
+### 方式一：Service 加 `tailscale.com/expose` 註解（L3）
+
+在 Service 加一行註解，operator 就會把它暴露到 tailnet。Service 可維持 `ClusterIP` 型態，不必改成 LoadBalancer：
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  annotations:
+    tailscale.com/expose: "true"
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+```
+
+預設的 tailnet 主機名稱是 `<namespace>-<service 名稱>`，例如 `default-postgres.<你的 tailnet>.ts.net`。要自訂，加 `tailscale.com/hostname` 註解。
+
+### 方式二：LoadBalancer + `loadBalancerClass: tailscale`（L3）
+
+效果和方式一相同，改用標準的 LoadBalancer 欄位：
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+spec:
+  type: LoadBalancer
+  loadBalancerClass: tailscale
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+```
+
+裝完後用 `kubectl get service postgres`，`EXTERNAL-IP` 欄位會出現這個 Service 的 Tailscale IP（`100.x.y.z`），tailnet 上的裝置就能用 `100.x.y.z:5432` 或 MagicDNS 名稱連線。L3 走的是原始 TCP/UDP，**不需要開啟 HTTPS**，適合資料庫、訊息佇列等非 HTTP 服務。
+
+### 方式三：Ingress（L7）
+
+要暴露網頁、API 這類 HTTP/HTTPS 服務，用 Ingress，`ingressClassName` 設為 `tailscale`：
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: my-app
+spec:
+  ingressClassName: tailscale
+  tls:
+    - hosts:
+        - my-app
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: my-app
+                port:
+                  number: 80
+```
+
+- `tls.hosts` 的第一個值決定 tailnet 主機名稱（取第一個標籤），上例會得到 `my-app.<你的 tailnet>.ts.net`，透過 `https://my-app.<你的 tailnet>.ts.net` 存取。
+- operator 會**自動**向 Let's Encrypt 申請 `*.ts.net` 的 TLS 憑證，你不需要建立 Secret。前提是 tailnet 要先[開啟 HTTPS](/features/https-certificates/)，否則憑證不會簽發。每個 tailnet 每週有 50 個新主機名稱的憑證額度，測試時可用 `ProxyClass` 的 `useLetsEncryptStagingEnvironment` 切到 staging 環境。
+- 預設只開 443。要讓 HTTP 自動跳 HTTPS，加 `tailscale.com/http-redirect: "true"` 註解（會另開 80 埠）。
+- 想公開到網際網路（不必裝 Tailscale 就能連），加 `tailscale.com/funnel: "true"` 註解，見 [Tailscale Funnel](/features/funnel/)。
+
+## Connector：subnet router、exit node 與 app connector
+
+`Connector` 是 cluster 層級的 CRD，讓 operator 在叢集內跑一個 subnet router、exit node 或 app connector。
+
+### 當 subnet router
+
+把叢集內的 Pod／Service CIDR（或任何從叢集可達的網段）廣告給 tailnet：
+
+```yaml
+apiVersion: tailscale.com/v1alpha1
+kind: Connector
+metadata:
+  name: ts-pod-cidrs
+spec:
+  hostnamePrefix: ts-pod-cidrs
+  subnetRouter:
+    advertiseRoutes:
+      - "10.42.0.0/16"
+```
+
+欄位 `subnetRouter.advertiseRoutes` 是 CIDR 清單。建立後到 [Machines](https://console.tailscale.com/admin/machines) 核准路由（或見下方用 `autoApprovers` 自動核准）。subnet router 的概念見 [Subnet Router](/features/subnet-router/)。
+
+### 當 exit node
+
+同一個 CRD，改設 `exitNode: true` 即可。subnet router 和 exit node 可以在同一個 Connector 上並存，但官方建議各用一個 Connector：
+
+```yaml
+apiVersion: tailscale.com/v1alpha1
+kind: Connector
+metadata:
+  name: exit-node
+spec:
+  exitNode: true
+  hostnamePrefix: exit-node
+  replicas: 2
+```
+
+exit node 的概念見 [Exit Node](/features/exit-node/)。
+
+### 當 app connector
+
+`appConnector` 讓這台裝置扮演 app connector，提供固定的 egress IP 來連線外部 SaaS。它和 `subnetRouter`、`exitNode` **互斥**，且網域與權限要另外在 Admin console 手動設定：
+
+```yaml
+apiVersion: tailscale.com/v1alpha1
+kind: Connector
+metadata:
+  name: app-connector
+spec:
+  appConnector: {}
+```
+
+Connector 節點預設帶 `tag:k8s`，可用 `spec.tags` 覆寫；`replicas` 大於 1 時要用 `hostnamePrefix`（不能用 `hostname`）。若想讓 subnet route 或 exit node 自動核准，在 ACL 加：
+
+```json
+{
+  "autoApprovers": {
+    "routes": {
+      "10.42.0.0/16": ["tag:k8s"]
+    },
+    "exitNode": ["tag:k8s"]
+  }
+}
+```
+
+## ProxyGroup：高可用與三種類型
+
+單一 Ingress 或 Service 只會得到一個代理 Pod，Pod 重啟時會短暫中斷。`ProxyGroup` 改用一組 `StatefulSet` 副本（預設 2 個，用 `spec.replicas` 調整），一個 ProxyGroup 可以服務多個 Ingress／Service，副本掛掉時自動由其他副本接手。
+
+```yaml
+apiVersion: tailscale.com/v1alpha1
+kind: ProxyGroup
+metadata:
+  name: ingress-proxies
+spec:
+  type: ingress
+  replicas: 2
+```
+
+`spec.type` 有三種，用途對應 operator 的三種方向：
+
+- **`ingress`**：把叢集內的服務暴露給 tailnet。
+- **`egress`**：讓叢集內的 Pod 連到 tailnet 上的裝置。
+- **`kube-apiserver`**：把 Kubernetes API server 接到 tailnet（可選 auth／noauth 模式）。
+
+要套用 ProxyGroup，在 Ingress 或 Service 加 `tailscale.com/proxy-group` 註解：
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-app
+  annotations:
+    tailscale.com/proxy-group: ingress-proxies
+    tailscale.com/hostname: my-app
+spec:
+  type: LoadBalancer
+  loadBalancerClass: tailscale
+  # ...
+```
+
+ProxyGroup 底層用 [Tailscale Services](/features/tailscale-services/) 讓多個副本共用同一個 MagicDNS 名稱，因此需要在 ACL 加上 services 的 autoApprover（`tag:k8s` 自己核准自己）：
+
+```json
+{
+  "autoApprovers": {
+    "services": {
+      "tag:k8s": ["tag:k8s"]
+    }
+  }
+}
+```
+
+L3 與 L7 的差別同樣適用於 ProxyGroup：`type: ingress` 的 ProxyGroup 接 L7 Ingress（走 Serve、有 `*.ts.net` 憑證）時處理 HTTP/HTTPS，接 L3 Service（走 DNAT）時處理原始 TCP/UDP。官方文件沒有說明 ProxyGroup 對 L3／L7 另有不同行為，兩者主要差異就是前面「暴露服務」一節描述的 L3 與 L7。
+
+## 最小權限的 grants
+
+前面為了方便，ACL 若維持 tailnet 預設的「全開」規則（`{"action":"accept","src":["*"],"dst":["*:*"]}`），tailnet 裡任何人都能連到 operator 暴露的所有服務。要收斂，刪掉預設全開規則，只放行需要的連線。例如只讓 `group:dev` 連到 `tag:k8s` 代理節點的 443 埠：
+
+```json
+{
+  "tagOwners": {
+    "tag:k8s-operator": ["autogroup:admin"],
+    "tag:k8s": ["tag:k8s-operator"]
+  },
+  "autoApprovers": {
+    "services": {
+      "tag:k8s": ["tag:k8s"]
+    }
+  },
+  "grants": [
+    {
+      "src": ["group:dev"],
+      "dst": ["tag:k8s"],
+      "ip": ["tcp:443"]
+    }
+  ]
+}
+```
+
+- 代理節點都帶 `tag:k8s`，所以 `dst` 對準 `tag:k8s`、`ip` 只開必要的埠。
+- 用 L3 暴露資料庫時，把對應埠（例如 `tcp:5432`）加進 `ip`。
+- 若還用 API server proxy，要另外放行對 `tag:k8s-operator` 的 443 連線。
+
+規則的寫法見 [ACL / Grants 入門](/admin/acl-grants/)。
+
+## 參考資料
+
+- [Tailscale Kubernetes Operator（官方 KB）](https://tailscale.com/kb/1236/kubernetes-operator)
+- [Install the Tailscale Kubernetes Operator（官方）](https://tailscale.com/docs/kubernetes-operator/install-operator)
+- [Expose cluster workloads to your tailnet with Ingress（官方）](https://tailscale.com/kb/1439/kubernetes-operator-cluster-ingress)
+- [Deploy exit nodes and subnet routers on Kubernetes（官方）](https://tailscale.com/kb/1441/kubernetes-operator-connector)
+- [Use ProxyGroup for high availability proxies（官方）](https://tailscale.com/docs/kubernetes-operator/concepts/proxygroup)
+- [Tailscale 原始碼 `cmd/k8s-operator/`（v1.104）](https://github.com/tailscale/tailscale/tree/main/cmd/k8s-operator)
