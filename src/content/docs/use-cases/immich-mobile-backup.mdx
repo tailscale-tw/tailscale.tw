@@ -8,7 +8,7 @@ sidebar:
 
 [Immich](https://immich.app/) 是自架的照片與影片管理服務，手機 App 會把選定相簿裡的照片與影片自動上傳到自家的 Immich 伺服器。伺服器放在家裡，傳統做法是開對外埠或掛公開網址；改用 Tailscale，App 直接以 MagicDNS 名稱連回家，手機走到哪就備份到哪，家裡那台不用開任何對外埠。
 
-> 本文依 2026 年 10 月的 Tailscale 官方文件與 Immich 官方文件整理，以 Tailscale v1.104、Immich v3.3.1 為準。伺服器端的 Docker sidecar 寫法見〈Docker 的 Tailscale sidecar〉那篇，本文只講手機端與兩者的差異，不重複整套 compose。本文未在實機逐一操作，屬文件整理。
+> 本文依 2026 年 10 月的 Tailscale 官方文件與 Immich 官方文件整理，以 Tailscale v1.104.1、Immich v3.3.1 為準。伺服器端的 Docker sidecar 寫法見〈Docker 的 Tailscale sidecar〉那篇，本文只講手機端與兩者的差異，不重複整套 compose。本文未在實機逐一操作，屬文件整理。
 
 ## 伺服器端：沿用 sidecar 寫法
 
@@ -26,7 +26,7 @@ Immich 用 Docker 部署時，最乾淨的接法是 [Docker sidecar](/use-cases/
 App 第一次開啟時輸入上一節的伺服器網址登入，然後到備份頁（右上角雲朵圖示）勾選要備份的相簿，拉到最下面按 **Enable Backup**（啟用備份）開始上傳。備份選項（**Backup Options**）裡跟這篇最相關的幾個，名稱以 Immich App v3.3.1 為準：
 
 - **預設只在 Wi-Fi 上傳**：官方文件寫明「預設只會在連到 Wi-Fi 時上傳照片與影片」。要出門也用行動網路備份，把 **Use cellular data to backup photos**（使用行動網路流量備份相片）與 **Use cellular data to backup videos**（使用行動網路流量備份影片）打開。開著才能「走到哪備份到哪」，但大影片會吃掉行動流量，依你的方案斟酌。
-- **背景選項（Background Options）**：App 進背景後，上傳任務交給作業系統排程，何時能跑由系統決定。可以設 **Background backup requires the device to be charging**（背景備份要求裝置正在充電）與 **Delay new assets backup**（新項目備份延遲）。這些是「要不要在背景自動上傳」的條件，背景到底跑不跑得動，還是看下一節的系統設定。
+- **背景選項（Background Options，只在 Android）**：App 進背景後，上傳任務交給作業系統排程，何時能跑由系統決定。可以設 **Background backup requires the device to be charging**（背景備份要求裝置正在充電）與 **Delay new assets backup**（新項目備份延遲）。這組設定只存在於 Android 的 Backup Options 頁，iOS 的備份頁沒有這個區塊；背景到底跑不跑得動，還是看下一節的系統設定。
 - **Automatic URL switching（自動 URL 切換）**：指定一個家裡的 Wi-Fi 名稱，連到該 Wi-Fi 時用「本機網址」（例如區網 IP `http://192.168.1.x:2283`）、其他網路用「外部網址」清單（Tailscale 的 MagicDNS 或 Serve 網址），依序嘗試第一個連得上的。這樣在家走區網、出門走 Tailscale，兩者兼顧。要讓它生效，得給 App「精確位置」權限來讀目前連到的 Wi-Fi 名稱；在背景切換則要「一律允許」位置權限。
 
 ## 手機端：讓背景備份真的跑得起來
@@ -34,7 +34,7 @@ App 第一次開啟時輸入上一節的伺服器網址登入，然後到備份�
 背景備份能不能跑，取決於作業系統與手機廠牌的背景限制，跟 Tailscale 無關，但 Immich 與 Tailscale 兩個 App 都要處理：
 
 - **Android**：各家 ROM 的電池最佳化會把背景 App 凍結或殺掉，Immich 的背景上傳任務可能因此不跑。把 Immich 與 Tailscale 都設為「不受限制／不最佳化」，允許自動啟動，並從最近應用程式清單把 App 鎖定。確切路徑每家廠牌不同，站上的 [Android 的電池最佳化](/platforms/ios-android/#android-的電池最佳化) 與 [Android 的背景限制](/platforms/ios-android/#android-的背景限制) 兩節有原則，以及用 [dontkillmyapp.com](https://dontkillmyapp.com/) 查自己手機的逐步做法；Immich 官方文件也建議到 dontkillmyapp.com 查。
-- **iOS**：必須開 **Background App Refresh**（設定 → 一般 → 背景 App 重新整理）讓 Immich 在背景工作；iOS 自行管理背景任務、App 無法控制何時跑，開 App 越頻繁、背景上傳跑得越多次。Immich 官方 FAQ 建議關掉低耗電模式，並停用其他用不到背景整理的 App，減少競爭。iOS 沒有 Android 那套「電池最佳化」凍結機制，背景 VPN 由系統的 Network Extension 管理、不受影響（見 [iOS 與 Android 手機設定](/platforms/ios-android/#android-的電池最佳化) 的說明）；Immich 對 iOS 背景備份的限制以官方文件為準。
+- **iOS**：必須開 **Background App Refresh**（設定 → 一般 → 背景 App 重新整理）讓 Immich 在背景工作；iOS 自行管理背景任務、App 無法控制何時跑，開 App 越頻繁、背景上傳跑得越多次。Immich 官方 FAQ 建議關掉低耗電模式，並停用其他用不到背景整理的 App，減少競爭。iOS 沒有 Android 那套「電池最佳化」凍結機制，背景 VPN 由系統的 Network Extension 管理、不受影響（[iOS 與 Android 手機設定](/platforms/ios-android/) 一文「Android 的電池最佳化」節末尾有 iOS 的對照說明）；Immich 對 iOS 背景備份的限制以官方文件為準。
 
 ## 手機上 Tailscale 要一直連著
 
