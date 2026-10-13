@@ -1,0 +1,177 @@
+---
+title: OPNsense／pfSense／UniFi 當 subnet router 的限制
+description: OPNsense、pfSense 與 UniFi（UDM／UCG）都是熱門的防火牆／路由器，但要拿來當 Tailscale subnet router 有各自限制：OPNsense 與 pfSense 是 FreeBSD，關 SNAT 的 --snat-subnet-routes=false 官方只支援 Linux、site-to-site 也要求 Linux；UniFi 沒有官方支援，社群安裝會被韌體更新打壞。本文逐一說明，並給出用一台 Linux 小機替代的建議
+sidebar:
+  order: 4.5
+  label: OPNsense／pfSense／UniFi
+---
+
+OPNsense、pfSense 與 UniFi（UDM／UCG）是三種很常被拿來當家庭或小型辦公室閘道的平台。既然是路由器，很多人自然想把 [Subnet Router](/features/subnet-router/) 跑在上面，讓整條區網一次進 tailnet。這個想法可行，但有一條共同的限制：**這三者都不是「完整支援 subnet router 的 Linux」**——OPNsense 與 pfSense 是 FreeBSD，UniFi 則是封閉系統、沒有官方 Tailscale 支援。這篇文章把三者的限制講清楚，並說明什麼時候該改用一台 Linux 小機。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件、OPNsense／pfSense 官方文件與套件原始碼整理，以 Tailscale v1.104 為準。第三方版本：OPNsense 26.7（2026 年 7 月發佈）、pfSense CE 2.9.0／pfSense Plus 26.07、UniFi OS 5.1.x；FreeBSD ports 的 `tailscale` 套件版本為 1.102.5、OPNsense 外掛 `os-tailscale` 為 1.4、pfSense 套件 `pfSense-pkg-Tailscale` 為 0.1.9_2。本文未在實機安裝與驗證，屬文件整理。
+
+## 先講結論：三個平台的共同限制
+
+| 平台              | 系統              | 裝 Tailscale                     | 當 subnet router | 關 SNAT（保留來源 IP）         |
+| ----------------- | ----------------- | -------------------------------- | ---------------- | ------------------------------ |
+| OPNsense          | FreeBSD           | `os-tailscale` 社群外掛          | 可以             | 外掛有選項但標「experimental」 |
+| pfSense           | FreeBSD           | `pfSense-pkg-Tailscale` 官方套件 | 可以             | 套件把選項註解掉（Linux only） |
+| UniFi（UDM／UCG） | UniFi OS（Linux） | 無官方支援，靠社群腳本           | 勉強可           | 看腳本，但韌體更新會打壞       |
+
+「當 subnet router」這件事，OPNsense 和 pfSense 都能做（廣告網段、核准路由都正常）。真正的限制出在 **SNAT**：subnet router 預設會做來源位址轉譯，區網裝置看到的來源 IP 都是路由器本身。想要關掉它、讓區網看到真實來源 IP，官方只支援 Linux——而這兩個平台是 FreeBSD。UniFi 的問題則是完全不同的層次：Ubiquiti 根本不提供 Tailscale 支援。
+
+## SNAT 是什麼，為什麼對 subnet router 是限制
+
+Subnet router 預設開啟 **SNAT（來源位址轉譯）**：從 tailnet 進來的封包，轉進區網時，來源 IP 會被改寫成 subnet router 自己的區網 IP。所以區網裡的裝置看到的是「有人連我」，但來源永遠是那台路由器，而不是 tailnet 對端的真實位址。
+
+對印表機、IP Cam、NAS 這類設備，這通常無所謂。但如果是下面這些情境，就變成限制：
+
+- 區網內的服務要**記錄或過濾來源 IP**（例如內部系統的存取日誌、依來源放行的防火牆規則）。
+- **site-to-site**：兩邊都是 subnet router 時，A 站要讓 B 站的裝置看到「B 站的真實來源」而不是被 A 站路由器蓋掉，才能做精細的防火牆控管。
+
+解法是關掉 SNAT：`tailscale set --snat-subnet-routes=false`。但這個旗標，官方文件標註 **「Linux only」**。完整的 SNAT 說明與回程路由，見站內 [Subnet Router 的 SNAT 一節](/features/subnet-router/#snat來源-ip-的問題)。
+
+## FreeBSD：`--snat-subnet-routes=false` 官方只支援 Linux
+
+OPNsense 與 pfSense 都跑在 FreeBSD 上，這是它們當 subnet router 時最關鍵的限制。先看官方文件怎麼說：
+
+- [Site-to-site networking](https://tailscale.com/docs/features/site-to-site)（2026 年 9 月 29 日校驗）明確要求：**「Both subnet routers must use a Linux-based operating system」**，內文第一步也寫「This device must use a Linux-based operating system」。
+- 同一篇的設定對照表把 `--snat-subnet-routes=false` 標為 **「Linux only」**。
+- [Subnet routers](https://tailscale.com/docs/features/subnet-routers) 同校驗日期的頁面，也把關 SNAT 指向「disable SNAT」並寫「Linux only」。
+
+所以**官方目前的態度很一致：要關 SNAT 做 site-to-site，用 Linux**。
+
+### 原始碼怎麼說（v1.104）
+
+但如果你去看 v1.104 的原始碼，會發現 FreeBSD 的關 SNAT 支援其實已經寫進去了，只是**預設不會走到那條路**：
+
+- `cmd/tailscale/cli/up.go` 裡，`--snat-subnet-routes` 旗標的註冊已經不只在 `case "linux"`（第 127–128 行），`case "freebsd"`（第 131–132 行）也註冊了同一個旗標。
+- 同檔 `prefsFromUpArgs` 的 `if goos == "linux" || goos == "freebsd"`（第 366 行）把 `NoSNAT` 同時套用到兩個平台。
+- `wgengine/router/osrouter/router_freebsd.go` 也新增了以 **PF 規則做 masquerade** 的實作（第 76 行的 `wantSNAT := kernelRouting && cfg.SNATSubnetRoutes`、第 118 行的 `addPFNATRules`），對應 Linux 上 iptables MASQUERADE 的角色。
+- 關鍵在 `cmd/tailscaled/tailscaled.go` 的 `handleSubnetsInNetstack()`（第 830–857 行）：在 FreeBSD 上它**預設回傳 true**，也就是 subnet 流量照樣交給 netstack（userspace）處理，由 netstack 自己做 SNAT。原始碼註解寫明，netstack 一定要改寫來源位址，所以**只有 kernel 路徑能做到 `--snat-subnet-routes=false`**；要切到 kernel 路徑，得設除錯用的環境變數 `TS_DEBUG_NETSTACK_SUBNETS=false`。理由是 kernel 路徑需要在主機的 pf ruleset 裡插 anchor 參照，執行中插入會清掉 ruleset 參照的 table 內容——對 OPNsense／pfSense 這種整套防火牆都靠 pf 的系統，這正是風險所在。
+
+對照追蹤這個需求的 [issue #5573](https://github.com/tailscale/tailscale/issues/5573)，它在 **2026 年 9 月 1 日才被標為 completed**。也就是說，FreeBSD 的關 SNAT 支援是**剛落地、非常新**的功能，而且預設路徑（netstack）根本用不到它，要靠除錯環境變數才會啟用；官方文件（9 月底校驗）仍寫「Linux only」也就不意外。
+
+### 這對 OPNsense／pfSense 的實際意義
+
+把文件與原始碼放在一起看，現階段的實際情況是：
+
+- **OPNsense 的 `os-tailscale` 外掛**有「Disable SNAT」選項，但說明標著 **「experimental」**。
+- **pfSense 的官方套件**（`pfSense-pkg-Tailscale` 0.1.9_2）直接把「SNAT Subnet Routes」選項**註解掉**，註解寫著「This is currently only available on Linux (see issue #5573)」。
+- **FreeBSD ports 的 `tailscale` 套件**目前還是 **1.102.5**，還沒跟上上游 v1.104——就算原始碼有了，跑在 OPNsense／pfSense 上的套件也還裝不到。pfSense 自己的 ports fork（`pfsense/FreeBSD-ports` 的 `security/tailscale`）更停在 **1.94.1**，所以 pfSense 上實際裝到的版本可能比 FreeBSD ports 還舊。
+
+所以務實的建議是：**在 OPNsense／pfSense 上當 subnet router 沒問題，但如果需要關 SNAT（尤其是 site-to-site），照官方建議改用 Linux 比較穩**。想要保留來源 IP 又只有這兩台可用的話，先確認實際裝到的 Tailscale 版本（`tailscale version`），並把它當作實驗功能看待——即使版本夠新，預設的 netstack 路徑也做不到關 SNAT。
+
+## OPNsense：`os-tailscale` 外掛
+
+OPNsense 是 Tailscale 官方文件列出的**社群支援平台**。官方文件 [Using OPNsense with Tailscale](https://tailscale.com/docs/install/opnsense) 寫明：「As of OPNsense v24.711」（即 24.7.11）起，`os-tailscale` 社群外掛可經由 GUI 安裝——**System → Firmware → Plugins**，勾選 **Show community plugins** 後找到 `os-tailscale`。
+
+外掛的選項（依 opnsense/plugins 倉庫 `security/tailscale` 的 `Settings.xml` 核對，括號內是實際欄位名）：
+
+- **Advertise Exit Node**（`advertiseExitNode`）：讓這台 OPNsense 當 exit node。
+- **Use Exit Node**（`useExitNode`）：下拉選單，把流量導到某個 exit node。
+- **Accept Subnet Routes**（`acceptSubnetRoutes`）：接受其他節點廣告的網段。
+- **Advertise Routes**：不是單一核取方塊，而是在 **Subnet** 清單裡填入要廣告的網段（CIDR，可多筆、每筆可附描述）。
+- **Accept DNS**（`acceptDNS`）、**Enable SSH**（`enableSSH`）、**Listen Port**（`listenPort`）。
+- **Disable SNAT**（`disableSNAT`）：進階選項，說明為「Disable source NAT to disable subnet routing **(experimental)**」。
+
+也就是說，OPNsense 上要當 subnet router，就在 **Subnet** 欄位填入區網網段（例如 `192.168.1.0/24`）並套用，再到 Admin console 核准路由。細節流程與其他平台一致，見 [Subnet Router](/features/subnet-router/)。
+
+### 防火牆：要替 tailscale0 建立介面與規則
+
+OPNsense 不會自動處理 tailscale0，官方文件的步驟是：
+
+1. **Interfaces → Assignments**，在 **New interface** 選單選 `tailscale0`，按 `+` 加入。
+2. 進去編輯新介面，勾 **Enable interface**、填描述（例如 `tailscale`），**Save** 後 **Apply changes**。
+3. **Firewall → Rules**，切到剛才的 Tailscale 介面分頁，**Add** 一條規則，**Action** 設 **Pass**，儲存後 **Apply changes**。
+
+在加規則之前，預設的 deny 政策會擋掉 tailnet 對 OPNsense 主機的所有連線（含 ping、SSH、Web UI），所以這一步是必須的。想收緊，就別用「全放」規則，改用 **Firewall → Aliases** 建立允許存取的 Tailscale IP 清單當來源。
+
+## pfSense：官方 Tailscale 套件
+
+pfSense 有 Netgate 維護的**官方套件** `pfSense-pkg-Tailscale`（目前 0.1.9_2），從 **System → Package Manager → Available Packages** 搜尋安裝即可。官方文件 [pfSense settings to enable direct connections](https://tailscale.com/docs/integrations/firewalls/pfsense) 也確認「Tailscale can also be run directly on these routers, by using a plugin for pfSense」。
+
+套件選項（依 pfsense/FreeBSD-ports 倉庫 `security/pfSense-pkg-Tailscale` 的 `tailscale.xml` 核對）：
+
+- **Advertise Exit Node**（`exitnode`）：當 exit node。
+- **Accept Subnet Routes**（`acceptroutes`）：接受其他節點廣告的網段。
+- **Advertised Routes**（`advertisedroutevalue`）：以 CIDR 列出要廣告的網段（可多筆、可附描述）。
+- **Accept DNS**（`acceptdns`）、**Listen Port**、**Syslog Logging** 等。
+- **SNAT Subnet Routes**：這個選項在 XML 裡**被註解掉**，註解寫明「This is currently only available on Linux (see issue #5573)」——也就是 pfSense 使用者目前**無法**從套件 GUI 關掉 SNAT。
+
+和 OPNsense 的差別：pfSense 套件會**自動建立專用的 Tailscale interface group**，不必像 OPNsense 那樣手動 assign 介面；但**防火牆規則仍要自己建**（Netgate 部落格 [Tailscale on pfSense Software!](https://www.netgate.com/blog/tailscale-on-pfsense-software) 也提醒「Create necessary firewall rules」）。對照剛上線的 [OpenWrt](/platforms/openwrt/) 那篇：OpenWrt 是把 `tailscale0` 放進一個**防火牆 zone** 再設 forwarding，OPNsense／pfSense 則是把 `tailscale0` 當成一個**介面／interface group** 再掛規則，概念上一樣，只是兩套防火牆的叫法不同。
+
+## UniFi（UDM／UCG）：沒有官方支援
+
+UniFi 的 UDM、UCG（Cloud Gateway）系列跑的是 UniFi OS（底層是 Linux，但系統封閉），**Ubiquiti 沒有提供任何官方 Tailscale 支援**。想在上面跑 Tailscale，只能靠社群專案：
+
+- [SierraSoftworks/tailscale-unifi](https://github.com/SierraSoftworks/tailscale-unifi)（原名 `tailscale-udm`）：一個 install.sh 腳本，把 Tailscale 裝進 UniFi OS，提供持久化服務與自動更新，支援 UniFi OS 2.x 以上、Cloud Gateway 等系列。
+- [unifi-utilities/unifi-common](https://github.com/unifi-utilities/unifi-common)（原 `unifios-utilities`）：讓你在開機時跑自訂腳本，很多人拿來搭 Tailscale 或 udm-boot 那類工具。
+
+這些安裝的最大風險，是**會被韌體更新打壞**：
+
+- `tailscale-unifi` 早在 2023 年 4 月的 [v2.4.0](https://github.com/SierraSoftworks/tailscale-unifi/releases/tag/v2.4.0) 就加入「韌體更新後自動重裝」的機制，但到了 2026 年 4 月，討論 [#162](https://github.com/SierraSoftworks/tailscale-unifi/discussions/162)（標題「tailscale-udm does not survive version upgrade」）仍有使用者回報升級後 Tailscale 不見了——有這個機制也不代表每次都撐得過，而且這不是 Ubiquiti 保證的行為。
+- `unifi-common` 的 issue [#681](https://github.com/unifi-utilities/unifi-common/issues/681) 標題就是「UniFi OS 5 讓部分腳本失效」，有人升級到 5.0.12 後 Tailscale 安裝壞掉。
+- 舊的 `udm-boot`／`udm-boot-2x` 套件沒註冊進 `ubnt-dpkg-cache`，韌體升級時套件不會被保留，直接消失（見 [unifi-on-boot](https://github.com/unredacted/unifi-on-boot) 的說明）。
+
+所以把 UDM／UCG 當 subnet router 的現實是：**裝得起來，但每次韌體更新都是一次賭博**，而且出了問題 Ubiquiti 不會幫你。對「要在路由器上常駐一個穩定的 subnet router」這種需求，這是最不適合的選擇。
+
+## 替代做法：在區網放一台 Linux 小機
+
+既然三個平台的限制都繞不開，最省心的做法是**讓路由器專心當路由器，在區網裡另放一台 Linux 當 subnet router**。Linux 完整支援關 SNAT、site-to-site，而且韌體更新跟它無關。兩台常見選擇站內都有文章：
+
+- **樹莓派**：省電、常開，適合擺一台當 subnet router（兼 exit node、順手當 Wake-on-LAN 發送端）。見 [Raspberry Pi 當 subnet router 兼 exit node 的實作](/use-cases/subnet-router-raspberry-pi/)。
+- **PVE 的 LXC 容器**：已經有 PVE 的話，開一台 LXC 裝 Tailscale 也很輕量。見 [在 LXC 中使用 Tailscale](/pve/tailscale-on-lxc/)。
+
+這樣 OPNsense／pfSense／UniFi 就繼續負責它擅長的防火牆與路由，subnet router 交給那台 Linux 小機，兩邊互不干擾。
+
+## 存取規則（最小權限範例）
+
+不管你用哪個平台，subnet router 廣告的網段要能被 tailnet 成員存取，仍需存取規則放行（路由核准與 ACL 是兩層）。以網段 `192.168.1.0/24` 為例，只開放印表機的 IPP 埠（631）給所有成員：
+
+```json
+{
+  "grants": [
+    {
+      "src": ["autogroup:member"],
+      "dst": ["192.168.1.0/24"],
+      "ip": ["tcp:631"]
+    }
+  ]
+}
+```
+
+想開放整個網段就改成 `"ip": ["*"]`。伺服器性質的裝置建議打 tag 並設 `autoApprovers`，讓路由自動核准、金鑰不過期。完整語法見 [ACL / Grants 入門](/admin/acl-grants/) 與 [Subnet Router 的存取規則](/features/subnet-router/#存取規則acl--grants)。
+
+## 小結
+
+| 平台              | 當 subnet router | 關 SNAT                 | 穩定度         | 建議                                   |
+| ----------------- | ---------------- | ----------------------- | -------------- | -------------------------------------- |
+| OPNsense          | 可以             | 外掛選項標 experimental | 高（社群外掛） | 要關 SNAT 或 site-to-site 就改用 Linux |
+| pfSense           | 可以             | 套件沒開放選項          | 高（官方套件） | 同上                                   |
+| UniFi（UDM／UCG） | 勉強（社群腳本） | 看腳本                  | 韌體更新會打壞 | 別用；區網放一台 Linux 小機            |
+
+一句話總結：**OPNsense／pfSense 當 subnet router 可行，但 SNAT 這道坎是 FreeBSD 的天花板；UniFi 則連官方支援都沒有。真要 site-to-site 或保留來源 IP，在區網放一台 Linux 小機是最穩的答案。**
+
+## 延伸
+
+- 完整的 subnet router 觀念、`--accept-routes`、SNAT 與效能調校，見 [Subnet Router](/features/subnet-router/)。
+- Linux 小機的落地實作：[Raspberry Pi 當 subnet router 兼 exit node 的實作](/use-cases/subnet-router-raspberry-pi/)、[在 LXC 中使用 Tailscale](/pve/tailscale-on-lxc/)。
+- 另一台熱門路由器平台 OpenWrt 的做法（防火牆 zone、`--snat-subnet-routes=false`），見 [OpenWrt 裝 Tailscale](/platforms/openwrt/)。
+- 華碩機型走 [Asuswrt-Merlin + Entware](/platforms/asus-merlin/)。
+
+## 參考資料
+
+- [Subnet routers（官方文件）](https://tailscale.com/docs/features/subnet-routers)
+- [Site-to-site networking（官方文件）](https://tailscale.com/docs/features/site-to-site)
+- [Using OPNsense with Tailscale（官方文件）](https://tailscale.com/docs/install/opnsense)
+- [pfSense settings to enable direct connections（官方文件）](https://tailscale.com/docs/integrations/firewalls/pfsense)
+- [opnsense/plugins 的 security/tailscale（os-tailscale 外掛原始碼）](https://github.com/opnsense/plugins/tree/master/security/tailscale)
+- [pfsense/FreeBSD-ports 的 security/pfSense-pkg-Tailscale（套件原始碼）](https://github.com/pfsense/FreeBSD-ports/tree/devel/security/pfSense-pkg-Tailscale)
+- [tailscale 原始碼 cmd/tailscale/cli/up.go（v1.104.0）](https://github.com/tailscale/tailscale/blob/v1.104.0/cmd/tailscale/cli/up.go)
+- [tailscale 原始碼 wgengine/router/osrouter/router_freebsd.go（v1.104.0）](https://github.com/tailscale/tailscale/blob/v1.104.0/wgengine/router/osrouter/router_freebsd.go)
+- [tailscale 原始碼 cmd/tailscaled/tailscaled.go（v1.104.1）](https://github.com/tailscale/tailscale/blob/v1.104.1/cmd/tailscaled/tailscaled.go)
+- [issue #5573：FreeBSD 的 --snat-subnet-routes=false 支援](https://github.com/tailscale/tailscale/issues/5573)
+- [SierraSoftworks/tailscale-unifi（社群 UniFi 安裝）](https://github.com/SierraSoftworks/tailscale-unifi)
+- [unifi-utilities/unifi-common（社群開機腳本）](https://github.com/unifi-utilities/unifi-common)
+- [Netgate 部落格：Tailscale on pfSense Software!](https://www.netgate.com/blog/tailscale-on-pfsense-software)
