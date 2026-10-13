@@ -43,7 +43,7 @@ sidebar:
 }
 ```
 
-- 上面四個埠是各做法的備份埠，**實際用哪種就只留哪一個**：PBS 用 `tcp:8007`、rest-server 用 `tcp:8000`、restic 走 SFTP 用 `tcp:22`、群暉 Hyper Backup Vault 用 `tcp:6281`（DSM 7 的目的地建立任務時還要暫時放行 `tcp:5000`／`tcp:5001` 給登入驗證，見做法三）。
+- 上面四個埠是各做法的備份埠，**實際用哪種就只留哪一個**：PBS 用 `tcp:8007`、rest-server 用 `tcp:8000`、restic 走 SFTP 用 `tcp:22`、群暉 Hyper Backup Vault 用 `tcp:6281`（DSM 7 的目的地另外要放行 `tcp:5000`／`tcp:5001` 給登入驗證，見做法三）。
 - `src` 是你的備份來源，`dst` 是朋友的機器，只有這條放行的連線會通，tailnet 裡的其他人、其他埠一律連不上。
 - 記得拿掉預設的全開規則（`*` 到 `*:*`），否則這條限制沒有作用。grants 的寫法見 [ACL / Grants 入門](/admin/acl-grants/)，tag 的設定見 [Tags 與 auth key](/admin/tags-auth-keys/)。
 
@@ -106,7 +106,7 @@ SFTP 後端沒有 append-only：對方機器上的帳號若能寫，就能刪。
 兩邊都是群暉 NAS 的話，用內建的 Hyper Backup 最省事：來源 NAS 跑 Hyper Backup 建立任務，目的地 NAS 裝 **Hyper Backup Vault**，前者把備份推到後者。
 
 - **目的地要裝 Hyper Backup Vault**：它把 NAS 變成其他遠端 NAS 的備份目的地，用來收 `.hbk` 備份檔、顯示任務狀態。
-- **資料埠是 6281**，但 DSM 7 的目的地建立任務時會分兩步：登入驗證走 DSM 管理埠 **5000／5001**，通過後資料才走 **6281**（DSM 7.2 起把登入驗證與資料埠分離；DSM 6 的 Vault 只靠 6281）。所以走 Tailscale 時，建立任務、按「登入」驗證的階段要先放行目的地的 `tcp:5000`／`tcp:5001`，驗證完成後可以再收斂回只留 `tcp:6281`。路由器上則完全不用轉送。
+- **資料埠是 6281**，但 DSM 7 的目的地建立任務時會分兩步：登入驗證走 DSM 管理埠 **5000／5001**，通過後資料才走 **6281**（DSM 6 的 Vault 只靠 6281）。Synology 官方 KB 列出的跨網段備份埠就是 **5000、5001 與 6281**，所以走 Tailscale 時 grants 要對目的地放行 `tcp:5000`／`tcp:5001`／`tcp:6281`，只開 6281 會卡在建立任務時的登入驗證。路由器上則完全不用轉送。
 - 在 Hyper Backup 建立任務時，目的地選「遠端 Synology NAS」，位址填對方 NAS 的 Tailscale IP 或 MagicDNS 名稱，埠填 6281。
 - 建議開啟**傳輸加密**與**用戶端加密**：用戶端加密讓備份檔在對方 NAS 上是加密的，朋友看不到內容；傳輸加密保護途中資料。
 
