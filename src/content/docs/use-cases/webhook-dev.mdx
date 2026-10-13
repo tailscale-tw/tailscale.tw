@@ -30,7 +30,7 @@ Funnel 的網址是**固定、可預測**的 `<裝置名稱>.<tailnet 名稱>.ts
 
 要多人共用時，把同一個網址貼給同事即可；想給這台 Funnel 裝置一個好記的名字（例如 `github-hooks-dev`），可以另起一台常開的小主機專門當 webhook 接收端，再讓各開發者用 SSH 反向轉發把事件轉到自己本機——這屬於進階做法，官方 Funnel examples 有完整示範。
 
-順帶一提：ngrok 的免費方案過去是每次啟動都換一個隨機子網域，但依 ngrok 目前的官方文件，免費方案現在也會配一個帳號固定的 dev domain（`*.ngrok-free.app`），所以「網址固定」已經不是 Funnel 獨有的優勢。兩者真正的差異在別處：ngrok 免費版會在 HTTP/HTTPS endpoint 前顯示一頁插頁（interstitial），並限制同時上線的 endpoint 數量、流量與請求數；Funnel 則限制連接埠（`443`／`8443`／`10000`）與頻寬。要比較時以雙方最新的官方定價頁為準。
+順帶一提：依 ngrok 目前的官方文件，免費方案現在也會配一個帳號固定的 dev domain（`*.ngrok-free.app`），所以「網址固定」已經不是 Funnel 獨有的優勢。兩者真正的差異在別處：ngrok 免費版會在 HTTP/HTTPS endpoint 前顯示一頁插頁（interstitial），並限制同時上線的 endpoint 數量、流量與請求數；Funnel 則限制連接埠（`443`／`8443`／`10000`）與頻寬。要比較時以雙方最新的官方定價頁為準。
 
 ## 前置條件：funnel 屬性與 grants
 
@@ -97,27 +97,45 @@ tailscale funnel status
 
 把 `status` 印出的 `https://<你的裝置>.<tailnet 名稱>.ts.net` 加上你程式的路徑（例如 `/webhook`），填進 GitHub repo 的 **Settings → Webhooks → Add webhook**，Content type 選 `application/json` 並設定一組 Secret。
 
-GitHub 用 Secret 對 payload 算出 HMAC-SHA256 簽章，放在 `X-Hub-Signature-256` 標頭（值以 `sha256=` 開頭）。**webhook 端點是公開的，一定要驗簽**，不能只靠網址不被知道。Node.js 的驗法大致是：
+GitHub 用 Secret 對 payload 算出 HMAC-SHA256 簽章，放在 `X-Hub-Signature-256` 標頭（值以 `sha256=` 開頭）。**webhook 端點是公開的，一定要驗簽**，不能只靠網址不被知道。Node.js（Express）的驗法大致是：
 
 ```js
 import crypto from "node:crypto";
 
+// HMAC 要對「原始」request body 算，JSON parse 過再重新序列化的字串會對不上簽章。
+// 用 express.json 的 verify 回呼先把原始 body 存進 req.rawBody，再交給它 parse。
+app.use(
+  express.json({
+    verify: (req, res, buf) => {
+      req.rawBody = buf;
+    },
+  })
+);
+
 function verifyGitHub(req) {
   const sig = req.headers["x-hub-signature-256"];
   if (!sig) throw new Error("missing signature");
+
   const expected =
     "sha256=" +
     crypto
       .createHmac("sha256", process.env.WEBHOOK_SECRET)
-      .update(req.body)
+      .update(req.rawBody)
       .digest("hex");
-  if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) {
+
+  // timingSafeEqual 在兩邊長度不同時會直接 throw，先比長度再比內容。
+  const sigBuf = Buffer.from(sig);
+  const expectedBuf = Buffer.from(expected);
+  if (sigBuf.length !== expectedBuf.length) {
+    throw new Error("invalid signature");
+  }
+  if (!crypto.timingSafeEqual(sigBuf, expectedBuf)) {
     throw new Error("invalid signature");
   }
 }
 ```
 
-重點：用 `timingSafeEqual` 這類固定時間比較，不要用 `===`；沒有設定 Secret 時，GitHub 根本不會送 `X-Hub-Signature-256` 標頭。另外 `X-Hub-Signature`（HMAC-SHA1）是舊格式，官方建議改用 `-256`。
+重點：HMAC 要用**原始 request body**（`req.rawBody`），不能拿 parse 過的物件重新序列化來算；用 `timingSafeEqual` 做固定時間比較、不要用 `===`，且比對前要先確認兩邊長度一致（長度不同時 `timingSafeEqual` 會直接 throw）。沒有設定 Secret 時，GitHub 根本不會送 `X-Hub-Signature-256` 標頭。另外 `X-Hub-Signature`（HMAC-SHA1）是舊格式，官方建議改用 `-256`。
 
 ## 範例：接 Twilio webhook
 
@@ -141,7 +159,7 @@ app.post("/webhook", (req, res) => {
 });
 ```
 
-`validateRequest` 驗證失敗就回 403。Twilio 傳給你的網址若含 query 參數（例如 JSON body 的 `bodySHA256`）也要原樣保留，否則驗證會失敗。Twilio 一律要求 HTTPS，且不接受自簽憑證——Funnel 提供的正是憑證有效的 HTTPS 網址，剛好符合。
+`validateRequest` 驗證失敗就回 403。Twilio 傳給你的網址若含 query 參數（例如 JSON body 的 `bodySHA256`）也要原樣保留，否則驗證會失敗。Twilio 官方建議 webhooks 使用 HTTPS，且 HTTPS 的自簽憑證不會被接受——Funnel 提供的正是憑證有效的 HTTPS 網址，剛好符合。
 
 其他服務的原則相同：每個 webhook 服務都有各自的驗簽方式，接起來之前先查它的官方文件，不要只靠「網址沒人知道」。
 
