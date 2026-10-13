@@ -1,0 +1,152 @@
+---
+title: Vaultwarden 只用 Tailscale Serve（不需要反向代理）
+description: 在家裡自架 Vaultwarden，用 Tailscale Serve 直接掛 HTTPS，不必放 Caddy、Nginx 反向代理或手動申請憑證。說明為什麼一定要 HTTPS、`tailscale serve` 指令、DOMAIN 環境變數、手機 App 的伺服器網址，以及關閉註冊、admin token 與最小權限 grants
+sidebar:
+  order: 0.8
+  label: Vaultwarden
+---
+
+[Vaultwarden](https://github.com/dani-garcia/vaultwarden) 是 Bitwarden 密碼管理器的輕量伺服器實作（社群維護、非官方）。把密碼庫自架在家裡，資料就存在自己手上；再透過 Tailscale，出門在外的手機、筆電也能安全連回家。
+
+傳統做法是在 Vaultwarden 前面放 Caddy 或 Nginx 反向代理處理 HTTPS，再想辦法申請與更新憑證。但如果你已經在用 Tailscale，[Tailscale Serve](/features/serve/) 就能直接做 TLS 終端：不用反向代理、不用手動管憑證，服務也只出現在 tailnet 裡，不暴露到網際網路。
+
+> 本文依 2026 年 10 月的 Tailscale 與 Vaultwarden 官方文件整理，以 Tailscale v1.104、Vaultwarden 1.37.4（2026-10-05 釋出）為準。Vaultwarden 的設定以官方 `.env.template` 與 wiki 為準；本文未在實機完整跑過手機 App 的端到端流程，屬文件整理。
+
+## 為什麼一定要 HTTPS
+
+Vaultwarden 的網頁版（web vault）用瀏覽器的 Web Crypto API（`SubtleCrypto`）在本機做金鑰處理與加解密，主密碼和密碼內容不會原封不動送給伺服器。依 MDN 的定義，`SubtleCrypto` 這類 Web Crypto API **只在 secure context（HTTPS）下可用**：用 `http://` 打開網頁版，加解密功能會被瀏覽器關掉，等於不能用。
+
+Vaultwarden 官方 wiki 的 Enabling HTTPS 也是這個說法：Bitwarden web vault 用到 web crypto API，多數瀏覽器只在 HTTPS 環境下提供，所以「啟用 HTTPS 幾乎是必須的」。除了網頁版，U2F／WebAuthn 硬體金鑰也需要 HTTPS（`.env.template` 對 `DOMAIN` 的說明有寫）。
+
+Tailscale Serve 會自動用你的 MagicDNS 名稱發一張受信任的 TLS 憑證，所以這層 HTTPS 完全不用自己處理。
+
+## 架構
+
+- **Vaultwarden**：跑在家裡一台常開的主機或 Docker 容器裡，監聽 80 埠。
+- **Tailscale**：同一台主機跑 `tailscale serve`，把 80 埠以 HTTPS 443 分享到 tailnet。
+- **其他裝置**：瀏覽器、手機 App 用 `https://<主機名>.<tailnet>.ts.net` 連線，全程走 tailnet。
+
+Serve 就是這層的反向代理：TLS 終端、憑證簽發與更新、轉發到本機 80 埠，全包了。Vaultwarden 照常跑純 HTTP 即可。
+
+## 1. 跑 Vaultwarden，先設定 DOMAIN
+
+不管用 Docker 還是直接安裝，`DOMAIN` 都是第一個要設對的環境變數：它必須等於最後的存取網址，**含 `https://` 前綴、沒有結尾斜線**。設錯時登入、註冊、附件下載、Email 連結、U2F 會壞掉。
+
+```ini
+DOMAIN=https://vaultwarden.tailxxxxx.ts.net
+```
+
+`vaultwarden` 是跑 Vaultwarden 那台主機（或 sidecar 容器）的 hostname，`tailxxxxx.ts.net` 是 tailnet 名稱。還沒決定名稱的話，可以先跑完下一節的 `tailscale serve`，用 `tailscale serve status` 看到實際網址再回來填。
+
+**Docker 路線**直接看 [Docker 的 Tailscale sidecar](/use-cases/docker-sidecar/) 的 Vaultwarden 段落，那篇有完整 compose。跟那篇的差異只有兩點：
+
+- `DOMAIN` 填 Serve 的最終 HTTPS 網址（那篇的範例寫 `https://vw.tailxxxxx.ts.net`，就是 hostname + tailnet 名稱，同一個意思）。
+- 那篇用 `serve.json`（`TS_SERVE_CONFIG`）掛 Serve，本篇改用 `tailscale serve` 指令（見下一節），效果一樣，指令版不用另外維護一份 JSON 檔。
+
+## 2. 用 tailscale serve 掛 HTTPS
+
+在 Vaultwarden 那台主機上（Docker sidecar 的話，在 sidecar 容器內）執行：
+
+```bash
+tailscale serve --bg --https=443 80
+```
+
+- `--https=443`：在 443 埠開 HTTPS。HTTPS 是 Serve 的**預設模式**、443 是**預設埠**，所以寫成 `tailscale serve --bg 80` 也是一樣，上面只是寫清楚。
+- `80`：把流量轉給本機 80 埠的 Vaultwarden。
+- `--bg`：背景執行，重開機或 `tailscale down/up` 後自動恢復。
+
+Serve 永遠把流量轉給 `127.0.0.1`，所以 Vaultwarden 要聽得到 127.0.0.1（Docker 容器內預設就是這樣）。確認：
+
+```bash
+tailscale serve status
+```
+
+輸出會顯示 `https://vaultwarden.tailxxxxx.ts.net` 和 `|-- / proxy http://127.0.0.1:80`。把這個網址拿來填 `DOMAIN`，下一節也填進手機 App。
+
+> 別用 `--http`：`--http` 是「只開純 HTTP」時才用，Vaultwarden 一定要 HTTPS。
+
+## 3. 手機 App 設定
+
+Bitwarden 手機 App（iOS、Android）預設連 Bitwarden 官方伺服器，要指到自架的 Vaultwarden：
+
+1. 在登入或註冊畫面，點 **Logging in on** 下拉選單，選 **Self-hosted**。
+2. 在 **Server URL** 欄位填入完整網址，含 `https://`：`https://vaultwarden.tailxxxxx.ts.net`。
+3. 儲存後，再用 Email 與主密碼登入。
+
+兩個提醒：
+
+- 網址一定要含 `https://`。寫成 `http://` 或漏掉前綴，App 會直接報錯，這是自架 Bitwarden 最常見的連不上原因。
+- 手機要**保持 Tailscale 連線**：Vaultwarden 只在 tailnet 裡，Tailscale 沒開（或手機系統把它停掉）時，App 連不上伺服器，只會用到離線快取。打開 App 前先確認 Tailscale 是連線狀態。
+
+（以上選項名稱依 Bitwarden 官方說明：**Logging in on**、**Self-hosted**、**Server URL**。）
+
+## 4. 安全設定
+
+### 不要用 Funnel
+
+[Tailscale Funnel](/features/funnel/) 能把 Serve 公開到整個網際網路，但 Vaultwarden 是密碼庫，**不要公開**：只開 Serve、不要下 `funnel` 指令。開了 Funnel 的話，任何知道網址的人都能嘗試連線，而且 `*.ts.net` 名稱會進 Certificate Transparency 公開紀錄，藏不住。要讓家人共用，用[裝置分享](/admin/sharing/)或直接加進 tailnet，都比 Funnel 安全。
+
+### 關閉註冊、設 admin token
+
+Vaultwarden 預設 `SIGNUPS_ALLOWED=true`，連得到的人就能自己註冊帳號。自用就關掉：
+
+```ini
+SIGNUPS_ALLOWED=false
+INVITATIONS_ALLOWED=false
+```
+
+`INVITATIONS_ALLOWED` 控制組織邀請，關閉註冊後要一併關掉，免得別人用邀請功能開新帳號。
+
+管理後台（`/admin`）預設**停用**，只有設了 `ADMIN_TOKEN` 才會啟用。要用時先產生 Argon2 雜湊：
+
+```bash
+docker run --rm -it vaultwarden/server /vaultwarden hash
+# 直接安裝的話：
+vaultwarden hash
+```
+
+把輸出的 `$argon2id$...` 字串填進 `ADMIN_TOKEN`（`.env` 裡 `$` 要跳脫，或整串用單引號包起來）。啟用後管理後台在 `https://vaultwarden.tailxxxxx.ts.net/admin`。
+
+### 最小權限 grants
+
+把 Vaultwarden 主機打上 tag（例如 `tag:vaultwarden`；tag 裝置預設不會金鑰過期，見 [Tags 與 auth key](/admin/tags-auth-keys/)），然後在存取規則只放行需要的人連 443 埠：
+
+```json
+{
+  "tagOwners": {
+    "tag:vaultwarden": ["group:admins"]
+  },
+  "grants": [
+    {
+      "src": ["group:family"],
+      "dst": ["tag:vaultwarden"],
+      "ip": ["tcp:443"]
+    }
+  ]
+}
+```
+
+- `src` 只列真正要用 Vaultwarden 的人或群組，不要寫 `*`。
+- `ip` 只開 `tcp:443`（Serve 的埠）。需要 SSH 或 Exit Node 時，各別開各別的埠。
+- 記得拿掉預設的全開規則，否則等於沒限制。寫法見 [ACL / Grants 入門](/admin/acl-grants/)。
+
+## 確認生效
+
+1. `tailscale serve status` 看到網址與 `proxy http://127.0.0.1:80`。
+2. 另一台裝置的瀏覽器打開 `https://vaultwarden.tailxxxxx.ts.net`，能正常登入、解鎖。
+3. 手機 App 依上面的步驟設好 Server URL，關掉 Wi-Fi 改用行動網路（Tailscale 開著）登入一次。
+
+## 參考資料
+
+- [Tailscale Serve：在 tailnet 內分享本機服務](/features/serve/)
+- [Docker 的 Tailscale sidecar：Jellyfin、Immich、Vaultwarden 共用寫法](/use-cases/docker-sidecar/)
+- [Tailscale Funnel：把服務公開到網際網路](/features/funnel/)
+- [ACL / Grants 入門：限制誰能連到哪裡](/admin/acl-grants/)
+- [Vaultwarden wiki：Enabling HTTPS](https://github.com/dani-garcia/vaultwarden/wiki/Enabling-HTTPS)
+- [MDN：SubtleCrypto（secure context）](https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto)
+- [Vaultwarden：.env.template（DOMAIN、SIGNUPS_ALLOWED、ADMIN_TOKEN）](https://github.com/dani-garcia/vaultwarden/blob/main/.env.template)
+- [Vaultwarden wiki：Disable registration of new users](https://github.com/dani-garcia/vaultwarden/wiki/Disable-registration-of-new-users)
+- [Vaultwarden wiki：Enabling admin page](https://github.com/dani-garcia/vaultwarden/wiki/Enabling-admin-page)
+- [Bitwarden：Connect Clients to your Instance（手機 App 的 Server URL）](https://bitwarden.com/help/change-client-environment/)
+- [Vaultwarden releases](https://github.com/dani-garcia/vaultwarden/releases)
+- [社群指南：Vaultwarden + Tailscale Serve（Vaultwarden 論壇）](https://vaultwarden.discourse.group/t/guide-vaultwarden-tailscale-serve-and-nothing-else/4309)
