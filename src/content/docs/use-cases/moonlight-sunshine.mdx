@@ -1,0 +1,144 @@
+---
+title: Moonlight／Sunshine 遊戲串流走 Tailscale
+description: 在家裡的遊戲電腦上跑 Sunshine、在 Steam Deck、Android 掌機或手機上跑 Moonlight，兩端都裝 Tailscale，不用開埠就能從任何地方低延遲串流遊戲。說明手動加主機、直連確認、1080p60 與位元率的起點，以及最小權限的 grants
+sidebar:
+  order: 1.9
+  label: Moonlight／Sunshine 遊戲串流
+---
+
+[Moonlight](https://moonlight-stream.org/) 是開源的遊戲串流客戶端，[Sunshine](https://app.lizardbyte.dev/Sunshine) 是對應的伺服器端（host）。兩者合起來就像自架的 Steam Link：遊戲在家的電腦上跑、畫面即時編碼送到手上的裝置，鍵盤、滑鼠與手把輸入再傳回去。把兩端都放進 tailnet，就能在任何地方串流，而且不用在路由器開埠、也不用把 Sunshine 的任何埠暴露到公網。
+
+> 本文依 2026 年 10 月的 Moonlight、Sunshine 與 Tailscale 官方文件整理，以 Tailscale v1.104、Sunshine v2026.914.233613（2026 年 9 月 release）、Moonlight PC v6.2.0 與 Android v12.2（2026 年 9 至 10 月 release）為準。本文未在實機上完整跑過串流；Sunshine 的埠、Web UI 存取設定與「哪些位址算 LAN」以官方文件與原始碼核對，屬文件整理。
+
+## 架構
+
+- **遊戲電腦（host）**：裝 Sunshine 與 Tailscale。Sunshine 用顯示卡硬體編碼（NVIDIA、AMD、Intel 都支援），把畫面壓成 H.264／HEVC／AV1。
+- **客戶端**：Steam Deck、Android 掌機、手機或筆電，裝 Moonlight 與 Tailscale。
+- 串流全程走 WireGuard 隧道，端到端加密。Sunshine 自己的串流加密可以維持預設，不會影響安全性。
+
+兩端登入同一個 tailnet 後，Sunshine 的埠只存在於 tailnet 內，外面的網際網路看不到，也就不需要 port forwarding、UPnP 或固定 IP。
+
+## 直連是前提
+
+遊戲串流對延遲非常敏感，能不能玩，幾乎取決於兩端有沒有**直連**。DERP 是 Tailscale 給所有使用者共用的中繼伺服器，會限制頻寬，拿來串流影片會卡頓；Moonlight 官方在 Tailscale 的說明裡甚至直接寫：直連失敗時「你將無法在這些裝置之間用 Moonlight 串流」，並提醒不要把大量流量灌進中繼，否則可能被限速或封鎖。
+
+所以在串流前先確認直連。在主機上執行：
+
+```bash
+tailscale ping <客戶端>
+```
+
+最後一行是 `via <IP>:<埠>` 代表直連；`via DERP(...)` 則還在中繼。連線方式、為什麼會走 DERP、怎麼改善，見 [直連與 DERP 中繼](/troubleshooting/direct-vs-derp/)。行動網路、公司或飯店的防火牆常常擋 UDP，這類環境要特別注意。
+
+## 1. 在遊戲電腦上裝 Sunshine
+
+依 [Sunshine 官方文件](https://docs.lizardbyte.dev/projects/sunshine/latest/md_docs_2getting__started.html)安裝。第一次啟動會要你建立管理帳號，並在瀏覽器打開 Web UI（`https://localhost:47990/`）做設定。這個帳號很重要：能開到 Web UI 的人就能新增配對裝置、更動啟動的程式，所以最後一節的 grants 會把它只留給管理員。
+
+接著在同一台裝 Tailscale：
+
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up
+```
+
+Sunshine 預設綁定所有網路介面（`bind_address` 留空＝`0.0.0.0`），所以 tailnet 裝置用它的 100.x 位址就能連到，不用改任何設定。UPnP 維持關閉（預設），也不要在路由器轉送任何埠——那是「對外開埠」的舊做法，走 Tailscale 不需要。
+
+## 2. Sunshine 的埠與 Web UI
+
+Sunshine 預設用一組固定的埠（可在 Web UI 的 **Network** 改基準埠，其他埠會跟著平移）：
+
+| 埠                 | 協定     | 用途                                 |
+| ------------------ | -------- | ------------------------------------ |
+| 47984              | TCP      | HTTPS，Moonlight 配對與串流          |
+| 47989              | TCP      | HTTP（基準埠）                       |
+| 47990              | TCP      | Web UI（HTTPS）                      |
+| 48010              | TCP／UDP | RTSP 控制                            |
+| 47998–48000、48002 | UDP      | 影片、音訊與控制串流                 |
+| 5353               | UDP      | mDNS，區網自動發現（tailnet 用不到） |
+
+這些埠在 tailnet 內使用即可，不用對外開。**47990 是唯一需要特別控管的**：它是管理介面。
+
+Sunshine 有個 `origin_web_ui_allowed` 設定，控制誰能開 Web UI，預設是 `lan`（只允許區域網路裝置）。這裡有個容易誤判的細節：Sunshine 原始碼把 Tailscale 的 `100.64.0.0/10` 也歸在「LAN」範圍內，所以 tailnet 裝置**預設就能開到 Web UI**。換句話說，`lan` 擋的是公網，擋不住你自己的 tailnet；要限制只能靠 Tailscale 的 grants（見最後一節）。
+
+## 3. 在 Moonlight 手動加主機
+
+Moonlight 的自動發現靠 mDNS 廣播，只在同一個實體區網裡有效，過不了 tailnet，所以主機不會自己出現在清單裡。用手動加入：
+
+1. 在 Moonlight 按 **Add PC**（手動加入）。
+2. 輸入遊戲電腦的 **Tailscale IP**（`100.x.y.z`）或 **MagicDNS 名稱**（例如 `gaming-pc.tailxxxxx.ts.net`）。
+
+名稱比 IP 好記，兩者都行。iOS／tvOS 的 Moonlight 依 Apple 準則，必須先在**家裡的區網**配對過一次，之後才能改走 Tailscale。
+
+## 4. 畫質與位元率的起點
+
+1080p60 是常見的起點：畫面夠清楚、對硬體與網路的要求也中庸。Moonlight 從 v6.2.0 起，新安裝的預設解析度就是 1080p（原本是 720p）。
+
+位元率（bitrate）是 Moonlight 裡手動調整的滑桿，官方沒有給出統一的建議值。常見的起點是 **20–40 Mbps**：先從這個區間選一個值，再依實際網路調整——
+
+- tailnet 直連品質好（例如兩端都是有線或同一個家用網路）時，可以往上加。
+- 走行動網路、延遲或掉包變高時，往下調位元率，或把解析度降到 720p。
+
+原則是讓位元率低於直連的實際頻寬、留一點餘裕。Moonlight 串流時按 `Ctrl+Alt+Shift+S` 可看延遲與掉包統計，方便邊玩邊調。
+
+## 5. 客戶端：Steam Deck 與 Android 掌機
+
+### Steam Deck
+
+Steam Deck 要在 **Desktop mode** 操作。SteamOS 的根檔案系統預設**唯讀**，直接 `pacman -S tailscale` 會在系統更新後被清掉，所以用官方維護的安裝腳本 [tailscale-dev/deck-tailscale](https://github.com/tailscale-dev/deck-tailscale)：它用 systemd-sysext 把 Tailscale 疊加進系統，不破壞唯讀分區，SteamOS 更新後也還在。Moonlight 本身直接從 **Discover** 商店安裝即可。
+
+### Android 掌機
+
+Moonlight 從 Google Play 安裝，再裝 Tailscale。掌機（或手機）的常駐連線、電池最佳化設定，見 [iOS 與 Android 手機設定](/platforms/ios-android/)。
+
+## 喚醒睡眠中的主機
+
+遊戲電腦若在睡眠狀態，先經由 Tailscale 喚醒它，見 [Wake-on-LAN 遠端喚醒](/use-cases/wake-on-lan/)。如果只是想串流整台桌面（不是玩遊戲），Sunshine 內建的 **Desktop** app 就能做到；要完整的遠端桌面（RDP／VNC）則是另一回事。
+
+## grants：最小權限
+
+不要用預設全開的規則。給遊戲電腦一個 tag，只開放 Sunshine 需要的埠，Web UI 的 47990 只給管理員：
+
+```json
+{
+  "tagOwners": {
+    "tag:gaming": ["autogroup:admin"]
+  },
+  "grants": [
+    {
+      "src": ["autogroup:member"],
+      "dst": ["tag:gaming"],
+      "ip": [
+        "tcp:47984",
+        "tcp:47989",
+        "tcp:48010",
+        "udp:47998",
+        "udp:47999",
+        "udp:48000",
+        "udp:48002",
+        "udp:48010"
+      ]
+    },
+    {
+      "src": ["autogroup:admin"],
+      "dst": ["tag:gaming"],
+      "ip": ["tcp:47990"]
+    }
+  ]
+}
+```
+
+- 第一條讓 tailnet 成員用 Moonlight 串流，只開 Sunshine 的串流埠。
+- 第二條只讓管理員開 Web UI（47990）。其他人即使連得到 100.x，也碰不到管理介面。
+- mDNS 的 5353 只在區網有用，tailnet 上不需要開。
+
+規則的寫法見 [ACL / Grants 入門](/admin/acl-grants/)。
+
+## 參考資料
+
+- [Moonlight Setup Guide（Moonlight 官方 wiki，含 Tailscale 一節）](https://github.com/moonlight-stream/moonlight-docs/wiki/Setup-Guide)
+- [Sunshine: Configuration（官方文件）](https://docs.lizardbyte.dev/projects/sunshine/latest/md_docs_2configuration.html)
+- [Sunshine: Getting Started（官方文件）](https://docs.lizardbyte.dev/projects/sunshine/latest/md_docs_2getting__started.html)
+- [deck-tailscale：Tailscale 官方的 Steam Deck 安裝腳本](https://github.com/tailscale-dev/deck-tailscale)
+- [Installing Tailscale on the Steam Deck（Tailscale 官方部落格）](https://tailscale.com/blog/steam-deck)
+- [直連與 DERP 中繼](/troubleshooting/direct-vs-derp/)
+- [ACL / Grants 入門](/admin/acl-grants/)
