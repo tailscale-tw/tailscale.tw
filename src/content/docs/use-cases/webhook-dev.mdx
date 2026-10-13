@@ -1,0 +1,190 @@
+---
+title: 開發時用 Funnel 接 webhook、用 Serve 分享 dev server
+description: 開發 webhook 時用 Tailscale Funnel 讓 GitHub、Twilio 等外部服務直接打到本機，用 Serve 把 dev server 分享給 tailnet 內的同事。說明兩者的分工、固定網址多人共用、驗證簽章、dev server 常見坑與最小權限 grants
+sidebar:
+  order: 0.25
+  label: webhook 與 dev server
+---
+
+開發 webhook 時有兩個幾乎每天都碰得到的需求：一是讓 GitHub、Twilio、Stripe 這類**外部服務**能主動打到你本機正在改的程式，方便一改完就收到事件；二是把本機的 dev server 分享給**同事**預覽，不用先推上測試環境。這兩個需求分別對應 Tailscale 的 Funnel 與 Serve。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件與原始碼（`cmd/tailscale/cli/serve_v2.go`、`ipn/ipnlocal/serve.go`）整理，以 Tailscale v1.104 為準。GitHub 的 `X-Hub-Signature-256`、Twilio 的 `X-Twilio-Signature` 標頭，以及 Vite 的 `server.allowedHosts` 依各自官方文件核對；本文未實機跑過整套流程。
+
+## 兩個需求，兩種工具
+
+[Funnel](/features/funnel/) 把服務公開到整個網際網路，[Serve](/features/serve/) 只分享給同一個 tailnet 內的人。webhook 場景要的是前者、分享 dev server 要的是後者，兩者互補而不是二選一：
+
+|            | Serve                              | Funnel                                     |
+| ---------- | ---------------------------------- | ------------------------------------------ |
+| 看得到的人 | 只有同一 tailnet 內的裝置          | 整個網際網路都能連                         |
+| 適合做什麼 | 分享 dev server 給同事預覽         | 接收 GitHub、Twilio、Stripe 等外部 webhook |
+| 網址       | `<裝置名稱>.<tailnet 名稱>.ts.net` | 同左，也是固定的 `*.ts.net` 網址           |
+| 身分標頭   | 有（`Tailscale-User-Login` 等）    | 沒有，改帶 `Tailscale-Funnel-Request: ?1`  |
+| 連接埠     | 任意連接埠皆可                     | 只能用 `443`、`8443`、`10000`              |
+
+原則很簡單：**要給 tailnet 外的人或服務連，就開 Funnel；只有自己人要用，就用 Serve**。同一個連接埠不能同時是 Serve 又是 Funnel，以最後下的那道指令為準。詳細對照見 [Serve 文章的「與 Funnel 的差異」](/features/serve/#與-funnel-的差異)。
+
+## 固定網址，設定一次就能多人共用
+
+Funnel 的網址是**固定、可預測**的 `<裝置名稱>.<tailnet 名稱>.ts.net`：設定一次之後，每次啟用都是同一個。這對 webhook 特別有用——你可以把這個網址直接填進 GitHub repo、Twilio 帳號的 webhook 設定，往後不論重開機、換人接手測試，網址都不用改。官方文件也特別提到這個用法：把 webhook 網址固定下來，換哪個開發者接手測試都不用動後端設定。
+
+要多人共用時，把同一個網址貼給同事即可；想給這台 Funnel 裝置一個好記的名字（例如 `github-hooks-dev`），可以另起一台常開的小主機專門當 webhook 接收端，再讓各開發者用 SSH 反向轉發把事件轉到自己本機——這屬於進階做法，官方 Funnel examples 有完整示範。
+
+順帶一提：ngrok 的免費方案過去是每次啟動都換一個隨機子網域，但依 ngrok 目前的官方文件，免費方案現在也會配一個帳號固定的 dev domain（`*.ngrok-free.app`），所以「網址固定」已經不是 Funnel 獨有的優勢。兩者真正的差異在別處：ngrok 免費版會在 HTTP/HTTPS endpoint 前顯示一頁插頁（interstitial），並限制同時上線的 endpoint 數量、流量與請求數；Funnel 則限制連接埠（`443`／`8443`／`10000`）與頻寬。要比較時以雙方最新的官方定價頁為準。
+
+## 前置條件：funnel 屬性與 grants
+
+Funnel 和 Serve 都需要 tailnet 啟用 [MagicDNS](/features/magicdns/) 與 HTTPS 憑證（Admin console → DNS → 啟用 HTTPS），Funnel 另外需要 policy 的 `nodeAttrs` 給裝置 `funnel` 屬性。跑 `tailscale funnel` 時若缺設定，CLI 會給你一個網址，照著點開同意即可補上。
+
+安全上建議**不要**像官方預設那樣把 `funnel` 給整個 `autogroup:member`（所有人），而是只給真正需要的裝置。下面的範例把 dev 機器加上 `tag:webhook-dev`，只讓這個 tag 能開 Funnel；同時用 grants 只放行 tailnet 成員連到 Serve 的 `443`（預覽 dev server），其他連接埠一律不通：
+
+```json
+{
+  "tagOwners": {
+    "tag:webhook-dev": ["autogroup:admin"]
+  },
+  "nodeAttrs": [
+    {
+      "target": ["tag:webhook-dev"],
+      "attr": ["funnel"]
+    }
+  ],
+  "grants": [
+    {
+      "src": ["autogroup:member"],
+      "dst": ["tag:webhook-dev"],
+      "ip": ["tcp:443"]
+    }
+  ]
+}
+```
+
+三個重點：
+
+- `funnel` 屬性只控制「誰能開 Funnel」，不限制誰能連——Funnel 的流量來自網際網路，本來就不受 grants 管。所以只給需要的 tag 或使用者，避免有人亂開公開服務。
+- 上面的 grants 只管 tailnet 內的 Serve 存取：同事能開 `443` 預覽 dev server，但碰不到後端直連的其他連接埠。
+- 如果你不想把個人筆電加上 tag（tagged 裝置不帶身分標頭，見 [Serve 的身分標頭](/features/serve-identity-headers/)），也可以把 `nodeAttrs` 的 `target` 換成你自己的帳號或群組。規則寫法見 [ACL / Grants 入門](/admin/acl-grants/)。
+
+## 常用指令
+
+Serve 與 Funnel 的指令、旗標幾乎一樣，差別只在 `serve` 與 `funnel` 兩個字：
+
+| 指令                               | 用途                                                    |
+| ---------------------------------- | ------------------------------------------------------- |
+| `tailscale serve --bg 5173`        | 背景分享本機 `5173`（預設 HTTPS `443`），重開機自動恢復 |
+| `tailscale funnel --bg 8080`       | 背景公開本機 `8080` 到網際網路                          |
+| `tailscale serve status`           | 查看目前分享了哪些服務（加 `--json` 看 JSON 版）        |
+| `tailscale funnel status`          | 查看目前的分享，公開的會標示 `Funnel on`                |
+| `tailscale serve --https=443 off`  | 關掉 `443` 上的分享（`off` 前要帶原本的旗標）           |
+| `tailscale funnel --https=443 off` | 移除 `443` 上的公開（`off` 會整條移除，不是改回內網）   |
+| `tailscale serve reset`            | 清空本機所有 Serve／Funnel 設定                         |
+
+幾個重點：
+
+- `--bg` 會把設定寫進節點的 serve config 並持續生效；不加旗標是前景執行，按 `Ctrl+C` 就停止。
+- 同一台主機要用路徑區分多個服務時，用 `--set-path=/api` 把後端掛在同一個主機名稱下（前綴會先被去掉再轉發，見 [Serve 的範例一](/features/serve/#範例一分享本機開發中的網站)）。
+- **Funnel 只能用 `443`、`8443`、`10000` 三個連接埠**，例如 `tailscale funnel --bg --https=8443 8080`；Serve 沒有這個限制。
+- 關閉單一分享時，`off` 指令的旗標要和當初啟用時一致；`--bg` 輸出的最後一行會告訴你該跑哪一行 `off`。`reset` 不會印任何訊息，跑完用 `status` 確認會顯示 `No serve config`。
+
+## 範例：接 GitHub webhook
+
+假設本機 `8080` 跑著 webhook 接收程式（聽在 `127.0.0.1`），先公開出去：
+
+```bash
+tailscale funnel --bg 8080
+tailscale funnel status
+```
+
+把 `status` 印出的 `https://<你的裝置>.<tailnet 名稱>.ts.net` 加上你程式的路徑（例如 `/webhook`），填進 GitHub repo 的 **Settings → Webhooks → Add webhook**，Content type 選 `application/json` 並設定一組 Secret。
+
+GitHub 用 Secret 對 payload 算出 HMAC-SHA256 簽章，放在 `X-Hub-Signature-256` 標頭（值以 `sha256=` 開頭）。**webhook 端點是公開的，一定要驗簽**，不能只靠網址不被知道。Node.js 的驗法大致是：
+
+```js
+import crypto from "node:crypto";
+
+function verifyGitHub(req) {
+  const sig = req.headers["x-hub-signature-256"];
+  if (!sig) throw new Error("missing signature");
+  const expected =
+    "sha256=" +
+    crypto
+      .createHmac("sha256", process.env.WEBHOOK_SECRET)
+      .update(req.body)
+      .digest("hex");
+  if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) {
+    throw new Error("invalid signature");
+  }
+}
+```
+
+重點：用 `timingSafeEqual` 這類固定時間比較，不要用 `===`；沒有設定 Secret 時，GitHub 根本不會送 `X-Hub-Signature-256` 標頭。另外 `X-Hub-Signature`（HMAC-SHA1）是舊格式，官方建議改用 `-256`。
+
+## 範例：接 Twilio webhook
+
+Twilio 用帳號的 Auth Token 對「webhook 網址 + 所有 request 參數」算 HMAC-SHA1 簽章，放在 `X-Twilio-Signature` 標頭。它的演算法涉及網址與參數的組裝，官方明確建議**直接用 Twilio SDK 的驗證函式，不要自己實作**。以 Node.js 為例：
+
+```js
+import twilio from "twilio";
+
+const authToken = process.env.TWILIO_AUTH_TOKEN;
+
+app.post("/webhook", (req, res) => {
+  // url 必須是 Twilio 實際收到的完整網址（含 query 參數），params 是所有收到的參數
+  const valid = twilio.validateRequest(
+    authToken,
+    req.get("X-Twilio-Signature"),
+    url,
+    params
+  );
+  if (!valid) return res.status(403).end();
+  res.type("text/xml").send("<Response/>");
+});
+```
+
+`validateRequest` 驗證失敗就回 403。Twilio 傳給你的網址若含 query 參數（例如 JSON body 的 `bodySHA256`）也要原樣保留，否則驗證會失敗。Twilio 一律要求 HTTPS，且不接受自簽憑證——Funnel 提供的正是憑證有效的 HTTPS 網址，剛好符合。
+
+其他服務的原則相同：每個 webhook 服務都有各自的驗簽方式，接起來之前先查它的官方文件，不要只靠「網址沒人知道」。
+
+## dev server 常見坑
+
+把 dev server 接到 Serve 或 Funnel 背後時，最常踩到的三個坑都跟「dev server 只為 localhost 設計」有關：
+
+1. **只聽 IPv6 `::1`**：Serve 與 Funnel 轉發時永遠連 `http://127.0.0.1`（IPv4 迴路位址）。Node 17+ 的 `localhost` 常只綁到 IPv6 `[::1]`，轉發會被拒絕。解法是把 dev server 明確綁到 `127.0.0.1`——這同時也是避免別人繞過 Serve 直連後端的好習慣。
+2. **host allowlist**：Vite 5.4.12／6.0.9 起預設擋掉非 localhost 的 Host（DNS rebinding 防護），Serve 轉發帶的是 `*.ts.net` 的 Host，不處理會看到「Blocked request」。在 `vite.config.js` 設 `host: "127.0.0.1"` 並把 `allowedHosts` 加進 `".ts.net"`（開頭的 `.` 表示包含所有子網域）：
+
+   ```js
+   // vite.config.js
+   export default defineConfig({
+     server: {
+       host: "127.0.0.1",
+       allowedHosts: [".ts.net"],
+     },
+   });
+   ```
+
+   完整的 Vite 設定與說明見 [Serve 的範例一](/features/serve/#範例一分享本機開發中的網站)。
+
+3. **HMR websocket**：Vite 的 HMR 連線預設走同一個網址（`wss://<你的裝置>.ts.net`），Serve 與 Funnel 都是 HTTP 反向代理，會一併代理 WebSocket，所以 HMR 可以照常運作。但如果自行在 `vite.config.js` 把 `server.hmr`（或新版 `server.ws`）綁到特定 host／port，HMR 客戶端就會改去連那個位址、繞過 Serve 而連不上——保持預設即可。
+
+## 用完要關掉
+
+Funnel 等於把服務直接放上網際網路，幾個收尾的重點：
+
+- **用完就關**：臨時測試用前景執行，結束 `Ctrl+C`；用 `--bg` 開的記得跑 `tailscale funnel status` 檢查還有哪些公開中，再用 `tailscale funnel --https=443 off` 移除。想保留給 tailnet 內用，改下一次對應的 `tailscale serve` 指令即可。
+- **網址不是祕密**：`*.ts.net` 網域會出現在公開的憑證透明度（Certificate Transparency）紀錄裡，掃描器很快就會找上門。公開的 webhook 端點一定要驗簽，不能靠網址不被知道。
+- **Funnel 請求不帶身分標頭**：Serve 會帶 `Tailscale-User-Login` 等標頭告訴後端是誰連進來，Funnel 的請求**不帶**這些標頭（公開流量沒有 Tailscale 身分），改帶 `Tailscale-Funnel-Request: ?1`。後端可以用它辨識「這是從網際網路來的」，例如對 Funnel 流量要求驗簽、對 tailnet 流量放行。Tailscale 轉發前會先清掉請求裡偽造的同名標頭。完整說明見 [Serve 的身分標頭](/features/serve-identity-headers/)。
+
+## 參考資料
+
+- [Tailscale Funnel 官方文件](https://tailscale.com/kb/1223/funnel)
+- [Tailscale Funnel examples（官方，含固定網址與 GitHub webhook 多人共用）](https://tailscale.com/docs/reference/examples/funnel)
+- [`tailscale funnel` 指令參考](https://tailscale.com/kb/1311/funnel)
+- [Tailscale Serve 官方文件](https://tailscale.com/kb/1312/serve)
+- [`tailscale serve` 指令參考](https://tailscale.com/kb/1242/tailscale-serve)
+- [GitHub：Validating webhook deliveries（`X-Hub-Signature-256`）](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries)
+- [Twilio：Secure webhooks（`X-Twilio-Signature`）](https://www.twilio.com/docs/usage/webhooks/webhooks-security)
+- [Vite：Server Options（`server.host`、`server.allowedHosts`、`server.ws`）](https://vite.dev/config/server-options)
+- [ngrok 定價](https://ngrok.com/pricing)
+- [Tailscale Funnel：把服務公開到網際網路](/features/funnel/)
+- [Tailscale Serve：在 tailnet 內分享本機服務](/features/serve/)
+- [Serve 的身分標頭：讓自架服務直接認得 tailnet 使用者](/features/serve-identity-headers/)
