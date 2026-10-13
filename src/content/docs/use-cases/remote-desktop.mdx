@@ -1,0 +1,172 @@
+---
+title: RustDesk、RDP、VNC 走 Tailscale
+description: 用 Tailscale 把 RustDesk 直連 IP、Windows RDP、macOS 螢幕共享（VNC）與 GNOME 遠端桌面鎖在私有網路裡：各協定與埠、Windows 家用版不能當 RDP 主機、Windows 防火牆只對 Tailscale 開放、給長輩遠端支援時搭配裝置分享，以及最小權限的 grants
+sidebar:
+  order: 0.7
+  label: 遠端桌面
+---
+
+遠端桌面是最常見的「連回家裡」情境：出差要拿桌機上的檔案、人在外面要幫長輩修電腦、或從手機控制家裡的伺服器。常見的做法有 RustDesk、Windows 內建的 RDP（遠端桌面協定）、macOS 的螢幕共享（VNC）與 Linux 的 GNOME 遠端桌面。
+
+它們都有一個共同的陷阱：為了從外面連進去，把協定的連接埠開到公網。這些埠長年是被掃描、爆破的目標。把 Tailscale 裝在被控端，再把這些埠**只對 tailnet 開放**，就能安全地從任何地方遠端控制，而且不用在路由器開埠、不用公開 IP。
+
+> 本文依 2026 年 10 月的 Tailscale、RustDesk、Microsoft、Apple 與 GNOME 官方文件整理，以 Tailscale v1.104、RustDesk 1.5.0（2026 年 9 月 30 日發布）為準。本文屬文件整理，未在實機上跑完整套設定；各作業系統選單名稱以各官方文件為準，實際路徑可能隨版本微調。
+
+## 三種協定一覽
+
+| 協定             | 被控端軟體               | 預設埠     | 傳輸 | 被控端作業系統                             |
+| ---------------- | ------------------------ | ---------- | ---- | ------------------------------------------ |
+| RustDesk 直連 IP | RustDesk                 | 21118      | TCP  | 跨平台                                     |
+| RDP              | Windows 內建「遠端桌面」 | 3389       | TCP  | Windows Pro／Enterprise／Education／Server |
+| VNC              | macOS「螢幕共享」        | 5900       | TCP  | macOS                                      |
+| RDP／VNC         | GNOME 遠端桌面           | 3389／5900 | TCP  | Linux（GNOME）                             |
+
+這四種的設定各不同，但「走 Tailscale」的做法完全一樣：被控端裝 Tailscale，讓協定只聽 tailnet 的連線。以下逐一說明。
+
+## RustDesk：直連 IP 模式，不用自架 relay
+
+[RustDesk](https://rustdesk.com/) 是開源的遠端桌面軟體，跨 Windows、macOS、Linux、Android、iOS。它預設的連線方式是：兩台裝置先到 RustDesk 的伺服器（ID 伺服器 `hbbs`）互相找到彼此，打洞直連失敗時再經中繼伺服器（`hbbr`）轉送。這個伺服器可以用 RustDesk 官方的，也可以自架——但自架要維護一台 `hbbs`／`hbbr`，正是很多人不想碰的部分。
+
+用 Tailscale 之後，**兩台裝置已經在同一個私有網路裡，可以直接找到彼此**，RustDesk 的伺服器就變成多餘的。做法是開啟 RustDesk 的「直接 IP 存取」（direct IP access）模式：
+
+1. 在**被控端**開啟 RustDesk，進入 **Settings（設定）→ Security（安全性）**。
+2. 打開 **Enable direct IP access**（啟用直接 IP 存取）。這個選項**預設是關閉的**，要手動打開。
+3. 被控端會開始監聽 **TCP 21118**，這個埠就是直接 IP 存取用的（可在同一頁的進階安全性設定裡改）。
+
+> 選項名稱在 RustDesk 各平台的用戶端略有不同（官方文件也這麼提醒），但都位在 **Security** 區塊，關鍵字是「direct IP」。連接埠預設 **TCP 21118**，以 RustDesk 官方文件的 Advanced Settings 一節為準。
+
+接著在**控制端**的 RustDesk，把連線目標從「ID」改成被控端的 **Tailscale IP**（`100.x.y.z`）或 **MagicDNS 名稱**，輸入密碼後連線。不需要輸入 RustDesk 的 9 碼 ID，也不會經過 RustDesk 的任何伺服器。
+
+兩個細節：
+
+- **密碼**：直接 IP 存取可以用預設的「一次性密碼」，但無人值守的機器（例如沒接螢幕的桌機）最好設一組**固定密碼**，之後每次連線都用同一組。RustDesk 的 Security 區塊可以設定。
+- **直接 IP 存取的連線本身未加密**（RustDesk 官方 FAQ 明說這是設計如此）。但走 Tailscale 時，整條連線都在 WireGuard 隧道裡，**由 Tailscale 加密**，所以這點不構成問題——這正是「走 Tailscale」的另一個好處。
+
+## Windows RDP
+
+Windows 的 RDP 是內建功能，走 **TCP 3389**。啟用方式：**設定 → 系統 → 遠端桌面**，打開 **遠端桌面** 開關。
+
+### Windows 家用版不能當 RDP 主機
+
+這是很多人第一個卡住的點：**Windows 家用版（Home）不能當 RDP 主機**。依 Microsoft 的文件，RDP 主機（被連的那台）需要 **Professional、Enterprise、Education 或 Windows Server** 版本；家用版只有**用戶端**（連出去）的能力，不能接受連入。
+
+要用內建 RDP 遠端控制一台 Windows，被控端必須是上述版本之一。如果被控端是家用版，改用本文的 RustDesk（或升級到 Pro）即可。
+
+### 防火牆：RDP 只對 Tailscale 開放
+
+啟用遠端桌面後，Windows 會建立一組名為 **Remote Desktop** 的防火牆規則，預設開放所有網路介面的 3389。要只讓 Tailscale 連得到，做法是**停用這組預設規則**，再加一條只允許 Tailscale 位址範圍（`100.64.0.0/10`）連入的規則。在**以系統管理員身分開啟的 PowerShell** 執行：
+
+```powershell
+# 停用 Windows 預設開啟的 RDP 規則（對所有介面）
+Disable-NetFirewallRule -DisplayGroup "Remote Desktop"
+
+# 只允許來自 Tailscale IPv4 位址範圍的 RDP 連線
+New-NetFirewallRule -DisplayName "RDP over Tailscale" -Direction Inbound -Protocol TCP -LocalPort 3389 -RemoteAddress 100.64.0.0/10 -Action Allow
+```
+
+`100.64.0.0/10` 是 Tailscale 使用的 CGNAT 位址範圍（也就是所有 Tailscale IP 都在 `100.64.x.x`～`100.127.x.x`）。這樣一來，RDP 只對 tailnet 裡的其他裝置開放，實體區網或公網都連不進來。
+
+### 連線與保持常開
+
+- **控制端**：Windows 用內建的「遠端桌面連線」（`mstsc`）；macOS、iOS、Android 用 Microsoft 的 **Windows App**；Linux 用 Remmina、FreeRDP 或 GNOME Connections。目標欄位填被控端的 Tailscale IP 或 MagicDNS 名稱。
+- **重開機後要能連**：RDP 主機通常要長時間可連，但 Windows 版 Tailscale 預設登出就斷線。要讓它重開機後、還沒人登入時就恢復連線，開啟**無人值守模式（Run unattended）**，做法見站內〈[Windows 無人值守模式與當 exit node](/platforms/windows-unattended/)〉。
+
+## macOS 螢幕共享（VNC）
+
+macOS 的「螢幕共享」用的就是 VNC，預設 **TCP 5900**。開啟方式（macOS 13 之後的「系統設定」）：
+
+1. 打開 **系統設定 → 一般 → 共享 → 螢幕共享**。
+2. 打開 **螢幕共享** 開關。
+3. 打開 **VNC 檢視程式可以使用密碼控制螢幕**，設一組 VNC 密碼。
+
+從另一台 Mac 連線時，用內建的「螢幕共享」App 或在 Finder 選 **前往 → 連接伺服器**，輸入 `vnc://<被控端的 MagicDNS 名稱>`（或 Tailscale IP）。
+
+兩點提醒：
+
+- **「螢幕共享」與「遠端管理」不能同時開啟**（Apple 文件明說）。只需要 VNC 連線的話，開「螢幕共享」就好。
+- **VNC 本身是未加密的協定**，原始設計是給區網用的。這正是不要把 5900 開到公網的原因；走 Tailscale 時，流量在 WireGuard 隧道裡加密。
+
+macOS 上用第三方 VNC 用戶端（Windows 的 TigerVNC、RealVNC，Linux 的 Remmina）也一樣，連到 `<MagicDNS 名稱>:5900` 即可。
+
+## Linux：GNOME 遠端桌面
+
+GNOME 桌面的發行版（Ubuntu、Fedora 工作站等）內建 **GNOME Remote Desktop**，同時支援 **RDP** 與 **VNC**。依 GNOME 官方文件：
+
+1. 打開 **設定 → 系統 → 遠端桌面**。
+2. 打開 **桌面共享（Desktop Sharing）**，依需求再開 **遠端控制（Remote Control）** 讓對方能操作。
+3. 「如何連線」區塊會顯示**主機名稱與連接埠**；設定 RDP 的帳號密碼，或用 `grdctl` 命令列設定 VNC 密碼。
+
+RDP 預設走 **3389**（如果同時開了「遠端登入」，3389 會讓給遠端登入，桌面共享改用其他埠）；VNC 走 **5900**。控制端用 Remmina、GNOME Connections 或 Windows 內建的遠端桌面連線，目標填被控端的 Tailscale IP 或 MagicDNS 名稱。
+
+只想用命令列設定的話，`grdctl rdp ...`／`grdctl vnc ...` 可以完成全部設定，細節見 GNOME Remote Desktop 的文件。
+
+## 為什麼不要把 3389／5900 開到公網
+
+RDP 和 VNC 是網路上被掃描、爆破最兇的目標之一。把 3389 或 5900 開到公網，等於把登入畫面直接攤在整個網際網路上，任何人、任何殭屍網路都能一直試密碼；就算密碼夠強，協定本身的歷史漏洞（尤其 VNC 幾乎不加密）也讓這種暴露風險很高。
+
+把這些埠鎖在 Tailscale 的私有網路裡，服務就**對公網不可見**——外面連掃描都掃不到。這與 Cloudflare Tunnel、QuickConnect 這類「公開發布」的本質差異，見〈[Tailscale、Cloudflare Tunnel、QuickConnect、傳統 VPN 怎麼選](/use-cases/choosing-remote-access/)〉。
+
+## 直連與 DERP 對桌面延遲的影響
+
+遠端桌面對延遲非常敏感，滑鼠游標跟不跟手、鍵盤有沒有即時回應，全都取決於延遲。Tailscale 兩台裝置之間**直連**時延遲最低；直連失敗時會改走 DERP 中繼，封包要繞到中繼伺服器再回來，延遲明顯變高、還受限流。
+
+所以遠端桌面卡頓時，第一件事就是確認兩台裝置是不是**直連**（`tailscale ping <對方>` 看結尾是 `via <IP>` 還是 `via DERP(...)`）。判讀與改善方法見〈[直連與 DERP 中繼：為什麼連線變慢、怎麼改善](/troubleshooting/direct-vs-derp/)〉。
+
+## 喚醒睡眠中的電腦
+
+遠端桌面的前提是被控端開著機。如果目標電腦關機或睡眠，得先把它叫醒——這要靠 [Wake-on-LAN](/use-cases/wake-on-lan/) 搭配一台常開的同網段小裝置，步驟見〈[出門在外喚醒家裡的電腦：Wake-on-LAN 與 Tailscale](/use-cases/wake-on-lan/)〉。喚醒之後，再回到本文的 RustDesk／RDP／VNC 連進去。
+
+## 給長輩遠端支援：搭配裝置分享
+
+要幫家人、長輩修電腦，可以不用把對方拉進你的 tailnet，也不用教他架任何東西——用 **RustDesk + 裝置分享（node sharing）**：
+
+1. 長輩的電腦裝 Tailscale 與 RustDesk，打開 RustDesk 的直接 IP 存取。
+2. 請對方（他 tailnet 的管理員）把電腦**分享**給你，你接受後，那台電腦就會出現在你自己的 tailnet 裡。
+3. 你在自己裝置上，用它的 Tailscale IP 或 MagicDNS 名稱連 RustDesk 的 21118 埠。
+
+裝置分享只分享**那一台機器**，你連不到他 tailnet 的其他裝置，是最小暴露的做法。分享的操作、對方能與不能做的事、以及 ACL 怎麼配合，見〈[分享裝置給 tailnet 以外的人](/admin/sharing/)〉。
+
+## 最小權限的 grants
+
+Tailscale 預設的存取規則是全開的。把遠端桌面主機打上 tag，再只放行需要的人連那三個埠，攻擊面就縮到最小：
+
+```json
+{
+  "tagOwners": {
+    "tag:desktop": ["autogroup:admin"]
+  },
+  "grants": [
+    {
+      "src": ["autogroup:admin"],
+      "dst": ["tag:desktop"],
+      "ip": ["tcp:21118", "tcp:3389", "tcp:5900"]
+    }
+  ]
+}
+```
+
+- `tag:desktop` 打在遠端桌面主機上（用 auth key 或 Admin console 套用，見 [Tags 與 auth key](/admin/tags-auth-keys/)）。
+- 這條 `grants` 只讓管理員自己的裝置（`autogroup:admin`）連到主機的 **21118**（RustDesk）、**3389**（RDP）、**5900**（VNC）。一台主機通常只用到其中一個埠，可以依實際使用的協定把另外兩個拿掉。
+- 有其他人也要連（例如家人），把他們加進一個群組、把群組放進 `src`，不要用 `*`。
+- 記得把預設的 `*` 到 `*:*` 全開規則拿掉，這條限制才有作用。語法與拿掉全開規則的注意事項見 [ACL / Grants 入門](/admin/acl-grants/)。
+
+grants 只管「走 Tailscale 的流量」。上面 Windows 那節的防火牆規則是**作業系統層**的防線（連到實體區網也擋），兩者各管一層，建議都做：grants 控制 tailnet 內誰能連，防火牆控制這台機器除了 tailnet 之外誰都不能連。
+
+## 參考資料
+
+- [Access remote desktops using RustDesk（Tailscale 官方）](https://tailscale.com/docs/solutions/access-remote-desktops-with-rustdesk)
+- [Access remote desktops using Windows RDP（Tailscale 官方）](https://tailscale.com/kb/1095/secure-windows-rdp)
+- [RustDesk Client（RustDesk 官方文件）](https://rustdesk.com/docs/en/client/)
+- [RustDesk Advanced Settings（Direct IP access port 21118）](https://rustdesk.com/docs/en/self-host/client-configuration/advanced-settings/)
+- [RustDesk releases（GitHub，1.5.0）](https://github.com/rustdesk/rustdesk/releases)
+- [How to use Remote Desktop（Microsoft 官方）](https://support.microsoft.com/en-us/windows/how-to-use-remote-desktop-5fe128d5-8fb1-7a23-3b8a-41e636865e8c)
+- [Turn Mac screen sharing on or off（Apple 官方）](https://support.apple.com/guide/mac-help/mh11848/mac)
+- [GNOME Remote Desktop configuration（GNOME 官方）](https://github.com/GNOME/gnome-remote-desktop/blob/main/docs/configuration.md)
+- [Share your desktop（GNOME Help）](https://help.gnome.org/gnome-help/sharing-desktop.html)
+- [Tailscale、Cloudflare Tunnel、QuickConnect、傳統 VPN 怎麼選](/use-cases/choosing-remote-access/)
+- [直連與 DERP 中繼：為什麼連線變慢、怎麼改善](/troubleshooting/direct-vs-derp/)
+- [出門在外喚醒家裡的電腦：Wake-on-LAN 與 Tailscale](/use-cases/wake-on-lan/)
+- [分享裝置給 tailnet 以外的人](/admin/sharing/)
+- [Windows 無人值守模式與當 exit node](/platforms/windows-unattended/)
+- [ACL / Grants 入門：限制誰能連到哪裡](/admin/acl-grants/)
+- [Tags 與 auth key](/admin/tags-auth-keys/)
