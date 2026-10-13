@@ -6,7 +6,7 @@ sidebar:
   label: GL.iNet 旅行路由器
 ---
 
-旅館 Wi-Fi 通常一間房只給你一、兩台裝置的額度，而且是公開網路。帶一台 GL.iNet 旅行路由器（例如 Beryl AX／GL-MT3000、Slate AX／GL-AXT1800）出門，讓它連上旅館 Wi-Fi、自己再發一個 Wi-Fi，房間裡的電視、Switch、手機、筆電就全部接在這一台後面；旅館只看到路由器一台裝置，你卻可以接無限多台。
+旅館 Wi-Fi 通常一間房只給你一、兩台裝置的額度，而且是公開網路。帶一台 GL.iNet 旅行路由器（例如 Beryl AX／GL-MT3000、Slate AX／GL-AXT1800）出門，讓它連上旅館 Wi-Fi、自己再發一個 Wi-Fi，房間裡的電視、Switch、手機、筆電就全部接在這一台後面；旅館只看到路由器一台裝置，你卻想接幾台就接幾台。
 
 更進一步，GL.iNet 韌體**內建 Tailscale**（韌體 v4.2 起）：路由器加入你的 tailnet 之後，選家裡的 [Exit Node](/features/exit-node/)，整個房間的上網流量就全部經由家裡的出口出去——電視上看台灣串流、手機走家裡的 IP，彷彿人根本沒出國。這篇講怎麼設定，以及幾個旅行路由器特有的坑。
 
@@ -123,9 +123,10 @@ uci set switch-button.@main[0].func="your-script"
 uci commit switch-button
 ```
 
-`func` 的值就是腳本名稱（不含路徑、不含 `.sh`）。注意兩點：
+`func` 的值就是腳本名稱（不含路徑、不含 `.sh`）。注意三點：
 
 - **具體的開／關 Tailscale 指令，官方文件沒有說明**。GL.iNet 韌體內部用 UCI（`/etc/config/tailscale`）與自己的 hotplug 腳本管理 Tailscale，這些鍵值與路徑沒有正式文件，會隨韌體版本變動。上面骨架的 `on`／`off` 分支裡要執行的實際指令，請以你當下韌體上的實際機制為準，動工前先在 SSH 手動測試，不要照網路舊文照抄。
+- 綁定之後，**不要再進 SYSTEM → Toggle Button Settings 頁面按 Apply**：該頁只認內建功能清單，看不到自訂腳本（會顯示成 No Function），一按 Apply 就會用畫面顯示的值把 UCI 綁定覆寫掉（[gl-tailscale-fix 的側邊開關腳本](https://github.com/RemoteToHome-io/gl-tailscale-fix/blob/main/accessories/gl-switch.d/tailscale.sh)也明確警告這點）。
 - 腳本放在 overlay 裡，**韌體升級可能被清掉**；要跨升級保留，把它加進 `/etc/sysupgrade.conf`（論壇也提醒這點）。
 
 如果你只是要「手動快速開關」，其實最穩的做法仍是進 **APPLICATIONS → Tailscale** 切開關——側邊按鈕自訂腳本適合已經很熟 OpenWrt 的人。
@@ -138,7 +139,7 @@ uci commit switch-button
 2. 用手機或筆電連到路由器發的 Wi-Fi，開瀏覽器，完成旅館的 captive portal 認證——認證完成的是**路由器**，之後房內所有裝置都算已認證。
 3. 認證完成、確認能上網之後，**再**到 **APPLICATIONS → Tailscale** 開 Tailscale（或啟用 Custom Exit Node）。
 
-順序反了會失敗：官方 FAQ 在「連不上 captive portal」的排障步驟裡，第一條就是**先關閉所有 VPN 連線**（v4.8 以上是 VPN Dashboard 的全部 tunnel）。Tailscale 通了之後流量都導回你家，captive portal 根本跳不出來，所以一定要「**先過認證、再開 Tailscale**」。若跳不出認證頁，還可以用韌體 v4.6 起的 **Auto-Enable Login Mode for Public Hotspots** 與 **Enable Camouflage**（偽裝成你手機的 MAC），或乾脆 **MAC Clone** 成手機的位址；都失敗就請旅館櫃檯把路由器的出廠 MAC 加入白名單。
+順序反了會失敗：官方 FAQ 在「連不上 captive portal」的排障建議裡，就有一條是**先關閉所有 VPN 連線**（v4.8 以上是 VPN Dashboard 的全部 tunnel）。Tailscale 通了之後流量都導回你家，captive portal 根本跳不出來，所以一定要「**先過認證、再開 Tailscale**」。若跳不出認證頁，還可以用韌體 v4.6 起的 **Auto-Enable Login Mode for Public Hotspots** 與 **Enable Camouflage**（偽裝成你登入 Admin Panel 那台裝置的 MAC），或乾脆 **MAC Clone** 成手機的位址；都失敗就請旅館櫃檯把路由器的出廠 MAC 加入白名單。
 
 ## 存取規則
 
