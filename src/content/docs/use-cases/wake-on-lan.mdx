@@ -184,17 +184,17 @@ WoL 小裝置開著 Web 介面（UpSnap）或 SSH，就要限制誰能連。Tail
     {
       "src": ["autogroup:admin"],
       "dst": ["tag:wol"],
-      "ip": ["tcp:8090", "tcp:22"]
+      "ip": ["tcp:443", "tcp:8090", "tcp:22"]
     }
   ]
 }
 ```
 
 - `tag:wol` 打在小裝置上（用 auth key 或 Admin console 套用，見 [Tags 與 auth key](/admin/tags-auth-keys/)）。
-- 第一條 `grants` 只讓管理員自己的裝置（`autogroup:admin`）連到它，而且只開 UpSnap 的 8090 和 SSH 的 22。
+- 這條 `grants` 只讓管理員自己的裝置（`autogroup:admin`）連到它：`tcp:443` 是 [Tailscale Serve](/features/serve/) 的 HTTPS、`tcp:8090` 是 UpSnap 的原始連接埠、`tcp:22` 是 SSH。不用 Serve 的話，`tcp:443` 可以拿掉。
 - 記得把預設的 `*` 到 `*:*` 全開規則拿掉，這條限制才有作用。語法與拿掉全開規則的注意事項見 [ACL / Grants 入門](/admin/acl-grants/)。
 
-兩個小提醒：grants 只管「走 Tailscale 的流量」，UpSnap 在區網裡送 magic packet 是本機動作，不受影響；另外如果用 [Tailscale SSH](/features/tailscale-ssh/)，連線由 policy 的 `ssh` 區段管，不是上面這條 `ip` 規則。
+兩個小提醒：grants 只管「走 Tailscale 的流量」，UpSnap 在區網裡送 magic packet 是本機動作，不受影響；另外如果用 [Tailscale SSH](/features/tailscale-ssh/)，連線要同時通過兩種規則——上面這條 `tcp:22` 的網路規則，加上 policy 的 `ssh` 區段裡的 SSH 規則，兩者都要有才會放行。
 
 ## Tailscale 本身有沒有 WoL 功能？
 
