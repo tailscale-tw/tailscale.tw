@@ -1,0 +1,175 @@
+---
+title: Windows 無人值守模式與當 exit node
+description: 讓 Windows 上的 Tailscale 在登出或重開機後仍保持連線（無人值守模式／Server mode），說明 CLI 的 --unattended、Windows 預設接受 subnet routes，以及把 Windows 當 exit node 的設定方式
+sidebar:
+  order: 5
+  label: 無人值守與 exit node
+---
+
+Windows 版 Tailscale 預設跑在「使用者工作階段」裡：登出的那一刻，這台裝置就從 tailnet 消失，直到有人再次登入。這對偶爾手動連線的筆電沒什麼影響，但要把 Windows 當成常開的遠端桌面主機、檔案伺服器或 [Exit Node](/features/exit-node/)，斷線就是大問題。
+
+本文說明怎麼讓 Windows 在**無人登入時也保持連線**（無人值守模式），Windows 與其他平台不同的路由預設值，以及怎麼把 Windows 設成 exit node。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件整理，以 Tailscale v1.104 為準，未實際驗證。其中 CLI 旗標與平台預設值另以 Tailscale v1.104.1 原始碼核對。
+
+## 預設行為：登出就斷線
+
+不同平台的 Tailscale 用戶端「沒人登入時還要不要跑」的預設值不同（出自官方[無人值守模式](https://tailscale.com/docs/how-to/run-unattended)文件）：
+
+- **Linux**：`tailscaled` 本來就是 system daemon，從開機起就在背景跑，與有沒有使用者登入無關。
+- **macOS**：跑在使用者登入工作階段裡，目前**不支援**改成獨立的 system daemon（官方在 [GitHub issue #987](https://github.com/tailscale/tailscale/issues/987) 追蹤中）。
+- **Windows**：預設跑在使用者登入工作階段。使用者**登出**或**重開機**後，Tailscale 會斷線，直到有使用者再次登入。
+
+所以 Windows 上「斷電重開後人不在、卻要連得回這台機器」的情境，一定要另外開啟無人值守模式。
+
+## 無人值守模式（Unattended mode，又稱 Server mode）
+
+開啟後，Tailscale 會在**沒有使用者登入**的狀態下繼續執行，登出或重開機都不斷線。官方文件特別註明：無人值守模式**只有 Windows 有**。
+
+啟用之後，**啟用它的那個 Windows 帳號**擁有這台裝置上的 Tailscale 設定。其他登入這台機器的使用者，在無人值守模式關閉前，無法切換 profile 或更動設定。
+
+### 用圖形介面啟用
+
+1. 在 Windows 系統匣對 **Tailscale** 圖示按右鍵。
+2. 移到 **Preferences**。
+3. 選 **Run unattended**，看到確認視窗時選 **Yes**。
+
+啟用後，**Preferences** 選單裡的 **Run unattended** 會出現勾選記號。
+
+### 用 CLI 啟用
+
+在 PowerShell 或命令提示字元執行：
+
+```powershell
+tailscale set --unattended=true
+```
+
+如果是首次設定、想用 auth key 一次到位（例如部署 VM）：
+
+```powershell
+tailscale up --unattended=true --authkey=tskey-auth-xxxxx
+```
+
+停用一樣用 CLI：
+
+```powershell
+tailscale set --unattended=false
+```
+
+### `--unattended` 對應原始碼的 ForceDaemon
+
+`--unattended` 只是一個 Windows 專屬的旗標，它背後對應的是偏好設定裡的 `ForceDaemon`。以 v1.104.1 原始碼核對：
+
+- `cmd/tailscale/cli/up.go` 把 `--unattended` 宣告為 Windows-only，說明是「run in Unattended Mode where Tailscale keeps running even after the current GUI user logs out」；`set` 指令也有同樣的旗標。旗標適用平台判斷（`flagAppliesToOS`）對 `unattended` 直接回傳「只有 Windows」。
+- `ipn/prefs.go` 對 `ForceDaemon` 的定義：讓原本以 client mode 執行（需要登入使用者＋GUI 執行中）的平台，在 GUI 結束或使用者登出後仍繼續執行。目前**只有 Windows 適用**，效果等同讓 Tailscale 進入 **server mode**；Linux 本來就是 daemon，這個設定沒有作用。
+
+### 用系統原則集中管理
+
+企業或 MDM 部署可以透過系統原則鎖定這個選項，登錄值在 `HKLM\Software\Policies\Tailscale`：
+
+| 值名稱           | 型別     | 可能的值                          |
+| ---------------- | -------- | --------------------------------- |
+| `UnattendedMode` | `REG_SZ` | `always`、`never`、`user-decides` |
+
+`always` 強制開啟、`never` 強制關閉、`user-decides` 交還給使用者自己決定。更多系統原則見[官方文件](https://tailscale.com/docs/features/tailscale-system-policies)。
+
+## 登出、切換使用者與重開機
+
+幾種「離開這台機器」的方式對 Tailscale 的影響不同：
+
+- **登出（Sign out）**：結束該使用者的工作階段，Tailscale 預設跟著斷線。開無人值守模式後，登出仍保持連線。
+- **切換使用者（Switch user / fast user switching）**：不會登出原本的使用者，只是把該工作階段切到背景（等同鎖定），**工作階段仍存活**，所以原本使用者的 Tailscale 會繼續在背景執行、裝置維持連線。不過新登入的使用者是獨立的工作階段，預設看不到也不能接管原本使用者的 Tailscale 設定。
+- **重開機**：等同所有使用者登出，預設斷線；開無人值守模式後，開機完成（還沒人登入）就會恢復連線。
+
+「切換使用者」這點官方文件沒有逐字說明，這裡是依 v1.104.1 原始碼對工作階段事件的處理（鎖定 → 標為背景工作階段、登出 → 刪除工作階段）與 Windows 本身的行為整理。
+
+### 驗證
+
+1. 登出 Windows，或重開機後停在登入畫面。
+2. 從 tailnet 裡另一台裝置 ping 這台的 Tailscale IP 或 MagicDNS 名稱：
+
+   ```shell
+   tailscale ping <hostname-or-ip>
+   ```
+
+不通的話，到這台的 **服務**（`services.msc`）確認 **Tailscale** 服務設為 **Automatic** 且正在 **Running**。
+
+## Windows 預設接受 subnet routes
+
+Tailscale 用戶端「是否接受其他節點廣告的網段路由」有一個平台各自的預設值。以 v1.104.1 原始碼的 `ipn/prefs.go`（`DefaultRouteAll`）核對：
+
+| 平台             | 預設接受網段路由（`RouteAll`） |
+| ---------------- | ------------------------------ |
+| Windows          | **是**                         |
+| Android、iOS     | 是                             |
+| macOS            | 僅 App Store／macsys 版為是    |
+| Linux 等其餘平台 | 否                             |
+
+影響是：**Windows 用戶端預設就會接受**其他節點（例如 [Subnet Router](/features/subnet-router/)）廣告的網段路由，**不用**像 Linux 那樣先跑 `tailscale set --accept-routes`。本站在 [Subnet Router](/features/subnet-router/) 一文的「用戶端接受路由」一節也有提到。
+
+兩個提醒：
+
+- 這裡的 `RouteAll` 只管**網段路由**，不含預設路由（`0.0.0.0/0`、`::/0`）——那是 [Exit Node](/features/exit-node/) 的範疇，原始碼註解也明確分開。
+- 想強制 Windows 不接受網段路由（例如給訪客用的公用機），可以用系統原則或 MSI 參數 `TS_ENABLESUBNETS` 鎖成 `never`（見下文）。
+
+## 當 Windows 設成 exit node
+
+Windows 可以當 exit node，設定方式與 Linux 不同——**不用手動開 IP forwarding**，全部在圖形介面完成（出自官方 [exit nodes](https://tailscale.com/docs/features/exit-nodes) 文件）：
+
+1. 開啟 Windows 上的 Tailscale 用戶端，選 **Exit Node** → **Run as exit node**。
+2. 到 admin console 的 [Machines](https://console.tailscale.com/admin/machines) 頁面，找到這台裝置（會出現 **Exit Node** 徽章）。
+3. 選 **Edit route settings**，勾選 **Use as exit node**，儲存。
+
+之後其他裝置就能在系統匣的 **Use exit node** 選單裡選這台 Windows 當出口。exit node 的完整概念、核准流程與各平台用法見 [Exit Node](/features/exit-node/)。
+
+### 限制與注意事項
+
+- **記得開無人值守模式**：Windows 當 exit node 是為了遠端連線，但預設登出就斷線。不開無人值守模式的話，重開機後這台 exit node 會整個消失，其他裝置也走不了。本站在 [Exit Node](/features/exit-node/) 一文的常見問題裡也提醒過這點。
+- **速度與穩定度不如 Linux**：Windows 的 exit node 目前以 userspace 路由實作，仍在最佳化中；相關的已知問題見本站 [Exit Node](/features/exit-node/) 的常見問題一節。要長期穩定當出口，Linux 仍是最成熟的選擇。
+- **金鑰到期**：裝置金鑰預設 180 天到期、需要互動重新認證。當 exit node 或無人值守主機這類要一直線上的裝置，建議在 admin console 關掉金鑰到期（**Disable key expiry**），否則到期時正在用它的裝置會整個斷網。
+
+### 最小權限的 grants 範例
+
+tailnet 只要改過存取規則，就得明確放行「經由 exit node 上網」。目的地**不是**寫那台 Windows 裝置，而是寫 `autogroup:internet`：
+
+```json
+{
+  "grants": [
+    {
+      "src": ["group:dev"],
+      "dst": ["autogroup:internet"],
+      "ip": ["*"]
+    }
+  ]
+}
+```
+
+寫成那台裝置的 IP 或名稱，只會允許**連到**它（例如 SSH），不能**經由**它上網。想限定只能走特定幾台出口，再加 `via` 欄位指定路由裝置的 tag。細節與完整語法見 [Exit Node](/features/exit-node/) 的「自訂 ACL 時要注意」。
+
+## Windows 服務與 MSI 部署參數
+
+Tailscale 在 Windows 上安裝時會註冊成一個名為 **Tailscale** 的 Windows 服務，正常應設為 **Automatic**（開機自動啟動）。無人值守模式負責的是「登出後用哪個 profile、要不要繼續跑」，與服務本身是否開機啟動是兩回事——驗證時兩者都要確認。
+
+用 `.msi` 做自動化部署時，可以用 `msiexec` 的屬性預先設定相關選項（出自官方 [Windows MSI](https://tailscale.com/docs/install/windows/msi) 文件）：
+
+```powershell
+msiexec TS_UNATTENDEDMODE="always" TS_ENABLESUBNETS="always" /i tailscale-setup-amd64.msi
+```
+
+| MSI 屬性               | 登錄值名稱            | 可能的值                          | 作用                               |
+| ---------------------- | --------------------- | --------------------------------- | ---------------------------------- |
+| `TS_UNATTENDEDMODE`    | `UnattendedMode`      | `always`、`never`、`user-decides` | 控制 **Run Unattended** 選單項目   |
+| `TS_ENABLESUBNETS`     | `UseTailscaleSubnets` | `always`、`never`、`user-decides` | 控制是否接受網段路由               |
+| `TS_ADVERTISEEXITNODE` | `AdvertiseExitNode`   | `always`、`never`、`user-decides` | 控制 **Run As Exit Node** 選單項目 |
+
+MSI 屬性寫入 `HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Tailscale`，型別都是 `REG_SZ`。完整的屬性清單見[官方 MSI 文件](https://tailscale.com/docs/install/windows/msi)。
+
+## 參考資料
+
+- [Keep Tailscale running when I'm not logged in to my computer（官方文件）](https://tailscale.com/docs/how-to/run-unattended)
+- [Exit nodes（官方文件）](https://tailscale.com/docs/features/exit-nodes)
+- [Use exit nodes（官方文件）](https://tailscale.com/docs/features/exit-nodes/how-to/setup)
+- [Install Tailscale on Windows with MSI（官方文件）](https://tailscale.com/docs/install/windows/msi)
+- [Tailscale system policies（官方文件）](https://tailscale.com/docs/features/tailscale-system-policies)
+- [Exit Node：讓所有流量經由指定裝置出去](/features/exit-node/)
+- [Subnet Router：存取整個區網內沒裝 Tailscale 的設備](/features/subnet-router/)
