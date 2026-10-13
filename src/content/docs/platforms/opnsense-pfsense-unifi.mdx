@@ -8,7 +8,7 @@ sidebar:
 
 OPNsense、pfSense 與 UniFi（UDM／UCG）是三種很常被拿來當家庭或小型辦公室閘道的平台。既然是路由器，很多人自然想把 [Subnet Router](/features/subnet-router/) 跑在上面，讓整條區網一次進 tailnet。這個想法可行，但有一條共同的限制：**這三者都不是「完整支援 subnet router 的 Linux」**——OPNsense 與 pfSense 是 FreeBSD，UniFi 則是封閉系統、沒有官方 Tailscale 支援。這篇文章把三者的限制講清楚，並說明什麼時候該改用一台 Linux 小機。
 
-> 本文依 2026 年 10 月的 Tailscale 官方文件、OPNsense／pfSense 官方文件與套件原始碼整理，以 Tailscale v1.104 為準。第三方版本：OPNsense 26.7（2026 年 7 月發佈）、pfSense CE 2.9.0／pfSense Plus 26.07、UniFi OS 5.1.x；FreeBSD ports 的 `tailscale` 套件版本為 1.102.5、pfSense 套件 `pfSense-pkg-Tailscale` 為 0.1.9_2。本文未在實機安裝與驗證，屬文件整理。
+> 本文依 2026 年 10 月的 Tailscale 官方文件、OPNsense／pfSense 官方文件與套件原始碼整理，以 Tailscale v1.104 為準。第三方版本：OPNsense 26.7（2026 年 7 月發佈）、pfSense CE 2.9.0／pfSense Plus 26.07、UniFi OS 5.1.x；FreeBSD ports 的 `tailscale` 套件版本為 1.102.5、OPNsense 外掛 `os-tailscale` 為 1.4、pfSense 套件 `pfSense-pkg-Tailscale` 為 0.1.9_2。本文未在實機安裝與驗證，屬文件整理。
 
 ## 先講結論：三個平台的共同限制
 
@@ -43,13 +43,14 @@ OPNsense 與 pfSense 都跑在 FreeBSD 上，這是它們當 subnet router 時�
 
 ### 原始碼怎麼說（v1.104）
 
-但如果你去看 v1.104 的原始碼，會發現 FreeBSD 支援其實正在落地，只是官方文件還沒跟上：
+但如果你去看 v1.104 的原始碼，會發現 FreeBSD 的關 SNAT 支援其實已經寫進去了，只是**預設不會走到那條路**：
 
 - `cmd/tailscale/cli/up.go` 裡，`--snat-subnet-routes` 旗標的註冊已經不只在 `case "linux"`（第 127–128 行），`case "freebsd"`（第 131–132 行）也註冊了同一個旗標。
 - 同檔 `prefsFromUpArgs` 的 `if goos == "linux" || goos == "freebsd"`（第 366 行）把 `NoSNAT` 同時套用到兩個平台。
-- `wgengine/router/osrouter/router_freebsd.go` 也新增了以 **PF 規則做 masquerade** 的實作（第 76 行的 `wantSNAT := kernelRouting && cfg.SNATSubnetRoutes`、第 112 行的 `addPFNATRules`），對應 Linux 上 iptables MASQUERADE 的角色。
+- `wgengine/router/osrouter/router_freebsd.go` 也新增了以 **PF 規則做 masquerade** 的實作（第 76 行的 `wantSNAT := kernelRouting && cfg.SNATSubnetRoutes`、第 118 行的 `addPFNATRules`），對應 Linux 上 iptables MASQUERADE 的角色。
+- 關鍵在 `cmd/tailscaled/tailscaled.go` 的 `handleSubnetsInNetstack()`（第 830–857 行）：在 FreeBSD 上它**預設回傳 true**，也就是 subnet 流量照樣交給 netstack（userspace）處理，由 netstack 自己做 SNAT。原始碼註解寫明，netstack 一定要改寫來源位址，所以**只有 kernel 路徑能做到 `--snat-subnet-routes=false`**；要切到 kernel 路徑，得設除錯用的環境變數 `TS_DEBUG_NETSTACK_SUBNETS=false`。理由是 kernel 路徑需要在主機的 pf ruleset 裡插 anchor 參照，執行中插入會清掉 ruleset 參照的 table 內容——對 OPNsense／pfSense 這種整套防火牆都靠 pf 的系統，這正是風險所在。
 
-對照追蹤這個需求的 [issue #5573](https://github.com/tailscale/tailscale/issues/5573)，它在 **2026 年 9 月 1 日才被標為 completed**。也就是說，FreeBSD 的關 SNAT 支援是**剛落地、非常新**的功能，而官方文件（9 月底校驗）仍寫「Linux only」。
+對照追蹤這個需求的 [issue #5573](https://github.com/tailscale/tailscale/issues/5573)，它在 **2026 年 9 月 1 日才被標為 completed**。也就是說，FreeBSD 的關 SNAT 支援是**剛落地、非常新**的功能，而且預設路徑（netstack）根本用不到它，要靠除錯環境變數才會啟用；官方文件（9 月底校驗）仍寫「Linux only」也就不意外。
 
 ### 這對 OPNsense／pfSense 的實際意義
 
@@ -57,13 +58,13 @@ OPNsense 與 pfSense 都跑在 FreeBSD 上，這是它們當 subnet router 時�
 
 - **OPNsense 的 `os-tailscale` 外掛**有「Disable SNAT」選項，但說明標著 **「experimental」**。
 - **pfSense 的官方套件**（`pfSense-pkg-Tailscale` 0.1.9_2）直接把「SNAT Subnet Routes」選項**註解掉**，註解寫著「This is currently only available on Linux (see issue #5573)」。
-- **FreeBSD ports 的 `tailscale` 套件**目前還是 **1.102.5**，還沒跟上上游 v1.104——就算原始碼有了，跑在 OPNsense／pfSense 上的套件也還裝不到。
+- **FreeBSD ports 的 `tailscale` 套件**目前還是 **1.102.5**，還沒跟上上游 v1.104——就算原始碼有了，跑在 OPNsense／pfSense 上的套件也還裝不到。pfSense 自己的 ports fork（`pfsense/FreeBSD-ports` 的 `security/tailscale`）更停在 **1.94.1**，所以 pfSense 上實際裝到的版本可能比 FreeBSD ports 還舊。
 
-所以務實的建議是：**在 OPNsense／pfSense 上當 subnet router 沒問題，但如果需要關 SNAT（尤其是 site-to-site），照官方建議改用 Linux 比較穩**。想要保留來源 IP 又只有這兩台可用的話，先確認實際裝到的 Tailscale 版本，並把它當作實驗功能看待。
+所以務實的建議是：**在 OPNsense／pfSense 上當 subnet router 沒問題，但如果需要關 SNAT（尤其是 site-to-site），照官方建議改用 Linux 比較穩**。想要保留來源 IP 又只有這兩台可用的話，先確認實際裝到的 Tailscale 版本（`tailscale version`），並把它當作實驗功能看待——即使版本夠新，預設的 netstack 路徑也做不到關 SNAT。
 
 ## OPNsense：`os-tailscale` 外掛
 
-OPNsense 是 Tailscale 官方文件列出的**社群支援平台**。官方文件 [Using OPNsense with Tailscale](https://tailscale.com/docs/install/opnsense) 寫明：自 OPNsense 24.7 起，`os-tailscale` 社群外掛可經由 GUI 安裝——**System → Firmware → Plugins**，勾選 **Show community plugins** 後找到 `os-tailscale`。
+OPNsense 是 Tailscale 官方文件列出的**社群支援平台**。官方文件 [Using OPNsense with Tailscale](https://tailscale.com/docs/install/opnsense) 寫明：「As of OPNsense v24.711」（即 24.7.11）起，`os-tailscale` 社群外掛可經由 GUI 安裝——**System → Firmware → Plugins**，勾選 **Show community plugins** 後找到 `os-tailscale`。
 
 外掛的選項（依 opnsense/plugins 倉庫 `security/tailscale` 的 `Settings.xml` 核對，括號內是實際欄位名）：
 
@@ -109,7 +110,7 @@ UniFi 的 UDM、UCG（Cloud Gateway）系列跑的是 UniFi OS（底層是 Linux
 
 這些安裝的最大風險，是**會被韌體更新打壞**：
 
-- `tailscale-unifi` 的討論區有使用者回報「每次 UniFi 大版本更新都要從頭重裝 Tailscale」（討論 [#162](https://github.com/SierraSoftworks/tailscale-unifi/discussions/162)）；後續版本（v2.4.0）才加入「韌體更新後自動重裝」的機制，但這不是 Ubiquiti 保證的行為。
+- `tailscale-unifi` 早在 2023 年 4 月的 [v2.4.0](https://github.com/SierraSoftworks/tailscale-unifi/releases/tag/v2.4.0) 就加入「韌體更新後自動重裝」的機制，但到了 2026 年 4 月，討論 [#162](https://github.com/SierraSoftworks/tailscale-unifi/discussions/162)（標題「tailscale-udm does not survive version upgrade」）仍有使用者回報升級後 Tailscale 不見了——有這個機制也不代表每次都撐得過，而且這不是 Ubiquiti 保證的行為。
 - `unifi-common` 的 issue [#681](https://github.com/unifi-utilities/unifi-common/issues/681) 標題就是「UniFi OS 5 讓部分腳本失效」，有人升級到 5.0.12 後 Tailscale 安裝壞掉。
 - 舊的 `udm-boot`／`udm-boot-2x` 套件沒註冊進 `ubnt-dpkg-cache`，韌體升級時套件不會被保留，直接消失（見 [unifi-on-boot](https://github.com/unredacted/unifi-on-boot) 的說明）。
 
@@ -169,6 +170,7 @@ UniFi 的 UDM、UCG（Cloud Gateway）系列跑的是 UniFi OS（底層是 Linux
 - [pfsense/FreeBSD-ports 的 security/pfSense-pkg-Tailscale（套件原始碼）](https://github.com/pfsense/FreeBSD-ports/tree/devel/security/pfSense-pkg-Tailscale)
 - [tailscale 原始碼 cmd/tailscale/cli/up.go（v1.104.0）](https://github.com/tailscale/tailscale/blob/v1.104.0/cmd/tailscale/cli/up.go)
 - [tailscale 原始碼 wgengine/router/osrouter/router_freebsd.go（v1.104.0）](https://github.com/tailscale/tailscale/blob/v1.104.0/wgengine/router/osrouter/router_freebsd.go)
+- [tailscale 原始碼 cmd/tailscaled/tailscaled.go（v1.104.1）](https://github.com/tailscale/tailscale/blob/v1.104.1/cmd/tailscaled/tailscaled.go)
 - [issue #5573：FreeBSD 的 --snat-subnet-routes=false 支援](https://github.com/tailscale/tailscale/issues/5573)
 - [SierraSoftworks/tailscale-unifi（社群 UniFi 安裝）](https://github.com/SierraSoftworks/tailscale-unifi)
 - [unifi-utilities/unifi-common（社群開機腳本）](https://github.com/unifi-utilities/unifi-common)
