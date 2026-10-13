@@ -33,7 +33,7 @@ VPN On Demand 是 iOS／macOS 的 VPN 自動連線機制，能在偵測到網路
 
 行動網路（與乙太網路）只有三個選項：**Always**（建立行動數據連線就自動連線）、**Never**（自動斷線）、**Do Nothing**。
 
-`Only On` 是白名單（只連指定的網路）、`Except On` 是黑名單（除了指定的網路都連）。兩種都會在「清單裡加入或排除 SSID」，實際在 app 裡是用同一個網路清單介面選取要包含或排除的 Wi-Fi 名稱。
+`Only On` 是白名單（只連指定的網路）、`Except On` 是黑名單（除了指定的網路都連）。官方文件把兩者分別描述為「包含的網路」清單與「排除的網路」清單，實際在 app 裡的選取介面以當下版本為準。
 
 ### 離開家用 Wi-Fi 自動連線
 
@@ -64,7 +64,7 @@ Android 沒有 iOS 那種依 SSID 判斷的 On Demand 規則，但有兩個系�
 - **Always-on VPN（一律開啟 VPN）**：系統開機、重連網路或切換 Wi-Fi／行動數據後，自動把 Tailscale 連回來，不用手動開 app。
 - **Block connections without VPN（封鎖未使用 VPN 的連線）**：強制所有流量都走 VPN，VPN 沒連上時不讓任何 app 直接上網，避免流量外洩。
 
-**第二個開關只有在使用 [Exit Node](/features/exit-node/) 時才有意義。** Tailscale 預設只處理 tailnet 內裝置之間的流量、不碰上網流量；沒選 Exit Node 就打開「封鎖未使用 VPN 的連線」，等於把所有上網流量都塞進 VPN、卻沒有出口，整台手機就斷網了。官方 maintainer 在 GitHub issue 也確認過這點。所以順序是：先在 app 的 **Exit Node** 區選好出口，再回來開這兩個開關。
+**第二個開關只有在使用 [Exit Node](/features/exit-node/) 時才有意義。** Tailscale 預設只處理 tailnet 內裝置之間的流量、不碰上網流量；沒選 Exit Node 就打開「封鎖未使用 VPN 的連線」，等於把所有上網流量都塞進 VPN、卻沒有出口，整台手機就斷網了。官方 maintainer 在 GitHub issue [#12925](https://github.com/tailscale/tailscale/issues/12925) 也確認過這點。所以順序是：先在 app 的 **Exit Node** 區選好出口，再回來開這兩個開關。
 
 ### 用 app-based split tunneling 替代
 
@@ -91,17 +91,17 @@ Android 的 Doze（低電耗待命）、App Standby，以及各家 ROM 額外疊
 
 同樣地，確切的選單位置以 [dontkillmyapp.com](https://dontkillmyapp.com/) 上自己品牌的分頁為準。設定後可以觀察一兩天，確認背景連線穩定、耗電也沒有異常上升。
 
-iOS 沒有這套機制：VPN 由系統的 Network Extension 管理、不受 app 背景凍結影響，因此不需要像 Android 那樣手動排除。但 iOS 的電池統計偶爾會把大量 DNS 查詢算在 Tailscale 頭上（因為 Tailscale 接管了 DNS 解析），看到比例偏高不一定是真的有異常耗電。
+iOS 沒有這套機制：VPN 由系統的 Network Extension 管理、不受 app 背景凍結影響，因此不需要像 Android 那樣手動排除。但 iOS 的電池統計偶爾會把大量 DNS 查詢算在 Tailscale 頭上——因為 Tailscale 接管了 DNS 解析，每一筆查詢都會被算成 app 的一次喚醒，所以比例偏高不一定是真的有異常耗電，只是「歸屬」到 Tailscale 的數值、不等於實際耗電增加（官方團隊的說明見 [issue #13615](https://github.com/tailscale/tailscale/issues/13615) 與 [#12563](https://github.com/tailscale/tailscale/issues/12563)）。
 
 ## Exit Node 對電池的影響
 
 官方對手機耗電的唯一明確說法是：**電池耗電最常見的原因是裝置用 [Exit Node](/features/exit-node/) 轉送所有流量**（見下方參考資料的官方 troubleshooting 頁，以及長期追蹤的 GitHub issue #3363）。原因是：沒開 Exit Node 時，手機只加密、轉送 tailnet 內裝置之間的流量；開了之後，連串流、視訊、系統更新這類**所有**上網流量都要經過 VPN 隧道加密、再由 Exit Node 轉送出去，處理量高很多。
 
-官方沒有給出具體耗電數字，本文也不提供沒有來源的數值。實際影響取決於用多少流量、Exit Node 的距離與直連與否。可以這樣控制：
+官方文件沒有給出具體耗電數字，本文也不提供沒有來源的數值。實際影響取決於用多少流量、Exit Node 的距離與直連與否。可以這樣控制：
 
 - **不需要上網代理時就關掉 Exit Node**：只連 tailnet 內服務時，維持 app 的 **Exit Node** 選 **None** 最省電。
 - **Android 用 split tunneling 排除不該走 VPN 的 app**：串流、備份這類大流量 app 若不需要經由家裡的出口，排除後可以省下轉送負擔。
-- **出口交給常開的裝置**：家裡的 [Apple TV 當 Exit Node](/use-cases/apple-tv-exit-node/) 或一台常開的主機，比拿手機自己當出口（app 的 **Exit Node → Run as exit node**）合理得多——手機當出口除了耗電，螢幕鎖定後連線也未必穩定。
+- **出口交給常開的裝置**：家裡的 [Apple TV 當 Exit Node](/use-cases/apple-tv-exit-node/) 或一台常開的主機，比拿手機自己當出口（app 的 **Exit Node → Run as exit node**）合理得多——手機當出口除了耗電，部分機種在螢幕鎖定後連線也可能不穩定（實際以使用情形為準）。
 
 如果 tailnet 的存取規則不是預設全開，記得放行手機經由 Exit Node 上網，而且目的地要寫 `autogroup:internet`、不是那台出口裝置（完整說明見 [Exit Node 文章的 ACL 一節](/features/exit-node/#自訂-acl-時要注意)）。要限制手機只能走特定幾台出口，用 `via` 指定 tag，最小權限範例：
 
@@ -132,5 +132,8 @@ iOS 沒有這套機制：VPN 由系統的 Network Extension 管理、不受 app 
 - [Using app-based split tunneling on Android（官方文件）](https://tailscale.com/docs/features/client/android-app-split-tunneling)
 - [Mobile device batteries drain quickly（官方 troubleshooting）](https://tailscale.com/docs/reference/troubleshooting/mobile/battery-drains)
 - [Mobile battery usage still bad in some situations（GitHub issue #3363）](https://github.com/tailscale/tailscale/issues/3363)
+- [Android app should notify the user when isLockdownEnabled=true, but no exit node in use（GitHub issue #12925）](https://github.com/tailscale/tailscale/issues/12925)
+- [Battery usage on iOS 18 is significantly higher than iOS 17（GitHub issue #13615）](https://github.com/tailscale/tailscale/issues/13615)
+- [DNS resolution no longer works on iOS with custom DNS provider & Tailscale DNS Settings enabled（GitHub issue #12563）](https://github.com/tailscale/tailscale/issues/12563)
 - [Don't kill my app!](https://dontkillmyapp.com/)
 - [Tailscale changelog（iOS／Android 版本）](https://tailscale.com/changelog)
