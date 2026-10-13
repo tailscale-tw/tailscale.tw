@@ -1,0 +1,247 @@
+---
+title: Proxmox Backup Server 走 Tailscale 做異地備份
+description: 用 Proxmox Backup Server 的 remote 與 sync job，經由 Tailscale 把備份同步到朋友家或第二據點的 PBS。說明 remote 設定、fingerprint、API token 與最小權限、namespace，以及 pull 與 push 兩種方向
+sidebar:
+  order: 4
+  label: PBS 異地備份
+---
+
+[Proxmox Backup Server](https://pbs.proxmox.com/)（以下簡稱 PBS）是 Proxmox 自家的備份伺服器，可以備份 PVE 的 VM、LXC 容器，也可以備份一般主機。它會把資料去重、切成 chunk 儲存在 datastore 裡。
+
+備份只有一份、又和原機器放在同一個地方，等於沒備份。PBS 內建 remote 與 sync job，可以把整個 datastore 同步到另一台 PBS。把第二台 PBS 放在朋友家或第二據點，兩台都裝上 Tailscale，備份就經由 tailnet 加密傳過去，不用在兩邊開任何對外的埠。
+
+> 本文依 2026 年 10 月的 Proxmox Backup Server 官方文件整理，以 Proxmox Backup Server 4.2（文件版本 4.2.8）、Tailscale v1.104 為準。remote 與 sync job 的指令取自官方文件，未在實機驗證。
+
+## 這篇講什麼
+
+這篇只談 PBS 的 remote 與 sync job：怎麼設定 remote、fingerprint、API token 與權限、namespace，以及 pull 與 push 兩種方向。完整的異地備份策略——3-2-1 備份、append-only 防勒索、restic 與群暉 Hyper Backup 的做法——會另有一篇〈異地備份放朋友家〉，等那篇上線後再補上連結。
+
+## 架構
+
+- **兩台 PBS**：家裡的 PBS 是備份來源，朋友家／第二據點的 PBS 是異地目標。兩台各有一個 datastore。
+- **Tailscale 連線**：兩台都裝 Tailscale，用 Tailscale IP 或 MagicDNS 名稱互連。PBS 的 API 與網頁介面都監聽 **8007** 埠，sync job 也是走這個埠。
+- **sync job**：在一台 PBS 上設定，把某個 datastore 的內容同步到另一台的 datastore。
+
+PBS 的 sync 有兩種方向，動手前先想清楚：
+
+| 方向             | 在哪台設定 | 誰連誰                        | 需要的登入身分                            |
+| ---------------- | ---------- | ----------------------------- | ----------------------------------------- |
+| **pull（拉取）** | 異地那台   | 異地 PBS 連到家中 PBS 的 8007 | 家中 PBS 給你一個「能讀資料」的 API token |
+| **push（推送）** | 家中那台   | 家中 PBS 連到異地 PBS 的 8007 | 異地 PBS 給你一個「能寫資料」的 API token |
+
+差別在於「誰持有另一台的登入身分」。pull 適合異地那台由你管理、想要它主動來拉的狀況；push 適合異地只是朋友提供的一台機器、由你主動推過去。兩個方向設定方式差不多，只是 remote 指向誰、以及 token 的權限不同。
+
+## 1. 在 PBS 上裝 Tailscale
+
+PBS 基於 Debian，可以直接跑 Tailscale 官方套件：
+
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up
+```
+
+執行 `tailscale up` 後會印出一個網址，用瀏覽器登入授權。如果 PBS 是裝在 LXC 容器或 VM 裡，套用 [在 LXC 中使用 Tailscale](/pve/tailscale-on-lxc/) 的步驟：LXC 要先放行 `/dev/tun`，再裝 Tailscale。
+
+兩台 PBS 都要一直上線，建議替它們加上 tag（例如 `tag:pbs` 和 `tag:pbs-offsite`），tag 裝置預設不會金鑰過期；或用 auth key 登入。見 [Tags 與 auth key](/admin/tags-auth-keys/)。
+
+裝好後，在 Admin console 的 [Machines](https://console.tailscale.com/admin/machines) 頁面記下兩台的 Tailscale IP 或 MagicDNS 名稱。之後設定 remote 時，`--host` 就填對方這台的名稱或 IP，不需要在路由器上轉送任何埠。
+
+## 2. 設定 remote
+
+remote 代表「另一台 PBS」加上「一組登入身分」。在執行 sync job 的那台 PBS 上設定。
+
+先到**對方那台** PBS 取得憑證 fingerprint。有兩種方法：
+
+- 指令：
+
+  ```bash
+  proxmox-backup-manager cert info | grep Fingerprint
+  ```
+
+- 或開啟對方網頁介面的 **Dashboard**，點 **Show Fingerprint**。
+
+fingerprint 是對方 TLS 憑證的 SHA-256 雜湊，用來確認你連到的確實是那台 PBS，不會被中間人偷換。
+
+接著建立 remote：
+
+```bash
+proxmox-backup-manager remote create pbs-friend \
+  --host pbs-friend.your-tailnet.ts.net \
+  --auth-id 'backup@pbs!sync' \
+  --password '<token secret>' \
+  --fingerprint 64:d3:ff:3a:50:38:53:5a:9b:f7:50:...:ab:fe \
+  --port 8007
+```
+
+- `--host`：對方的 Tailscale IP 或 MagicDNS 名稱。
+- `--auth-id`：對方給你的登入身分，建議用 API token（見下一節）。
+- `--password`：對應的密碼或 API token 的 secret。
+- `--fingerprint`：剛才拿到的 fingerprint。
+- `--port`：8007，PBS 的預設埠；走 Tailscale 時可以省略，但寫出來比較清楚。
+
+管理 remote 用 `proxmox-backup-manager remote list`、`show`、`update`、`remove`。官方文件裡「Managing Remotes & Sync」一節的範例把身分參數寫成 `--userid`，那是舊寫法；實際 CLI 的參數是 `--auth-id`，以 `proxmox-backup-manager remote create --help` 為準。
+
+上面的範例是 **push** 用的 remote：在家中 PBS 上建立、指向朋友那台。**pull** 方向則反過來，在異地那台建立一個指向家中 PBS 的 remote（下文的範例把它命名為 `pbs-home`），做法完全相同，只是 `--host`、`--fingerprint` 填家中那台的資料。
+
+## 3. API token 與最小權限
+
+remote 的登入身分不要用真正的帳號密碼，改用 API token：token 可以只給最小權限，而且外洩時能單獨撤銷，不必動到整個帳號。
+
+在**對方那台** PBS 上產生 token：
+
+```bash
+proxmox-backup-manager user generate-token backup@pbs sync
+```
+
+會印出 tokenid（`backup@pbs!sync`）和 secret（一串 UUID）。secret 只會顯示一次，要存好。remote 的 `--auth-id` 填 tokenid，`--password` 填 secret。
+
+新 token 預設**沒有任何權限**，要再用 `acl update` 授權。授權到哪個路徑、給哪個角色，取決於同步方向：
+
+### pull 方向（異地拉取）
+
+- 在**來源那台**（家中）PBS 上，給 token 讀取權限。要同步全部群組，用 `DatastoreReader` 角色：
+
+  ```bash
+  proxmox-backup-manager acl update /datastore/store1 DatastoreReader --auth-id 'backup@pbs!sync'
+  ```
+
+  如果只給 `DatastoreBackup`，token 只能讀到**自己擁有**的群組，其他群組不會被同步。所以異地備份通常要給能讀全部資料的 `DatastoreReader`（或更高）。
+
+- 在**拉取那台**（異地）PBS 上，設定 sync job 的使用者需要：remote 對應路徑的 `Remote.Read`（`/remote/{remote}/{remote-store}`），以及本機目標 datastore 的 `Datastore.Backup`。
+
+### push 方向（家中推送）
+
+push 需要對方（異地）PBS 支援 namespace，也就是 **PBS 2.2 以上**。官方文件列的權限需求較多：本機需要 `Remote.Audit`（`/remote/{remote}`）、`Remote.DatastoreBackup`（`/remote/{remote}/{remote-store}/{remote-ns}`），以及來源 datastore 的 `Datastore.Read` 與 `Datastore.Audit`；若要移除對方已消失的快照或 namespace，還需要 `Remote.DatastorePrune`、`Remote.DatastoreModify`。
+
+上面這串是「推送端」的需求。別忘了 remote 裡設定的 token 是**異地那台** PBS 發的，它在異地那台也要有對應的 ACL：至少目標 datastore／namespace 的 `DatastoreBackup`（否則沒有權限寫入）；若要開 `--remove-vanished`，還要能 prune 的角色（如 `DatastorePowerUser`），要連消失的 namespace 一起移除則要有 `Datastore.Modify` 權限。這跟 pull 方向「在來源那台給 token 讀取權限」是對稱的。
+
+push 的內容一律以 remote 設定的使用者為擁有者，所以官方強烈建議**每個 push job 用專屬的 remote 和專屬的低權限使用者**，避免多個 push job 互相刪到彼此的資料。完整權限清單以官方文件的「Sync Direction Push」一節為準。
+
+## 4. 建立 sync job
+
+remote 建好後，建立 sync job。pull 方向（在異地那台執行）：
+
+```bash
+proxmox-backup-manager sync-job create pull-home \
+  --remote pbs-home \
+  --remote-store store1 \
+  --store store1 \
+  --schedule 'Wed 02:30'
+```
+
+push 方向（在家中那台執行）：
+
+```bash
+proxmox-backup-manager sync-job create push-friend \
+  --remote pbs-friend \
+  --remote-store offsite \
+  --store store1 \
+  --sync-direction push \
+  --schedule 'Wed 02:30'
+```
+
+- `--remote`：remote 名稱。
+- `--remote-store`：**對方那台**的 datastore 名稱。
+- `--store`：**本機**的 datastore 名稱。
+- `--schedule`：排程，用的是 PBS 的 calendar event 格式（`'Wed 02:30'` 是每週三 02:30），也可以用 `daily`、`hourly` 之類的寫法。
+- `--sync-direction`：`pull` 或 `push`，預設 `pull`。
+
+建好後可以立刻手動跑一次確認：
+
+```bash
+proxmox-backup-manager sync-job run pull-home
+```
+
+用 `sync-job list`、`show`、`update`、`remove` 管理。sync job 只會同步 remote 設定的使用者／token **讀得到**的群組，所以第 3 節的權限沒給對，就會出現「明明有資料卻同步不到」的狀況。
+
+## 5. namespace 與過濾
+
+**namespace** 是 datastore 內的分區，可以把不同來源的備份隔開、各自套用不同權限。sync job 預設同步整個 datastore，也可以只挑某個 namespace：
+
+- `--remote-ns`：來源那台的 namespace（預設是 root namespace）。
+- `--ns`：本機對應的 namespace。
+- `--max-depth`：往下遞迴幾層子 namespace。設 `0` 表示不遞迴，只同步 `remote-ns` 這一層。
+
+例如把對方 `location-a` 這個 namespace 同步到本機 `location-a`：
+
+```bash
+proxmox-backup-manager sync-job update pull-home --remote-ns location-a --ns location-a --max-depth 0
+```
+
+只想同步部分群組時，用 `--group-filter`：
+
+```bash
+# 只同步類型為 vm 的群組
+proxmox-backup-manager sync-job update pull-home --group-filter type:vm
+# 只同步特定的 backup group
+proxmox-backup-manager sync-job update pull-home --group-filter group:vm/100
+# 用正規表示式，或加 exclude: 反向排除
+proxmox-backup-manager sync-job update pull-home --group-filter 'regex:^vm/1\d{2,3}$'
+proxmox-backup-manager sync-job update pull-home --group-filter 'exclude:regex:^ct/'
+```
+
+可以同時給多個 `--group-filter`，也可以混用 include 與 exclude。
+
+## 6. 其他實用選項
+
+- `--remove-vanished`：遠端刪掉的快照或群組，本機也跟著刪（需要本機 datastore 的 `Datastore.Prune`）。不開的話，遠端已刪的資料會一直留著。
+- `--rate-in`／`--rate-out`：限制頻寬。pull 用 `--rate-in`，push 用 `--rate-out`，單位如 `20MiB`。異地備份走的是住家／朋友的上傳頻寬，限速可以避免塞爆網路。
+- `--transfer-last N`：每個群組只傳最近 N 個快照。
+- `--encrypted-only`／`--verified-only`：只同步「已加密」或「已通過驗證」的快照，推送給比較不信任的異地端時好用。
+- 往較不信任的異地端 push 時，可以在 sync job 指定 server-side 加密金鑰（`--active-encryption-key`），把未加密的快照在推送前先加密。
+
+`--encrypted-only` 與 `--active-encryption-key` 不要混用：設了 encrypted-only 的 job 只會同步「已經加密」的快照，永遠不會用到 active encryption key；`--active-encryption-key` 則是把**未加密**的快照在推送前先加密。兩者擇一即可。另外，指定金鑰需要對 `/system/encryption-keys/{key}` 路徑有 `System.Modify` 權限。
+
+## 7. Tailscale 的最小權限（grants）
+
+兩台 PBS 都打上 tag 後，用 grants 只放行必要的連線：sync job 需要連到對方 PBS 的 **tcp:8007**，其他埠全部不開。
+
+push 方向（家中 PBS 連到異地 PBS）的 policy：
+
+```json
+{
+  "tagOwners": {
+    "tag:pbs": ["autogroup:admin"],
+    "tag:pbs-offsite": ["autogroup:admin"]
+  },
+  "grants": [
+    {
+      "src": ["tag:pbs"],
+      "dst": ["tag:pbs-offsite"],
+      "ip": ["tcp:8007"]
+    }
+  ]
+}
+```
+
+- `tag:pbs` 是家中那台，`tag:pbs-offsite` 是異地那台。
+- 這條 grants 只允許 `tag:pbs` 連到 `tag:pbs-offsite` 的 8007，其餘全部拒絕。
+- 如果是 **pull 方向**（異地 PBS 連到家中 PBS），把 `src` 和 `dst` 對調即可。
+- 兩邊都要連（例如還想從異地還原回來）時，再加一條反向的 grants。
+
+注意兩層權限都要收斂：Tailscale 的 grants 決定「誰能連到 8007」，PBS 的 ACL 決定「連上之後能做什麼」。PBS 的網頁介面和 API 都在 8007，所以放行 8007 等於讓對方也能開管理介面，但實際能讀、能寫哪些資料，仍由第 3 節的 token 權限把關。grants 的寫法見 [ACL / Grants 入門](/admin/acl-grants/)。
+
+另外，PBS 預設在所有網路介面監聽 8007。如果那台 PBS 有公開 IP，記得用防火牆擋掉公網進來的 8007，只留 `tailscale0` 這個介面，不要讓 8007 直接暴露在網際網路上。
+
+## 確認生效
+
+sync job 跑完後，在拉取／接收的那台 PBS 的 **Datastore** 面板，應該看得到同步過來的群組和快照，來源會標示為 remote。也可以用指令確認：
+
+```bash
+proxmox-backup-manager sync-job list
+```
+
+在 Tailscale 這端，可以用 `tailscale ping` 確認兩台 PBS 之間是否直連。異地備份要傳大量資料，如果兩台之間[走 DERP 中繼](/troubleshooting/direct-vs-derp/)，吞吐量會受限、備份時間拉長；直連不順時先查這一段。
+
+## 參考資料
+
+- [Managing Remotes & Sync（PBS 官方）](https://pbs.proxmox.com/docs/managing-remotes.html)
+- [User Management：API Tokens 與 Access Control（PBS 官方）](https://pbs.proxmox.com/docs/user-management.html)
+- [Backup Storage：datastore 與 namespace（PBS 官方）](https://pbs.proxmox.com/docs/storage.html)
+- [Calendar Events（PBS 官方）](https://pbs.proxmox.com/docs/calendarevents.html)
+- [Grants（Tailscale 官方）](https://tailscale.com/docs/features/access-control/grants)
+- [Tailscale in LXC containers（Tailscale 官方）](https://tailscale.com/kb/1130/lxc-unprivileged)
+- [在 LXC 中使用 Tailscale](/pve/tailscale-on-lxc/)
+- [ACL / Grants 入門](/admin/acl-grants/)
+- [Tags 與 auth key：給伺服器用的非互動登入](/admin/tags-auth-keys/)
+- [直連與 DERP 中繼：為什麼連線變慢、怎麼改善](/troubleshooting/direct-vs-derp/)
