@@ -1,0 +1,85 @@
+---
+title: 手機照片用 Immich 經 Tailscale 自動備份回家
+description: 讓手機的 Immich App 經 Tailscale 連回自家的 Immich 伺服器自動備份照片：伺服器網址填 MagicDNS 名稱（要不要用 Serve 掛 HTTPS）、App 備份選項、Android 電池最佳化與 iOS 背景限制，以及只開 Immich 埠的最小權限 grants
+sidebar:
+  order: 2.25
+  label: Immich 手機備份
+---
+
+[Immich](https://immich.app/) 是自架的照片與影片管理服務，手機 App 會把選定相簿裡的照片與影片自動上傳到自家的 Immich 伺服器。伺服器放在家裡，傳統做法是開對外埠或掛公開網址；改用 Tailscale，App 直接以 MagicDNS 名稱連回家，手機走到哪就備份到哪，家裡那台不用開任何對外埠。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件與 Immich 官方文件整理，以 Tailscale v1.104、Immich v3.3.1 為準。伺服器端的 Docker sidecar 寫法見〈Docker 的 Tailscale sidecar〉那篇，本文只講手機端與兩者的差異，不重複整套 compose。本文未在實機逐一操作，屬文件整理。
+
+## 伺服器端：沿用 sidecar 寫法
+
+Immich 用 Docker 部署時，最乾淨的接法是 [Docker sidecar](/use-cases/docker-sidecar/)：`ts-immich` sidecar 加 `network_mode: service:ts-immich`，讓 server、machine-learning、Postgres、Redis 四個容器走同一個 netns，對外只靠 sidecar。那篇的 Immich 段落已經把整套 compose 列好，這裡不重複，只談跟「手機自動備份」有關的差異——**要不要用 Serve 掛 HTTPS**：
+
+- **不掛 Serve**：sidecar 只進 tailnet、不設 `serve.json`。Immich server 在 netns 內聽 **2283**（HTTP），App 的伺服器網址填 `http://<machine>.<tailnet>.ts.net:2283`。流量本來就經 WireGuard 端對端加密，HTTP 也夠安全；少了 Serve 這層，設定最簡單。
+- **掛 Serve 給 HTTPS**：照那篇的 `serve.json` 把 443 代理到 2283，網址變成 `https://<machine>.<tailnet>.ts.net`，不用寫埠。好處是桌機瀏覽器開網頁版不會被標記為不安全、網址也比較好記、好分享；代價是多一份 `serve.json` 要維護。
+
+對 App 的備份功能而言兩者都能正常運作，差別主要在「要不要用瀏覽器」：只用手機 App 備份、不看網頁版，`http://…:2283` 就夠；會用桌機瀏覽器看照片、或想把網址給家人，建議用 Serve 的 HTTPS。Serve 的設定見 [Tailscale Serve](/features/serve/)。
+
+> Immich 官方文件把 App 登入網址寫成 `http://<machine-ip-address>:2283`，2283 是 Immich server 的預設埠。走 Tailscale 時把 IP 換成 MagicDNS 名稱即可——在 tailnet 內用短名稱 `<machine>` 或完整名稱 `<machine>.<tailnet>.ts.net` 都行，格式見 [MagicDNS](/features/magicdns/)。
+
+## 手機 App：伺服器網址與備份選項
+
+App 第一次開啟時輸入上一節的伺服器網址登入，然後到備份頁（右上角雲朵圖示）勾選要備份的相簿，拉到最下面按 **Enable Backup**（啟用備份）開始上傳。備份選項（**Backup Options**）裡跟這篇最相關的幾個，名稱以 Immich App v3.3.1 為準：
+
+- **預設只在 Wi-Fi 上傳**：官方文件寫明「預設只會在連到 Wi-Fi 時上傳照片與影片」。要出門也用行動網路備份，把 **Use cellular data to backup photos**（使用行動網路流量備份相片）與 **Use cellular data to backup videos**（使用行動網路流量備份影片）打開。開著才能「走到哪備份到哪」，但大影片會吃掉行動流量，依你的方案斟酌。
+- **背景選項（Background Options）**：App 進背景後，上傳任務交給作業系統排程，何時能跑由系統決定。可以設 **Background backup requires the device to be charging**（背景備份要求裝置正在充電）與 **Delay new assets backup**（新項目備份延遲）。這些是「要不要在背景自動上傳」的條件，背景到底跑不跑得動，還是看下一節的系統設定。
+- **Automatic URL switching（自動 URL 切換）**：指定一個家裡的 Wi-Fi 名稱，連到該 Wi-Fi 時用「本機網址」（例如區網 IP `http://192.168.1.x:2283`）、其他網路用「外部網址」清單（Tailscale 的 MagicDNS 或 Serve 網址），依序嘗試第一個連得上的。這樣在家走區網、出門走 Tailscale，兩者兼顧。要讓它生效，得給 App「精確位置」權限來讀目前連到的 Wi-Fi 名稱；在背景切換則要「一律允許」位置權限。
+
+## 手機端：讓背景備份真的跑得起來
+
+背景備份能不能跑，取決於作業系統與手機廠牌的背景限制，跟 Tailscale 無關，但 Immich 與 Tailscale 兩個 App 都要處理：
+
+- **Android**：各家 ROM 的電池最佳化會把背景 App 凍結或殺掉，Immich 的背景上傳任務可能因此不跑。把 Immich 與 Tailscale 都設為「不受限制／不最佳化」，允許自動啟動，並從最近應用程式清單把 App 鎖定。確切路徑每家廠牌不同，站上的 [Android 的電池最佳化](/platforms/ios-android/#android-的電池最佳化) 與 [Android 的背景限制](/platforms/ios-android/#android-的背景限制) 兩節有原則，以及用 [dontkillmyapp.com](https://dontkillmyapp.com/) 查自己手機的逐步做法；Immich 官方文件也建議到 dontkillmyapp.com 查。
+- **iOS**：必須開 **Background App Refresh**（設定 → 一般 → 背景 App 重新整理）讓 Immich 在背景工作；iOS 自行管理背景任務、App 無法控制何時跑，開 App 越頻繁、背景上傳跑得越多次。Immich 官方 FAQ 建議關掉低耗電模式，並停用其他用不到背景整理的 App，減少競爭。iOS 沒有 Android 那套「電池最佳化」凍結機制，背景 VPN 由系統的 Network Extension 管理、不受影響（見 [iOS 與 Android 手機設定](/platforms/ios-android/#android-的電池最佳化) 的說明）；Immich 對 iOS 背景備份的限制以官方文件為準。
+
+## 手機上 Tailscale 要一直連著
+
+備份靠的是 Tailscale 連線，App 在背景上傳時手機若沒連 Tailscale，照片就傳不回去。照 [iOS 與 Android 手機設定](/platforms/ios-android/) 把連線自動化：
+
+- **iOS**：開 [VPN On Demand](/platforms/ios-android/#iosvpn-on-demand)，離開家裡的 Wi-Fi 自動連上、回到家自動斷開。
+- **Android**：開 [Always-on VPN](/platforms/ios-android/#androidalways-on-vpn-與封鎖未使用-vpn-的連線)，系統重開機或重連網路後自動接回 Tailscale。
+
+這樣手機在背景時 Tailscale 也一直連著，Immich 才能隨時把照片傳回家。
+
+## 首次大量備份與速度
+
+第一次啟用備份會把選定相簿裡全部照片、影片傳回家，量可能很大。建議先在家裡的 Wi-Fi 下跑第一次，之後在外只會傳新增的照片，量小很多。
+
+在外備份的速度取決於手機和家裡的 Immich 主機能不能直連。直連時速度接近兩端網路的上限；打洞失敗、走 DERP 中繼時，封包要繞到國外的 DERP 伺服器再回來（台灣的裝置通常連香港或東京），速度會明顯變慢。原理與判讀方法見 [直連與 DERP 中繼](/troubleshooting/direct-vs-derp/)。
+
+## 存取規則：只開 Immich 的埠
+
+tailnet 的存取規則如果不是預設全開，要放行手機連到 Immich 主機的埠。用 Serve 就只開 443，不掛 Serve 就開 2283。把 Immich 主機加上 tag（例如 `tag:immich`），最小權限只開給 tailnet 成員（個人 tailnet 裡就是自己與家人）：
+
+```json
+{
+  "tagOwners": {
+    "tag:immich": ["autogroup:admin"]
+  },
+  "grants": [
+    {
+      "src": ["autogroup:member"],
+      "dst": ["tag:immich"],
+      "ip": ["tcp:443"]
+    }
+  ]
+}
+```
+
+不掛 Serve 時把 `tcp:443` 改成 `tcp:2283`。只想開放給部分成員（例如家人），把 `src` 換成自訂群組（例如 `group:family`）。Tag 與群組的寫法見 [Tags 與 auth key](/admin/tags-auth-keys/)，規則語法見 [ACL / Grants 入門](/admin/acl-grants/)。
+
+## 參考資料
+
+- [Docker 的 Tailscale sidecar：Jellyfin、Immich、Vaultwarden 共用寫法](/use-cases/docker-sidecar/)
+- [Immich：Mobile Backup（官方）](https://docs.immich.app/features/mobile-backup)
+- [Immich：Mobile App（官方）](https://docs.immich.app/features/mobile-app)
+- [Immich：FAQ — 手機 App（官方，背景備份與 URL 切換）](https://docs.immich.app/FAQ)
+- [Immich GitHub Releases（版本）](https://github.com/immich-app/immich/releases)
+- [Tailscale Serve：在 tailnet 內分享本機服務](/features/serve/)
+- [MagicDNS：用名稱連到 tailnet 裡的裝置](/features/magicdns/)
+- [iOS 與 Android 手機設定](/platforms/ios-android/)
+- [直連與 DERP 中繼：為什麼連線變慢、怎麼改善](/troubleshooting/direct-vs-derp/)
