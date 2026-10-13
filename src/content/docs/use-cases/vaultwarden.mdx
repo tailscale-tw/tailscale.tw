@@ -30,7 +30,7 @@ Serve 就是這層的反向代理：TLS 終端、憑證簽發與更新、轉發�
 
 ## 1. 跑 Vaultwarden，先設定 DOMAIN
 
-不管用 Docker 還是直接安裝，`DOMAIN` 都是第一個要設對的環境變數：它必須等於最後的存取網址，**含 `https://` 前綴、沒有結尾斜線**。設錯時登入、註冊、附件下載、Email 連結、U2F 會壞掉。
+不管用 Docker 還是直接安裝，`DOMAIN` 都是第一個要設對的環境變數：它必須等於最後的存取網址（含 `https://` 前綴），也就是你實際拿來連線的那個網址。官方 `.env.template` 的範例都不帶結尾斜線，照抄即可。設錯時登入、註冊、附件下載、Email 連結、U2F 會壞掉。
 
 ```ini
 DOMAIN=https://vaultwarden.tailxxxxx.ts.net
@@ -73,10 +73,11 @@ Bitwarden 手機 App（iOS、Android）預設連 Bitwarden 官方伺服器，要
 2. 在 **Server URL** 欄位填入完整網址，含 `https://`：`https://vaultwarden.tailxxxxx.ts.net`。
 3. 儲存後，再用 Email 與主密碼登入。
 
-兩個提醒：
+幾個提醒：
 
 - 網址一定要含 `https://`。寫成 `http://` 或漏掉前綴，App 會直接報錯，這是自架 Bitwarden 最常見的連不上原因。
 - 手機要**保持 Tailscale 連線**：Vaultwarden 只在 tailnet 裡，Tailscale 沒開（或手機系統把它停掉）時，App 連不上伺服器，只會用到離線快取。打開 App 前先確認 Tailscale 是連線狀態。
+- 若網址和 Tailscale 連線都正常卻仍連不上，看 App 是不是報 `Chain validation failed`：這代表 TLS 憑證鏈或 OCSP stapling 有問題。用 Tailscale Serve 簽出的 Let's Encrypt 憑證一般沒這問題，出錯時拿這個字串當線索。
 
 （以上選項名稱依 Bitwarden 官方說明：**Logging in on**、**Self-hosted**、**Server URL**。）
 
@@ -96,6 +97,8 @@ INVITATIONS_ALLOWED=false
 ```
 
 `INVITATIONS_ALLOWED` 控制組織邀請，關閉註冊後要一併關掉，免得別人用邀請功能開新帳號。
+
+> 順序提醒：**先註冊好自己的帳號再關閉註冊**。關掉 `SIGNUPS_ALLOWED` 後就沒有新增帳號的入口，如果那時還沒設 `ADMIN_TOKEN`（管理後台預設停用，見下文），會暫時進不去自己的 Vaultwarden，只能改回環境變數、重啟容器才救得回。
 
 管理後台（`/admin`）預設**停用**，只有設了 `ADMIN_TOKEN` 才會啟用。要用時先產生 Argon2 雜湊：
 
