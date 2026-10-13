@@ -8,7 +8,7 @@ sidebar:
 
 把 Tailscale 裝在 OpenWrt 路由器上，整條區網的裝置（印表機、IP Cam、NAS、IoT）就能一次進 tailnet，也能讓路由器當 [Subnet Router](/features/subnet-router/) 或 [Exit Node](/features/exit-node/)，出門在外照樣連回家。這篇講官方 feed 的套件、防火牆 zone 的設定，以及兩個最常見的角色怎麼落地。
 
-> 本文依 2026 年 10 月的 Tailscale 官方文件與 OpenWrt 官方 wiki 整理，以 Tailscale v1.104、OpenWrt 25.12.5（2026 年 3 月 5 日發佈）為準；OpenWrt 25.12 官方 feed 的 `tailscale` 套件版本為 1.102.3。本文未在實機刷機與安裝，屬文件整理。
+> 本文依 2026 年 10 月的 Tailscale 官方文件與 OpenWrt 官方 wiki 整理，以 Tailscale v1.104、OpenWrt 25.12.5（2026 年 7 月 1 日發佈）為準；OpenWrt 25.12 官方 feed 的 `tailscale` 套件版本為 1.102.3。本文未在實機刷機與安裝，屬文件整理。
 
 ## 套件：官方 feed 的 tailscale 與 luci-app-tailscale-community
 
@@ -23,7 +23,7 @@ apk add tailscale
 
 兩個套件的現況（依 [openwrt/packages](https://github.com/openwrt/packages) 的 `openwrt-25.12` 分支、[openwrt/luci](https://github.com/openwrt/luci) 的 `openwrt-25.12` 分支，以及 downloads.openwrt.org 25.12.5 的套件索引核對）：
 
-- **`tailscale`**：官方 feed 收錄，25.12 的版本是 **1.102.3-r1**（上游穩定版此時已是 v1.104，feed 版本會落後幾個版本）。它把 `tailscaled` 與 `tailscale` 指令一起裝到 `/usr/sbin`，並附 `/etc/config/tailscale` 設定檔與 procd 啟動腳本。套件的設定檔預設 `fw_mode 'nftables'`——也就是說，官方套件預設就讓 tailscaled 用 **nftables** 管理防火牆規則，與 OpenWrt 23.05 起預設的 fw4/nftables 一致。
+- **`tailscale`**：官方 feed 收錄，25.12 的版本是 **1.102.3-r1**（上游穩定版此時已是 v1.104，feed 版本會落後幾個版本）。它把 `tailscaled` 與 `tailscale` 指令一起裝到 `/usr/sbin`，並附 `/etc/config/tailscale` 設定檔與 procd 啟動腳本。套件的設定檔預設 `fw_mode 'nftables'`——也就是說，官方套件預設就讓 tailscaled 用 **nftables** 管理防火牆規則，與 OpenWrt 22.03 起預設的 fw4/nftables 一致。
 - **`luci-app-tailscale-community`**：**確實存在於官方 feed**，而且是 **25.12 起才收錄**（24.10 分支查不到）。它提供 LuCI 網頁介面來查看狀態、設定節點與 daemon，維護者是 Tokisaki-Galaxy（上游為 [luci-app-tailscale-community](https://github.com/tokisaki-galaxy/luci-app-tailscale-community)），並附繁中（`luci-i18n-tailscale-community-zh-tw`）與簡中翻譯套件。想用圖形介面就加裝：
 
   ```bash
@@ -59,7 +59,6 @@ uci set firewall.@zone[-1].name='tailscale'
 uci set firewall.@zone[-1].network='tailscale'
 uci set firewall.@zone[-1].input='ACCEPT'
 uci set firewall.@zone[-1].output='ACCEPT'
-uci set firewall.@zone[-1].forward='ACCEPT'
 uci set firewall.@zone[-1].masq='1'
 uci set firewall.@zone[-1].mtu_fix='1'
 uci commit firewall
@@ -70,8 +69,9 @@ uci commit firewall
 - **`input ACCEPT`／`output ACCEPT`**：允許 tailnet 的裝置連到路由器本身（例如 SSH、LuCI），也允許路由器主動連出去。想鎖緊一點，可以把 `input` 改成 `REJECT` 再另外開放特定埠。
 - **`masq '1'`**：對從這個 zone 出去的流量做 **masquerade**（來源位址轉譯）。這讓 tailnet 來的封包轉進區網時，區網裝置看到的來源是路由器的區網 IP，回程封包才會走對。可以用 `masq_src` 把轉譯範圍限縮到特定來源網段（例如只對 `100.64.0.0/10` 做）。
 - **`mtu_fix '1'`**：開啟 **MSS clamping**。WireGuard 的封包比一般以太網略大，不做 MSS clamping 的話，某些 MTU 較小的連線（例如 PPPoE）會出現「小封包正常、大封包卡住」的症狀。官方 wiki 明確建議開啟。
+- **`forward` 不用設**：zone 的 forward 政策只在同一個 zone 內有多個介面時才有作用；這裡的 `tailscale` zone 只涵蓋 `tailscale0` 一個介面，跨 zone 的放行由下一節的 forwarding 規則決定，所以官方 wiki 範例也把它留預設。
 
-對應 LuCI：**Network → Firewall → Zones → Add**，Name 填 `tailscale`，Input／Output 設 ACCEPT，勾 **Masquerading** 與 **MSS Clamping**，Covered networks 選 `tailscale`。
+對應 LuCI：**Network → Firewall → Zones → Add**，Name 填 `tailscale`，Input／Output 設 ACCEPT，勾 **Masquerading** 與 **MSS Clamping**，Covered networks 選 `tailscale`，Forward 留預設。
 
 ### forwarding：讓流量進出
 
@@ -114,7 +114,7 @@ forwarding 是單向的，要雙向就各寫一條（`src`／`dest` 對調）。
 
 ## 為什麼不要用舊教學的 --netfilter-mode=off
 
-網路上的舊教學（OpenWrt 22.03、fw3/iptables 時代）常要人加 `--netfilter-mode=off`。在 OpenWrt 23.05 之後這不但不需要，反而該避免。
+網路上的舊教學常要人加 `--netfilter-mode=off`，現在這不但不需要，反而該避免。
 
 先講它做什麼。Tailscale 在 Linux 上會自己維護一套 netfilter 規則（放行 tailnet 流量、擋掉沒走 `tailscale0` 的 CGNAT 流量等）。`--netfilter-mode` 控制這個行為，有三個值（依官方 [netfilter modes](https://tailscale.com/kb/1593/netfilter-modes) 文件與 v1.104 原始碼）：
 
@@ -126,7 +126,7 @@ forwarding 是單向的，要雙向就各寫一條（`src`／`dest` 對調）。
 
 官方文件對 `off` 的態度很明確：**「通常沒有好理由把 netfilter mode 設成 off」**，只有 `nodivert` 也滿足不了的特殊需求才該用；設成 `off` 之後，原本 Tailscale 會自動建立的規則（包括放行 tailnet 流量的規則）都得你手動補齊。原始碼裡，除了 Synology 特例預設 `off`，其他平台預設都是 `on`。
 
-舊教學為什麼這麼寫？當時 OpenWrt 22.03 用 fw3/iptables，而 Tailscale 當時也走 iptables，兩套規則會互相干擾，於是叫人關掉 Tailscale 的 netfilter 管理、自己手動放行。OpenWrt 23.05 起換成 fw4/nftables，Tailscale 從 v1.48 起也支援 nftables，而且**官方套件預設就設 `TS_DEBUG_FIREWALL_MODE=nftables`**（見 `/etc/config/tailscale` 的 `fw_mode` 選項），兩邊都走 nftables、由 fw4 的 zone 統一管理，就沒有關掉它的理由了。
+舊教學為什麼這麼寫？OpenWrt 22.03 起就改用 fw4/nftables（fw3/iptables 是 21.02 以前的事），但 22.03 當時收錄的 tailscale 套件還不支援 nftables（Tailscale 到 v1.48 才加入 nftables 支援），無法自動設定防火牆規則，導致 tailscaled 初始化失敗、流量轉發異常。所以官方 wiki 的 Troubleshooting 才叫人加 `--netfilter-mode=off`，關掉 Tailscale 的 netfilter 管理、自己手動放行；官方 wiki 也記載這個問題在後續套件版本已修正，**OpenWrt 23.0.5 之後不再需要這一步**。現在官方套件預設就設 `TS_DEBUG_FIREWALL_MODE=nftables`（見 `/etc/config/tailscale` 的 `fw_mode` 選項），Tailscale 走 nftables、由 fw4 的 zone 統一管理，就沒有關掉它的理由了。
 
 所以：**別加 `--netfilter-mode=off`**。照前一節建好 zone 與 forwarding，讓 Tailscale 維持預設的 `on`，防火牆交給 fw4 管就好。
 
@@ -173,8 +173,10 @@ tailscale up
 預設 policy 下，tailnet 裡所有人都能用你核准的 subnet router 和 exit node。要收緊，先替路由器打 tag（tagged 裝置預設金鑰不過期，也方便在 policy 裡指定）：
 
 ```bash
-tailscale set --advertise-tags=tag:openwrt
+tailscale up --advertise-tags=tag:openwrt
 ```
+
+`--advertise-tags` 是 `tailscale up` 的旗標（`tailscale set` 沒有這個選項）。打 tag 必須以該 tag 的 owner 身分重新認證才會生效：如果裝置已經用其他使用者登入，加上 `--force-reauth` 強制重新認證，或用帶 tag 的 auth key 登入；tag 也必須先在 policy 的 `tagOwners` 授權給你，否則會被拒絕。
 
 然後在 tailnet policy file 裡寫最小權限。假設網段是 `192.168.1.0/24`：
 
@@ -193,7 +195,7 @@ tailscale set --advertise-tags=tag:openwrt
     {
       "src": ["autogroup:member"],
       "dst": ["192.168.1.0/24"],
-      "ip": ["*"]
+      "ip": ["tcp:631"]
     },
     {
       "src": ["autogroup:member"],
@@ -207,7 +209,7 @@ tailscale set --advertise-tags=tag:openwrt
 
 說明：
 
-- 第一條 grant 放行「連到區網網段」（subnet router）；`ip` 可再收窄成特定埠，例如只開印表機就寫 `"ip": ["tcp:631"]`。
+- 第一條 grant 放行「經由這台路由器連到區網網段」的印表機（subnet router）：`ip` 用 `"tcp:631"` 只開放 IPP 列印埠。想開放整個網段所有埠，就把 `ip` 改成 `["*"]`。
 - 第二條放行「經由這台路由器上網」（exit node）。目的地要寫 **`autogroup:internet`**（不是裝置 IP），`via` 指定只能走打上 `tag:openwrt` 的出口。`via` 只接受 tag。
 - `autoApprovers` 讓這台 tag 裝置廣告的網段與 exit node 自動核准，不用每次去後台點；它只在**第一次廣告**時生效，改 policy 不會回頭核准既有未核准的路由。
 
@@ -219,9 +221,10 @@ tailscale set --advertise-tags=tag:openwrt
 
 ```bash
 tailscale set --accept-dns=false
+/etc/init.d/tailscale restart
 ```
 
-想要讓區網裝置也能用 MagicDNS 名稱（`*.ts.net`）解析 tailnet 裡的主機，官方 wiki 的建議是把 Tailscale 的 resolver 加進 dnsmasq，而不是讓路由器吃 MagicDNS：
+重啟讓設定立即生效（官方 wiki 也建議這一步）。想要讓區網裝置也能用 MagicDNS 名稱（`*.ts.net`）解析 tailnet 裡的主機，官方 wiki 的建議是把 Tailscale 的 resolver 加進 dnsmasq，而不是讓路由器吃 MagicDNS：
 
 ```bash
 uci add_list dhcp.@dnsmasq[0].server='/ts.net/100.100.100.100'
@@ -241,7 +244,7 @@ uci commit dhcp
 | 廣告路由              | `tailscale set --advertise-routes=... --snat-subnet-routes=false`（避免雙重 NAT）或 `--advertise-exit-node` |
 | 收尾                  | 關 MagicDNS（`--accept-dns=false`）、打 tag、核准路由或設 autoApprovers                                     |
 
-最容易踩的三個坑：忘了建 firewall zone（tailnet 流量被擋）、沿襲舊教學加 `--netfilter-mode=off`（在 23.05+ 是多餘且更危險的）、`--snat-subnet-routes=false` 配 exit node（會衝突）。顧好這三個，路由器當 subnet router／exit node 就穩了。
+最容易踩的三個坑：忘了建 firewall zone（tailnet 流量被擋）、沿襲舊教學加 `--netfilter-mode=off`（在 23.0.5 之後既多餘又更容易出錯）、`--snat-subnet-routes=false` 配 exit node（會衝突）。顧好這三個，路由器當 subnet router／exit node 就穩了。
 
 ## 延伸
 
