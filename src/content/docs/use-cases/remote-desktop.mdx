@@ -12,7 +12,7 @@ sidebar:
 
 > 本文依 2026 年 10 月的 Tailscale、RustDesk、Microsoft、Apple 與 GNOME 官方文件整理，以 Tailscale v1.104、RustDesk 1.5.0（2026 年 9 月 30 日發布）為準。本文屬文件整理，未在實機上跑完整套設定；各作業系統選單名稱以各官方文件為準，實際路徑可能隨版本微調。
 
-## 三種協定一覽
+## 遠端桌面做法一覽
 
 | 協定             | 被控端軟體               | 預設埠     | 傳輸 | 被控端作業系統                             |
 | ---------------- | ------------------------ | ---------- | ---- | ------------------------------------------ |
@@ -21,7 +21,7 @@ sidebar:
 | VNC              | macOS「螢幕共享」        | 5900       | TCP  | macOS                                      |
 | RDP／VNC         | GNOME 遠端桌面           | 3389／5900 | TCP  | Linux（GNOME）                             |
 
-這四種的設定各不同，但「走 Tailscale」的做法完全一樣：被控端裝 Tailscale，讓協定只聽 tailnet 的連線。以下逐一說明。
+上表是 3 個協定、4 種做法（GNOME 那一列同時含 RDP 與 VNC），設定的細節各不同，但「走 Tailscale」的原則完全一樣：被控端裝 Tailscale，讓協定只聽 tailnet 的連線。以下逐一說明。
 
 ## RustDesk：直連 IP 模式，不用自架 relay
 
@@ -54,15 +54,18 @@ Windows 的 RDP 是內建功能，走 **TCP 3389**。啟用方式：**設定 →
 
 ### 防火牆：RDP 只對 Tailscale 開放
 
-啟用遠端桌面後，Windows 會建立一組名為 **Remote Desktop** 的防火牆規則，預設開放所有網路介面的 3389。要只讓 Tailscale 連得到，做法是**停用這組預設規則**，再加一條只允許 Tailscale 位址範圍（`100.64.0.0/10`）連入的規則。在**以系統管理員身分開啟的 PowerShell** 執行：
+啟用遠端桌面後，Windows 會建立一組名為 **Remote Desktop** 的防火牆規則（含 TCP 與 UDP 各一條），預設開放所有網路介面的 3389。要只讓 Tailscale 連得到，做法是**停用這組預設規則**，再加一條只允許 Tailscale 位址範圍（`100.64.0.0/10`）連入的規則。在**以系統管理員身分開啟的 PowerShell** 執行：
 
 ```powershell
-# 停用 Windows 預設開啟的 RDP 規則（對所有介面）
-Disable-NetFirewallRule -DisplayGroup "Remote Desktop"
+# 停用 Windows 預設開啟的 RDP 規則（對所有介面）。
+# 用規則名稱 RemoteDesktop-* 而非顯示群組名稱，避免非英文 Windows 找不到規則
+Get-NetFirewallRule -Name "RemoteDesktop-*" | Disable-NetFirewallRule
 
 # 只允許來自 Tailscale IPv4 位址範圍的 RDP 連線
 New-NetFirewallRule -DisplayName "RDP over Tailscale" -Direction Inbound -Protocol TCP -LocalPort 3389 -RemoteAddress 100.64.0.0/10 -Action Allow
 ```
+
+> Windows 內建 RDP 規則的**名稱**固定是英文（`RemoteDesktop-UserMode-In-TCP` 與 `RemoteDesktop-UserMode-In-UDP`），不受 Windows 語系影響；Microsoft 文件常用的 `-DisplayGroup "Remote Desktop"` 在繁中等非英文 Windows 會因群組名稱被在地化（顯示為「遠端桌面」）而找不到規則，所以這裡改用規則名稱。上面停用整組規則後只重開了 TCP 3389；RDP 預設還有一條 UDP 3389 通道（可選、用於改善延遲），只用 TCP 也能正常連線，不重開 UDP 沒關係。
 
 `100.64.0.0/10` 是 Tailscale 使用的 CGNAT 位址範圍（也就是所有 Tailscale IP 都在 `100.64.x.x`～`100.127.x.x`）。這樣一來，RDP 只對 tailnet 裡的其他裝置開放，實體區網或公網都連不進來。
 
@@ -90,7 +93,7 @@ macOS 上用第三方 VNC 用戶端（Windows 的 TigerVNC、RealVNC，Linux 的
 
 ## Linux：GNOME 遠端桌面
 
-GNOME 桌面的發行版（Ubuntu、Fedora 工作站等）內建 **GNOME Remote Desktop**，同時支援 **RDP** 與 **VNC**。依 GNOME 官方文件：
+GNOME 桌面的發行版（Ubuntu、Fedora 工作站等）內建 **GNOME Remote Desktop**，支援 **RDP**，多數發行版也編入 **VNC**。依 GNOME 官方文件：
 
 1. 打開 **設定 → 系統 → 遠端桌面**。
 2. 打開 **桌面共享（Desktop Sharing）**，依需求再開 **遠端控制（Remote Control）** 讓對方能操作。
@@ -99,6 +102,8 @@ GNOME 桌面的發行版（Ubuntu、Fedora 工作站等）內建 **GNOME Remote 
 RDP 預設走 **3389**（如果同時開了「遠端登入」，3389 會讓給遠端登入，桌面共享改用其他埠）；VNC 走 **5900**。控制端用 Remmina、GNOME Connections 或 Windows 內建的遠端桌面連線，目標填被控端的 Tailscale IP 或 MagicDNS 名稱。
 
 只想用命令列設定的話，`grdctl rdp ...`／`grdctl vnc ...` 可以完成全部設定，細節見 GNOME Remote Desktop 的文件。
+
+> **VNC 後端視發行版而定**：Ubuntu 的 `gnome-remote-desktop` 套件（例如 24.04 LTS 的 46.3）只編入 RDP、沒有 VNC，`grdctl vnc` 用不了；Fedora、Debian、openSUSE 等發行版則有 VNC。裝到沒有 VNC 後端的發行版時，改用 RDP（3389）即可。
 
 ## 為什麼不要把 3389／5900 開到公網
 
