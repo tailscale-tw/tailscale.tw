@@ -69,7 +69,7 @@ tailnet 裡有 PVE、Synology、Home Assistant 一堆服務，每台都有自己
 
 公開 DNS 不放任何 `home.example.com` 的紀錄，改在內網的 DNS 伺服器（Pi-hole、AdGuard Home，或直接在反向代理主機上跑一個）設定這些名稱。外面的裝置則透過 Tailscale 的 split DNS（restricted nameserver）查詢：
 
-1. 在內網 DNS 加入 `app.home.example.com` → 反向代理 IP 的紀錄。這裡可以用 Tailscale IP（`100.101.102.103`），裝置在 tailnet 內直接連得到，不必架 Subnet Router；用內網 IP 的話，就需要 Subnet Router 才碰得到。
+1. 在內網 DNS 加入 `app.home.example.com` → 反向代理 IP 的紀錄；和做法 A 一樣，也可以用一條萬用字元 `*` A 記錄一次涵蓋 `*.home.example.com`。這裡可以用 Tailscale IP（`100.101.102.103`），裝置在 tailnet 內直接連得到，不必架 Subnet Router；用內網 IP 的話，就需要 Subnet Router 才碰得到。
 2. 打開 Admin console 的 [DNS](https://console.tailscale.com/admin/dns) 頁面，在 **Nameservers** 選 **Add nameserver → Custom**，填入內網 DNS 的 IP。
 3. 開啟限定網域（split DNS）的選項，填入 `home.example.com`，儲存。
 
@@ -93,6 +93,8 @@ tailnet 裡有 PVE、Synology、Home Assistant 一堆服務，每台都有自己
 這個情境**外部連不進來**：服務不開對外的 80／443，瀏覽器也只在 tailnet 內連。Let's Encrypt 的 HTTP-01 與 TLS-ALPN challenge 都需要 CA 從網際網路連到你的 80／443，所以都不能用；要走 **DNS-01 challenge**：只要在 DNS 加一筆 TXT 紀錄證明網域所有權，CA 不需要連到你的服務，**不用開任何連接埠**。
 
 另外，萬用字元憑證 `*.home.example.com` 只能靠 DNS-01 簽發。
+
+隱私上要注意：自訂網域的憑證和 `*.ts.net` 一樣是公開 CA 簽發，會記錄在公開的 [Certificate Transparency](https://certificate.transparency.dev/) log 裡。用萬用字元憑證時，log 只會出現 `*.home.example.com`，不會洩漏 `nas`、`pve` 這些個別主機名稱，但 `home.example.com` 這個網域本身仍會曝光，見 [在內網裝置上安裝 Cloudflare 憑證](/use-cases/internal-https-with-cloudflare/)。
 
 ### Caddy
 
