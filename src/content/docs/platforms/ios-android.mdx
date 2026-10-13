@@ -1,0 +1,139 @@
+---
+title: 手機端設定：iOS VPN On Demand、Android 常駐與電池
+description: 在 iPhone 與 Android 上讓 Tailscale 依網路自動連線或斷線：iOS 的 VPN On Demand 規則、Android 的 Always-on VPN 與封鎖未使用 VPN 的連線，以及背景限制、電池最佳化與 Exit Node 對耗電的影響
+sidebar:
+  order: 4
+  label: iOS 與 Android 手機設定
+---
+
+手機的 Tailscale app 裝好之後，預設要自己手動連線。這篇講三個讓手機「更自動、更省電」的設定：iOS 的 **VPN On Demand**（依所在網路自動連線或斷線）、Android 的 **Always-on VPN** 與**封鎖未使用 VPN 的連線**（常駐連線、防止流量外洩），以及兩邊都關心的背景限制與電池。文中用到 Exit Node、MagicDNS 這類名詞，先看對應文章：
+
+- [Exit Node：讓所有流量經由指定裝置出去](/features/exit-node/)
+- [MagicDNS 與自訂 DNS 設定](/features/magicdns/)
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件整理。iOS 與 Android app 撰寫時的最新版本都是 **v1.104.1**（iOS 以 App Store 版本、Android 以官方 changelog 與 tailscale-android 的 release 為準）。VPN On Demand 一節以官方 KB（Last validated 2026 年 1 月）與 Apple 的 On Demand Rules 文件核對選項名稱。本文未在實機逐一操作，屬文件整理。
+
+## iOS：VPN On Demand
+
+VPN On Demand 是 iOS／macOS 的 VPN 自動連線機制，能在偵測到網路變化時自動把 VPN 連上或斷開。Tailscale 從 iOS 版 **1.48** 開始支援（macOS 從 1.60）。最典型的用法：iPhone 離開家裡的 Wi-Fi 時自動連上 Tailscale，回到該 Wi-Fi 時自動斷線。
+
+進入位置：**Tailscale app → 右上角頭像 → VPN On Demand**。看不到這個選項，通常是管理員透過 [system policy](https://tailscale.com/docs/features/tailscale-system-policies) 把它隱藏了，或 app 版本太舊。
+
+### 連線規則選項
+
+規則依介面分成 Wi-Fi 與行動網路（cellular，手機上等同 4G／5G）兩組。Wi-Fi 有五個選項：
+
+| 選項           | 行為                                                            |
+| -------------- | --------------------------------------------------------------- |
+| **Always**     | 連上任何 Wi-Fi 就自動連線                                       |
+| **Only On**    | 只有連上清單內的 Wi-Fi 才自動連線，其他 Wi-Fi 自動斷線          |
+| **Except On**  | 連上任何 Wi-Fi 都自動連線，除了清單內列出的 Wi-Fi（連上就斷線） |
+| **Never**      | 連上任何 Wi-Fi 都自動斷線                                       |
+| **Do Nothing** | 不自動連線也不自動斷線，維持手動控制                            |
+
+行動網路（與乙太網路）只有三個選項：**Always**（建立行動數據連線就自動連線）、**Never**（自動斷線）、**Do Nothing**。
+
+`Only On` 是白名單（只連指定的網路）、`Except On` 是黑名單（除了指定的網路都連）。官方文件把兩者分別描述為「包含的網路」清單與「排除的網路」清單，實際在 app 裡的選取介面以當下版本為準。
+
+### 離開家用 Wi-Fi 自動連線
+
+最常見的需求是「在家不用連、出門自動連」。建議這樣設：
+
+- **Wi-Fi**：選 **Except On**，把家裡的 Wi-Fi SSID 加進排除清單。在家連上這個 SSID 時 Tailscale 會自動斷線，連到任何其他 Wi-Fi 就自動連線。
+- **行動網路**：選 **Always**，這樣一離開 Wi-Fi、切到 4G／5G 就會自動連上。
+
+對應的 Apple 底層機制是 On Demand Rule 的 `InterfaceTypeMatch`（`WiFi`／`Cellular`）配 `SSIDMatch`（比對目前連到的 SSID），再依 `Action` 決定連線或斷線。Tailscale 的 `Only On`／`Except On` 就是把「匹配到的網路」反過來當成斷線條件，所以「信任的 SSID 斷開」和「離開家用 Wi-Fi 自動連線」其實是同一件事的兩種講法——把信任的 SSID 放進排除清單即可。
+
+### 用 MagicDNS 名稱觸發連線
+
+VPN On Demand 還能在 iOS／macOS 偵測到「連到 `*.ts.net` 結尾的主機名稱」時自動連線。**這個功能只有在該介面的規則設為 Do Nothing 時才能用**——其他規則啟用時，MagicDNS 比對不會生效。這對「平常手動、要連內網服務時自動開」的情境有用，名稱機制見 [MagicDNS](/features/magicdns/)。
+
+### 注意事項
+
+- **一次只能有一個 VPN app 開 On Demand**：連到其他 VPN 時，iOS／macOS 會把 Tailscale 的 On Demand 暫時停用，直到你再次手動連上 Tailscale。
+- **`Never` 規則會讓你連不回來**：設成 `Never` 後就算手動去連，iOS 也會立刻再斷開。要脫離這種狀態，只能改規則或整個關掉 VPN On Demand。
+- **自訂規則會覆蓋預設的自動政策**：Tailscale 啟用期間會自動套用一個「寬鬆」的 On Demand 政策，確保重開機、app 更新或當機後 VPN 仍在。一旦你自訂了規則，這層自動保護就改由你的規則接手，規則設錯就可能造成連不上的情形。
+
+## Android：Always-on VPN 與封鎖未使用 VPN 的連線
+
+Android 沒有 iOS 那種依 SSID 判斷的 On Demand 規則，但有兩個系統層級的 VPN 設定，做到「常駐連線」與「防洩漏」：
+
+1. 到**系統設定 → 網路與網際網路 → VPN**（部分廠牌在「連線與網路」或「更多連線設定」下，路徑略有差異），點 Tailscale 旁邊的齒輪或「設定」。
+2. 看到兩個開關：
+
+- **Always-on VPN（一律開啟 VPN）**：系統開機、重連網路或切換 Wi-Fi／行動數據後，自動把 Tailscale 連回來，不用手動開 app。
+- **Block connections without VPN（封鎖未使用 VPN 的連線）**：強制所有流量都走 VPN，VPN 沒連上時不讓任何 app 直接上網，避免流量外洩。
+
+**第二個開關只有在使用 [Exit Node](/features/exit-node/) 時才有意義。** Tailscale 預設只處理 tailnet 內裝置之間的流量、不碰上網流量；沒選 Exit Node 就打開「封鎖未使用 VPN 的連線」，等於把所有上網流量都塞進 VPN、卻沒有出口，整台手機就斷網了。官方 maintainer 在 GitHub issue [#12925](https://github.com/tailscale/tailscale/issues/12925) 也確認過這點。所以順序是：先在 app 的 **Exit Node** 區選好出口，再回來開這兩個開關。
+
+### 用 app-based split tunneling 替代
+
+如果只是想讓少數 app（串流、銀行這類）繞過 Tailscale，不必整台封鎖，用 app 內的 **app-based split tunneling**（**頭像 → App-based split tunneling**，需要 v1.70 以上）把那些 app 勾選排除即可。排除的 app 會直接上網、不走 Tailscale，比「封鎖未使用 VPN 的連線」更有彈性，也比較省電。
+
+## Android 的背景限制
+
+Android 的 Doze（低電耗待命）、App Standby，以及各家 ROM 額外疊加的省電／「智慧省電」機制，會在 app 進背景一段時間後把它**凍結或殺掉**。Tailscale 的 VPN 本身是系統服務、通常比較不受影響，但 app 進程被凍結時，可能出現「看起來還連著、實際上卡住」或重新連線變慢的情形，容易誤以為是 tailnet 出問題。
+
+一般原則（不逐一寫死各廠牌路徑，因為同一品牌不同系統版本就不同）：
+
+- 把 Tailscale 從最近應用程式（Recents）清單鎖定或釘選，避免被滑掉。
+- 允許 Tailscale 自動啟動（auto-start）。
+- 在省電或背景限制相關設定中，把 Tailscale 設為「不受限制」或加進白名單。
+
+各家 ROM 的選單位置差異很大，這裡不編造特定路徑；到 [dontkillmyapp.com](https://dontkillmyapp.com/) 選自己的手機品牌，照上面的逐步說明操作最可靠。它長期整理各家（小米、三星、OnePlus、華為、OPPO 等）會殺背景 app 的行為與對應解法，是這個問題最完整的查證來源。
+
+## Android 的電池最佳化
+
+「電池最佳化」是 Android 內建的省電功能，系統會對「最佳化」的 app 限制背景活動。預設狀態下 Tailscale 可能被列入最佳化對象，導致背景連線被節流或中斷。建議把 Tailscale 設為**不最佳化（不受限制）**：
+
+1. 到**系統設定 → 電池 → 電池最佳化**（各廠牌名稱可能是「省電模式」、「應用程式電池使用量」等）。
+2. 在清單中找到 Tailscale，選「不要最佳化」或「不受限制」。
+
+同樣地，確切的選單位置以 [dontkillmyapp.com](https://dontkillmyapp.com/) 上自己品牌的分頁為準。設定後可以觀察一兩天，確認背景連線穩定、耗電也沒有異常上升。
+
+iOS 沒有這套機制：VPN 由系統的 Network Extension 管理、不受 app 背景凍結影響，因此不需要像 Android 那樣手動排除。但 iOS 的電池統計偶爾會把大量 DNS 查詢算在 Tailscale 頭上——因為 Tailscale 接管了 DNS 解析，每一筆查詢都會被算成 app 的一次喚醒，所以比例偏高不一定是真的有異常耗電，只是「歸屬」到 Tailscale 的數值、不等於實際耗電增加（官方團隊的說明見 [issue #13615](https://github.com/tailscale/tailscale/issues/13615) 與 [#12563](https://github.com/tailscale/tailscale/issues/12563)）。
+
+## Exit Node 對電池的影響
+
+官方對手機耗電的唯一明確說法是：**電池耗電最常見的原因是裝置用 [Exit Node](/features/exit-node/) 轉送所有流量**（見下方參考資料的官方 troubleshooting 頁，以及長期追蹤的 GitHub issue #3363）。原因是：沒開 Exit Node 時，手機只加密、轉送 tailnet 內裝置之間的流量；開了之後，連串流、視訊、系統更新這類**所有**上網流量都要經過 VPN 隧道加密、再由 Exit Node 轉送出去，處理量高很多。
+
+官方文件沒有給出具體耗電數字，本文也不提供沒有來源的數值。實際影響取決於用多少流量、Exit Node 的距離與直連與否。可以這樣控制：
+
+- **不需要上網代理時就關掉 Exit Node**：只連 tailnet 內服務時，維持 app 的 **Exit Node** 選 **None** 最省電。
+- **Android 用 split tunneling 排除不該走 VPN 的 app**：串流、備份這類大流量 app 若不需要經由家裡的出口，排除後可以省下轉送負擔。
+- **出口交給常開的裝置**：家裡的 [Apple TV 當 Exit Node](/use-cases/apple-tv-exit-node/) 或一台常開的主機，比拿手機自己當出口（app 的 **Exit Node → Run as exit node**）合理得多——手機當出口除了耗電，部分機種在螢幕鎖定後連線也可能不穩定（實際以使用情形為準）。
+
+如果 tailnet 的存取規則不是預設全開，記得放行手機經由 Exit Node 上網，而且目的地要寫 `autogroup:internet`、不是那台出口裝置（完整說明見 [Exit Node 文章的 ACL 一節](/features/exit-node/#自訂-acl-時要注意)）。要限制手機只能走特定幾台出口，用 `via` 指定 tag，最小權限範例：
+
+```json
+"grants": [
+  {
+    "src": ["group:mobile"],
+    "dst": ["autogroup:internet"],
+    "ip": ["*"],
+    "via": ["tag:exit-node"]
+  }
+]
+```
+
+## 延伸閱讀
+
+- [Exit Node：讓所有流量經由指定裝置出去](/features/exit-node/)
+- [MagicDNS 與自訂 DNS 設定](/features/magicdns/)
+- [Mullvad Exit Node：用 Mullvad 的伺服器當出口](/features/mullvad-exit-node/)
+- [Apple TV 當 Exit Node：接電源的現成家庭出口](/use-cases/apple-tv-exit-node/)
+- [Subnet Router：讓手機連到內網沒裝 Tailscale 的裝置](/features/subnet-router/)
+
+## 參考資料
+
+- [Using VPN On Demand for iOS and macOS（官方 KB）](https://tailscale.com/kb/1291/ios-vpn-on-demand)
+- [VPN.VPN.OnDemandRulesElement（Apple Developer）](https://developer.apple.com/documentation/devicemanagement/vpn/vpn-data.dictionary/ondemandruleselement)
+- [Install Tailscale on Android（官方文件）](https://tailscale.com/docs/install/android)
+- [Using app-based split tunneling on Android（官方文件）](https://tailscale.com/docs/features/client/android-app-split-tunneling)
+- [Mobile device batteries drain quickly（官方 troubleshooting）](https://tailscale.com/docs/reference/troubleshooting/mobile/battery-drains)
+- [Mobile battery usage still bad in some situations（GitHub issue #3363）](https://github.com/tailscale/tailscale/issues/3363)
+- [Android app should notify the user when isLockdownEnabled=true, but no exit node in use（GitHub issue #12925）](https://github.com/tailscale/tailscale/issues/12925)
+- [Battery usage on iOS 18 is significantly higher than iOS 17（GitHub issue #13615）](https://github.com/tailscale/tailscale/issues/13615)
+- [DNS resolution no longer works on iOS with custom DNS provider & Tailscale DNS Settings enabled（GitHub issue #12563）](https://github.com/tailscale/tailscale/issues/12563)
+- [Don't kill my app!](https://dontkillmyapp.com/)
+- [Tailscale changelog（iOS／Android 版本）](https://tailscale.com/changelog)
