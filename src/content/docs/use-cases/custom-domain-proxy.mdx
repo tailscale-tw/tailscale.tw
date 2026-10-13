@@ -1,0 +1,260 @@
+---
+title: 自訂網域 + Nginx Proxy Manager／Caddy + Tailscale
+description: 想用自己的網域（例如 *.home.example.com）而不是 *.ts.net 時，在 tailnet 內架一台反向代理統一入口：DNS 用公開紀錄或 split DNS 指向內網、憑證走 DNS-01 challenge、只監聽 Tailscale IP 並搭配最小權限 grants
+sidebar:
+  order: 1.1
+  label: 自訂網域反向代理
+---
+
+tailnet 裡有 PVE、Synology、Home Assistant 一堆服務，每台都有自己的網頁介面。Tailscale 的 [Serve](/features/serve/) 或 [`tailscale cert`](/features/https-certificates/) 能給每台裝置 `https://nas.tailxxxx.ts.net` 這類 HTTPS 網址，自己或家人用很方便；但如果你想要好記、屬於自己的網址（例如 `app.home.example.com`），或想把所有服務統一在一個入口後面管理，就架一台反向代理（Nginx Proxy Manager 或 Caddy），讓它成為 tailnet 內唯一的 HTTPS 入口。
+
+> 本文依 2026 年 10 月的 Tailscale、Caddy 與 Nginx Proxy Manager 官方文件整理，以 Tailscale v1.104、Caddy v2.11.7、Nginx Proxy Manager v2.16.0 為準；反向代理與憑證的實際操作未在實機驗證。
+
+## 先釐清：什麼時候用 \*.ts.net 就好
+
+在動工之前，先想清楚自己是不是真的需要自訂網域。
+
+**用 `*.ts.net` 就夠的情況：**
+
+- 服務就給自己或家人用，`https://nas.tailxxxx.ts.net` 這個網址夠好記。
+- 每台服務的裝置都能裝 Tailscale、能跑 Serve。Serve 會自動處理憑證簽發與續期，什麼都不用管，見 [Tailscale Serve](/features/serve/)。
+- 不想多維護一台反向代理和一份 DNS 設定。
+
+**才需要自訂網域 + 反向代理的情況：**
+
+- 想要自己買的網域，例如 `app.home.example.com`，讓網址有意義、也方便換主機時不改網址。
+- 想統一入口：多個服務共用一台反向代理、共用一張憑證，而不是每台機器各自 Serve。服務本身繼續用 HTTP，由反向代理集中終止 TLS，各台不用各自處理憑證。
+- 有些裝置裝不了 Tailscale、或只能透過 [Subnet Router](/features/subnet-router/) 才能碰到，用反向代理代為轉送。
+- 想用一張萬用字元憑證 `*.home.example.com` 涵蓋所有子網域。
+
+本文和站內另外兩篇的關係：
+
+- [Tailscale Serve](/features/serve/) 與 [HTTPS 憑證](/features/https-certificates/)：用 `*.ts.net` 的憑證，最省事，但網址是 Tailscale 的。
+- [在內網裝置上安裝 Cloudflare 憑證](/use-cases/internal-https-with-cloudflare/)：用 acme.sh 替**沒裝 Tailscale 的內網裝置**簽憑證、把憑證直接裝到每台裝置上；本文則是把憑證集中在一台反向代理上。兩者可以並存，本文的反向代理也能吃那篇簽下來的憑證。
+
+## 架構
+
+```
+外面的裝置（Tailscale）
+  │  https://app.home.example.com → 100.101.102.103（反向代理的 Tailscale IP）
+  ▼
+反向代理主機（NPM／Caddy，只監聽 tailscale0 的 443）
+  ▼
+內網服務（nas 192.168.1.10:8080、pve、Home Assistant …，以 HTTP 轉送）
+```
+
+- **名稱解析**：`app.home.example.com` 解析成反向代理的 Tailscale IP（`100.x.y.z`）。
+- **連線**：外面的裝置連上 Tailscale 後，照名稱連到反向代理，再轉送給內網服務。
+- **憑證**：反向代理持有 `*.home.example.com` 的公開憑證，瀏覽器不跳警告。
+
+## 前置條件
+
+- 一個自己的網域（下面以 `example.com` 為例，切一層 `home.example.com` 給內網用）。
+- 一台常開的主機跑反向代理，並已加入 tailnet（記下它的 Tailscale IP，例如 `100.101.102.103`）。
+- DNS 放在 Cloudflare（本篇用 Cloudflare 示範；其他 DNS 商只要反向代理支援即可）。
+
+## 1. 決定 DNS 的做法
+
+瀏覽器要能把 `app.home.example.com` 解析成反向代理的 Tailscale IP，有兩種做法。
+
+### 做法 A：公開 DNS 直接指向 100.x
+
+在 Cloudflare 新增 A 記錄 `app.home` → `100.101.102.103`（或一條萬用字元 `*` 記錄，一次涵蓋所有子網域）。
+
+- 優點：最簡單，不必另外架 DNS。
+- 取捨：**主機名稱會洩漏**，任何人都查得到 `app.home.example.com` 這筆紀錄，你的內網命名習慣等於公開了。IP 雖然是 `100.x`（`100.64.0.0/10` 是 CGNAT 保留位址，在網際網路上不可路由），別人查到 IP 也連不到，只有 tailnet 內的裝置連得到——Tailscale 官方稱這個取捨「相對無害」。
+- 注意：有些家用路由器、公司或 ISP 的 DNS 開了 **DNS rebinding 防護**，會擋掉「回應私有 IP」的 DNS 結果，結果就是解析不到。解法見做法 B，或官方的 [DNS rebinding 說明](https://tailscale.com/docs/reference/faq/dns-rebinding)。
+
+### 做法 B：split DNS 指向內網 DNS
+
+公開 DNS 不放任何 `home.example.com` 的紀錄，改在內網的 DNS 伺服器（Pi-hole、AdGuard Home，或直接在反向代理主機上跑一個）設定這些名稱。外面的裝置則透過 Tailscale 的 split DNS（restricted nameserver）查詢：
+
+1. 在內網 DNS 加入 `app.home.example.com` → 反向代理 IP 的紀錄；和做法 A 一樣，也可以用一條萬用字元 `*` A 記錄一次涵蓋 `*.home.example.com`。這裡可以用 Tailscale IP（`100.101.102.103`），裝置在 tailnet 內直接連得到，不必架 Subnet Router；用內網 IP 的話，就需要 Subnet Router 才碰得到。
+2. 打開 Admin console 的 [DNS](https://console.tailscale.com/admin/dns) 頁面，在 **Nameservers** 選 **Add nameserver → Custom**，填入內網 DNS 的 IP。
+3. 開啟限定網域（split DNS）的選項，填入 `home.example.com`，儲存。
+
+之後 tailnet 裡的裝置只有查詢 `*.home.example.com` 時會問這台內網 DNS，其他網域照常。詳細設定與各平台的測試方法見 [MagicDNS 與自訂 DNS 設定](/features/magicdns/)。
+
+- 優點：主機名稱與 IP 都不會出現在公開 DNS。
+- 缺點：要多維護一台內網 DNS。
+
+## 2. 建立 Cloudflare API token
+
+憑證走 DNS challenge 時，反向代理要透過 Cloudflare API 新增驗證用的 TXT 紀錄。不要用 Global API Key，改建一把權限最小的 API token：
+
+1. 到 Cloudflare 的 [API Tokens](https://dash.cloudflare.com/profile/api-tokens) 頁面，選 **Create Token**，用 **Edit zone DNS** 範本或自訂。
+2. **Permissions** 只給 **Zone → DNS → Edit**。Caddy 的 Cloudflare 模組官方還建議加 **Zone → Zone → Read**（讓模組確認 zone 狀態）。
+3. **Zone Resources** 只選 `example.com` 這一個 zone。
+4. 可以再用 **Client IP Address Filtering** 限制只有簽發憑證的主機能使用。
+5. 建立後複製 token。
+
+## 3. 用 DNS-01 簽發憑證
+
+這個情境**外部連不進來**：服務不開對外的 80／443，瀏覽器也只在 tailnet 內連。Let's Encrypt 的 HTTP-01 與 TLS-ALPN challenge 都需要 CA 從網際網路連到你的 80／443，所以都不能用；要走 **DNS-01 challenge**：只要在 DNS 加一筆 TXT 紀錄證明網域所有權，CA 不需要連到你的服務，**不用開任何連接埠**。
+
+另外，萬用字元憑證 `*.home.example.com` 只能靠 DNS-01 簽發。
+
+隱私上要注意：自訂網域的憑證和 `*.ts.net` 一樣是公開 CA 簽發，會記錄在公開的 [Certificate Transparency](https://certificate.transparency.dev/) log 裡。用萬用字元憑證時，log 只會出現 `*.home.example.com`，不會洩漏 `nas`、`pve` 這些個別主機名稱，但 `home.example.com` 這個網域本身仍會曝光，見 [在內網裝置上安裝 Cloudflare 憑證](/use-cases/internal-https-with-cloudflare/)。
+
+### Caddy
+
+Caddy 預設的 HTTPS 用 HTTP-01／TLS-ALPN，要改 DNS challenge 需要**額外的 DNS provider 模組**。官方下載與套件都不含這些模組，要自己 build：
+
+- 用 [xcaddy](https://github.com/caddyserver/xcaddy) 建一個帶 Cloudflare 模組的 Caddy：
+
+  ```bash
+  xcaddy build --with github.com/caddy-dns/cloudflare
+  ```
+
+- 或用官方 `builder` Docker 映像：
+
+  ```dockerfile
+  FROM caddy:2.11.7-builder AS builder
+  RUN xcaddy build --with github.com/caddy-dns/cloudflare
+
+  FROM caddy:2.11.7
+  COPY --from=builder /usr/bin/caddy /usr/bin/caddy
+  ```
+
+完整做法見 Caddy 的 [Build from source](https://caddyserver.com/docs/build) 與 [Automatic HTTPS](https://caddyserver.com/docs/automatic-https) 說明。
+
+Caddyfile 在 site block 的 `tls` 指定 DNS provider，並把 token 放進環境變數：
+
+```
+app.home.example.com {
+    tls {
+        dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+    }
+    reverse_proxy 192.168.1.10:8080
+}
+```
+
+把網址換成 `*.home.example.com` 就能簽萬用字元憑證，再用 `@` matcher 依子網域轉送：
+
+```
+*.home.example.com {
+    tls {
+        dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+    }
+
+    @app host app.home.example.com
+    handle @app {
+        reverse_proxy 192.168.1.10:8080
+    }
+
+    @pve host pve.home.example.com
+    handle @pve {
+        reverse_proxy 192.168.1.11:8006
+    }
+}
+```
+
+注意：`dns cloudflare` 只對 `*.ts.net` 以外的自訂網域生效。Caddy 2.5 以上遇到 `*.ts.net` 會自動向本機的 `tailscaled` 拿憑證、不需要這個模組，見 [HTTPS 憑證](/features/https-certificates/)。
+
+### Nginx Proxy Manager
+
+NPM 用 Certbot 簽憑證，UI 內建 DNS challenge，不用自己 build：
+
+1. 在 NPM 開啟 **SSL Certificates → Add SSL Certificate**，選 **Let's Encrypt**。
+2. **Domain Names** 填 `*.home.example.com` 和 `home.example.com`。
+3. 打開 **Use a DNS Challenge**，**DNS Provider** 選 **Cloudflare**。
+4. 在 credential 欄貼上 scoped token：
+
+   ```text
+   dns_cloudflare_api_token = <API token>
+   ```
+
+   不建議用 Global API Key（那會寫成 `dns_cloudflare_email` + `dns_cloudflare_api_key`，權限遠大於需要）。
+
+5. 同意條款後儲存。NPM 會自動安裝對應的 Certbot DNS plugin（`certbot-dns-cloudflare`）並簽發憑證。
+
+之後建立 **Proxy Host** 時指定這張憑證即可。官方提醒：DNS plugins 是獨立維護的，偶爾會和其他套件版本衝突，出問題時先看容器 log，見 NPM 的 [Certbot](https://nginxproxymanager.com/certbot/) 說明。
+
+## 4. 反向代理只監聽 Tailscale IP
+
+預設反向代理對所有介面監聽 80／443。若主機同時在區網，區網裝置也能繞過 Tailscale 直接連到它；把它綁到 `tailscale0` 的 `100.x` 位址，就只剩 Tailscale 介面收得到連線，「誰能連」完全由 grants 決定。
+
+- 好處：即使主機也在區網或有其他網路介面，反向代理也只接受來自 Tailscale 的連線，不會被區網裝置直接碰到；管理介面（NPM 的 `81`、Caddy 的 admin 端點）則建議另外只綁 loopback 或用防火牆管制。
+
+### Caddy
+
+用 `bind` 指令指定監聽位址：
+
+```
+app.home.example.com {
+    bind 100.101.102.103
+    tls {
+        dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+    }
+    reverse_proxy 192.168.1.10:8080
+}
+```
+
+### Nginx Proxy Manager
+
+NPM 的 nginx 預設監聽 `0.0.0.0:80/443`，UI 沒有「綁定介面」的選項。要限制到 Tailscale 介面，兩個方向：
+
+- **Docker port 綁定到 Tailscale IP**：把 `443` 的 port mapping 寫成 `"100.101.102.103:443:443"`，只綁在 Tailscale IP 上（前提是 Tailscale 裝在宿主機、`tailscale0` 存在於宿主機）。
+- **主機防火牆只放行 `tailscale0`**：例如 ufw 只允許 `tailscale0` 上的 443，丟棄其他介面的 443。
+
+不管有沒有做這一層，Tailscale 的 grants 才是最終把關；監聽介面只是額外的縱深防禦。
+
+## 5. grants 最小權限
+
+把反向代理打上 tag（tag 裝置的 key expiry 預設關閉，適合常開的伺服器，見 [Tags 與 auth key](/admin/tags-auth-keys/)），只開放需要的連接埠。家人只能連 `tcp:443`，管理員全開；反向代理轉送到內網服務的連線（若該服務也有 Tailscale 身分）也要放行：
+
+```json
+{
+  "tagOwners": {
+    "tag:proxy": ["group:admins"],
+    "tag:nas": ["group:admins"]
+  },
+  "grants": [
+    {
+      "src": ["group:family"],
+      "dst": ["tag:proxy"],
+      "ip": ["tcp:443"]
+    },
+    {
+      "src": ["group:admins"],
+      "dst": ["tag:proxy"],
+      "ip": ["*"]
+    },
+    {
+      "src": ["tag:proxy"],
+      "dst": ["tag:nas"],
+      "ip": ["tcp:80"]
+    }
+  ]
+}
+```
+
+- 第一條：家人只能連反向代理的 HTTPS。
+- 第二條：管理員可連反向代理的所有連接埠（含管理介面）。
+- 第三條：反向代理轉送給 NAS（HTTP `80`）的連線。如果反向代理和後端服務在同一台主機、走 loopback，就沒有 Tailscale 流量，不需要這條；若後端是透過 Subnet Router 才碰得到的內網 IP，`dst` 改寫成那個內網 IP 或網段。
+
+規則的寫法見 [ACL / Grants 入門](/admin/acl-grants/)。記得拿掉預設的 `*` 到 `*:*` 全開規則，這些限制才有作用。
+
+## 常見問題
+
+- **在外面開不了，在家裡可以？** 先確認裝置有連上 Tailscale。做法 A 的話，多半是所在網路的 DNS rebinding 防護擋掉了私有 IP 的回應，見第 1 步。
+- **解析不到名稱？** 做法 B 的話，用 `tailscale dns status` 確認 split DNS 有下發，再用 `dscacheutil`（macOS）或 `Resolve-DnsName`（Windows）查，不要用 `nslookup`，見 [MagicDNS](/features/magicdns/)。
+- **憑證簽不下來？** 先確認 DNS-01 用的 API token 有 `Zone → DNS → Edit` 權限、且只限該 zone；Caddy 自建版本要確定有帶入 `cloudflare` 模組，NPM 則看容器 log 是否為 plugin 版本衝突。
+- **換了機器名稱憑證就失效？** 不會。自訂網域的憑證和 Tailscale 的機器名稱無關，換機器名稱只影響 `*.ts.net` 的網址。
+- **裝置沒裝 Tailscale 也能用這個網址嗎？** 不能。名稱與憑證是公開的，但 `100.x` 只有 tailnet 內的裝置連得到。
+
+## 參考資料
+
+- [DNS in Tailscale（官方）](https://tailscale.com/docs/reference/dns-in-tailscale)
+- [DNS problems with internal services and DNS rebinding protection（官方）](https://tailscale.com/docs/reference/faq/dns-rebinding)
+- [Caddy：Build from source（xcaddy）](https://caddyserver.com/docs/build)
+- [Caddy：Automatic HTTPS（DNS challenge）](https://caddyserver.com/docs/automatic-https)
+- [Caddy：`tls` 指令（DNS challenge 語法）](https://caddyserver.com/docs/caddyfile/directives/tls)
+- [caddy-dns/cloudflare 模組](https://github.com/caddy-dns/cloudflare)
+- [How to use DNS provider modules in Caddy 2（社群 wiki）](https://caddy.community/t/how-to-use-dns-provider-modules-in-caddy-2/8148)
+- [Nginx Proxy Manager：Certbot DNS plugins（官方）](https://nginxproxymanager.com/certbot/)
+- [Caddy releases](https://github.com/caddyserver/caddy/releases)
+- [Nginx Proxy Manager releases](https://github.com/NginxProxyManager/nginx-proxy-manager/releases)
+- [MagicDNS 與自訂 DNS 設定](/features/magicdns/)
+- [Tailscale Serve](/features/serve/)
+- [在內網裝置上安裝 Cloudflare 憑證](/use-cases/internal-https-with-cloudflare/)
