@@ -1,0 +1,228 @@
+---
+title: 出門在外喚醒家裡的電腦：Wake-on-LAN 與 Tailscale
+description: 用一台常開的小裝置（Raspberry Pi、NAS、路由器）當 Wake-on-LAN 發送端，再經由 Tailscale 從外面喚醒家裡睡眠或關機的電腦：magic packet 是二層廣播、Tailscale 是三層的觀念、etherwake 與 wakeonlan 指令、UpSnap Web 介面、BIOS 與作業系統設定、常見失敗原因與最小權限的 grants
+sidebar:
+  order: 0.6
+  label: Wake-on-LAN 遠端喚醒
+---
+
+人在外面，家裡的桌機或 NAS 卻關機了，開不到。Wake-on-LAN（WoL）能「隔空開機」，但 WoL 靠的是區域網路的二層廣播，出了家門就送不到。把 Tailscale 和一台常開的小裝置接起來，就能從任何地方喚醒家裡的機器。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件與原始碼整理，以 Tailscale v1.104 為準；UpSnap 以 v5.7.2、`etherwake` 以 Debian bookworm 的 1.09、`wakeonlan` 以 0.41 為準。本文未在實機上跑完整套設定，屬文件整理。
+
+## 為什麼 Tailscale 自己不能喚醒電腦
+
+WoL 的 magic packet 是一串很短的封包：6 個位元組的 `0xFF`，後面接 16 次目標網卡的 MAC 位址。這串封包是**在資料連結層（Layer 2）以廣播送出**的，睡眠中的網卡一直聽著自己所在的區網，認出這串「叫自己的」訊號就把主機叫醒。
+
+關鍵就在「二層廣播」這四個字。二層廣播不會跨越網段，只會在送出者所在的同一個廣播域（也就是同一條實體 LAN）裡傳播。
+
+Tailscale 跑的是 WireGuard，工作在三層（Layer 3）：流量經由 `tailscale0` 這個隧道介面進出，出來時已經是加密封包，只會到達其他 tailnet 裝置，**到不了你家實體 LAN 上的網卡**。所以你在筆電上「送一個 magic packet 給家裡的電腦」，封包只會停在 `tailscale0`，永遠碰不到那張睡眠中的網卡。就算設了 [Subnet Router](/features/subnet-router/) 也一樣——subnet router 轉送的是三層封包，不是二層廣播（這點在後面「常見失敗」會再講）。
+
+Tailscale 官方在 2025 年的部落格也寫得直白：Tailscale 能做的事很多，但「自己」無法喚醒一台睡著或關機的裝置。
+
+## 解法：一台常開、和目標同網段的小裝置
+
+既然 magic packet 必須從同一個區網送出去，解法就是：在家裡放一台**常開的小裝置**，讓它待在區網裡當「發送端」。你在外面用 Tailscale 連進這台小裝置，再叫它把 magic packet 送出去。
+
+常見的發送端：
+
+- **Raspberry Pi**：省電、便宜、24/7 開著。站內〈[Raspberry Pi 當 subnet router 兼 exit node](/use-cases/subnet-router-raspberry-pi/)〉最後一節就是把它順手當 WoL 發送端。
+- **NAS**：群暉、威聯通這類本來就常開的機器。
+- **路由器**：有些路由器韌體內建 WoL（見下一節）。
+
+小裝置和目標機器必須**在同一個區網、用有線乙太網路**。Wi-Fi 通常不支援 WoL（見「BIOS 與作業系統設定」）。
+
+發送端本身也有幾個選項：指令列工具（`etherwake`、`wakeonlan`）、Web 介面（UpSnap），或路由器內建功能。下面依序介紹。
+
+## 方法一：`etherwake` 或 `wakeonlan` 指令
+
+最簡單的做法是 SSH 進發送端，跑一行指令送出 magic packet。
+
+### etherwake
+
+Debian／Ubuntu／Raspberry Pi OS 用 `apt` 安裝：
+
+```bash
+sudo apt install etherwake
+```
+
+它的語法是 `etherwake [選項] 主機識別`，重點是兩個選項：
+
+- `-i ifname`：指定用哪個網路介面送出，**預設是 `eth0`**，介面名不對就送不出去。
+- `-b`：送到廣播位址。
+
+`etherwake` 用 raw socket 送封包，**需要 root**（非 root 執行會以狀態碼 2 失敗）。實際使用：
+
+```bash
+# 先確認介面名（可能是 eth0、end0、br0 等）
+ip link
+
+# 指定介面送出 magic packet
+sudo etherwake -i eth0 AA:BB:CC:DD:EE:FF
+```
+
+`AA:BB:CC:DD:EE:FF` 換成目標機器的 MAC 位址。完整的參數表見 [etherwake man page](https://manpages.debian.org/bookworm/etherwake/etherwake.8.en.html)。
+
+### wakeonlan
+
+`wakeonlan` 是另一個工具（Perl 寫的），Debian／Ubuntu 也裝得到：
+
+```bash
+sudo apt install wakeonlan
+```
+
+它和 `etherwake` 的差別在**選項語意完全不同**：
+
+```bash
+wakeonlan [-i IP位址] [-p 連接埠] [[MAC 位址] ...]
+```
+
+- `-i` 是**目的地 IP**，不是介面；預設 `255.255.255.255`（limited broadcast）。
+- `-p` 是目的地連接埠，預設 `9`（discard port）。
+
+```bash
+wakeonlan AA:BB:CC:DD:EE:FF
+# 或指定區網的廣播位址
+wakeonlan -i 192.168.1.255 AA:BB:CC:DD:EE:FF
+```
+
+它用 UDP 送封包，所以不需要 root。完整參數見 [wakeonlan man page](https://manpages.debian.org/bookworm/wakeonlan/wakeonlan.1.en.html)。
+
+兩個工具都能用，`etherwake` 在 Raspberry Pi 教學裡比較常見。要從外面送，就是先 [Tailscale SSH](/features/tailscale-ssh/) 或一般 SSH 連進那台常開的 Pi，再執行上面其中一行。
+
+## 方法二：UpSnap Web 介面
+
+指令列好用，但每次都要開終端機、記 MAC 位址。想要在手機上點一下就喚醒，可以自架 [UpSnap](https://github.com/seriousm4x/UpSnap)：一個用 SvelteKit、Go 和 PocketBase 寫的輕量 WoL Web 應用程式（目前 v5.7.2），有網頁儀表板、可記住每台裝置、還能把關機指令設成按鈕，介面也有繁體中文（zh-TW）。
+
+UpSnap 提供獨立 binary 和 Docker 兩種安裝方式。以 Docker 為例：
+
+```yaml
+services:
+  upsnap:
+    image: ghcr.io/seriousm4x/upsnap:5
+    container_name: upsnap
+    network_mode: host # 一定要 host，見下方說明
+    cap_add:
+      - NET_RAW # 網路掃描與 ping 需要
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/pb_data
+```
+
+### 為什麼要 `network_mode: host`
+
+這和 WoL 是二層廣播是同一件事。Docker 預設的 bridge 網路是**三層 NAT**，容器送出去的 magic packet 會被卡在虛擬網路裡，到不了實體乙太網卡。`network_mode: host` 讓容器直接分享宿主的網路堆疊，UpSnap 才能在實體 LAN 介面上送出二層廣播。官方 compose 檔的註解就寫著 `host is required for WOL magic packets`。
+
+裝好後，用 `http://<小裝置的 Tailscale IP>:8090` 就能打開（預設連接埠 8090，可用 `UPSNAP_HTTP_LISTEN` 環境變數改）。想免去「記 IP 加連接埠」、順便拿到 HTTPS，可以用 [Tailscale Serve](/features/serve/) 把 8090 發布成 `https://<MagicDNS 名稱>`。
+
+UpSnap 的 README 有一句重要的安全提醒：**不要把 UpSnap 暴露到公網**——它的關機指令基本上是把指令丟進 shell 執行，被外人碰到等於拿到一台 root shell。這正是用 Tailscale 只開給自己連的價值。
+
+## 路由器內建 WoL
+
+如果發送端想直接用路由器，不少韌體內建 WoL：
+
+- **OpenWrt**：裝 `luci-app-wol` 套件，LuCI 選單會多出 **Services → Wake on LAN**；底層其實也是呼叫 `etherwake`。只想用指令列的話裝 `etherwake` 套件即可。
+- **Asuswrt-Merlin**：華碩韌體（含 Merlin）內建 **Network Tools → Wake on LAN** 介面，可以預存目標裝置、按一下就喚醒。Merlin 本身就是站內〈[華碩路由器裝 Tailscale：Asuswrt-Merlin + Entware](/platforms/asus-merlin/)〉的主角，路由器跑 Tailscale 的同時就能從外面連進它的 WoL 介面。
+
+這條路的好處是不用另外養一台機器；壞處是路由器韌體的 WoL 介面通常比較陽春，沒有 UpSnap 的排程、掃描那類功能。
+
+## BIOS 與作業系統設定
+
+發送端準備好了，目標機器也得先「願意被叫醒」。各家選單路徑不同，這裡只寫一般原則，不代寫廠牌選單：
+
+### BIOS／韌體
+
+進 BIOS（或 UEFI）設定，找 **Wake on LAN**、**Power On By PCI-E**、**Resume by LAN** 這類選項並開啟。有些主機板還要求開啟「ErP／EuP 省電」的例外，或把「待機供電（+5VSB）」保持開啟——這和下面「網卡沒電」的失敗原因有關。
+
+### Windows
+
+兩個常見設定：
+
+- **網路卡進階屬性**：裝置管理員 → 網卡 → 內容 → 進階，把 **Wake on Magic Packet**（或「魔術封包喚醒」）設為啟用；電源管理分頁勾選「允許這個裝置喚醒電腦」和「只允許 magic packet 喚醒電腦」。
+- **快速啟動**：Windows 的「快速啟動」是把關機變成類似休眠的混合狀態，有時會讓網卡進入不回應 magic packet 的狀態。喚醒不順時，到電源選項關閉「快速啟動」再試。
+
+### Linux
+
+用 `ethtool` 檢查與開啟：
+
+```bash
+# 查看目前 Wake-on 狀態
+sudo ethtool eth0 | grep Wake-on
+
+# 開啟 magic packet 喚醒（g = magic packet）
+sudo ethtool -s eth0 wol g
+```
+
+介面名一樣要先確認（`ip link`）。設了之後重開機會失效的話，要寫進網路管理工具的設定或開機腳本。
+
+### Wi-Fi 一般不支援
+
+標準的 WoL 是有線乙太網路的功能。Wi-Fi 雖然有 Wake-on-Wireless-LAN（WoWLAN）這個延伸，但支援度差、不穩定，實務上**別指望用 Wi-Fi 喚醒**——發送端和目標機器都接有線最穩。
+
+## 常見失敗
+
+照做卻喚不醒，多半是下面幾種原因：
+
+- **封包只送到 `tailscale0`**：直接「從外面送 magic packet 給目標機器」，封包進不了實體 LAN。一定要經由一台和目標同網段的發送端代送。
+- **directed broadcast 跨網段失敗**：有人想用 [Subnet Router](/features/subnet-router/) 把 magic packet 送到區網的廣播位址（例如 `192.168.1.255`）。但 subnet router 轉送的是三層封包，而且路由器預設不轉送廣播，這個「directed broadcast」的路走不通。發送端必須實體接在目標那個網段。
+- **睡眠與關機的差別（S3／S4／S5）**：睡眠（S3，suspend to RAM）和關機但插著電（S5，soft off）都能被 WoL 喚醒，休眠（S4）也可以。問題通常不在狀態，而在網卡有沒有電、有沒有開 WoL。
+- **網卡沒電**：電源供應器被切斷、主機板沒有提供待機電源（5VSB）、或 BIOS 開了 ErP 深度省電把待機電源關掉，網卡就完全沒在聽，怎麼送都喚不醒。關機狀態下網卡指示燈有亮，才代表它有待機電源。
+- **介面名或 MAC 位址錯**：`etherwake` 預設 `eth0`，介面名不符就送不到；MAC 位址抓成別張網卡（例如 USB 網卡）也一樣。
+
+## 最小權限的 grants
+
+WoL 小裝置開著 Web 介面（UpSnap）或 SSH，就要限制誰能連。Tailscale 預設全開，但這台機器只該給你自己用。把發送端打上 `tag:wol`，只放行你自己的裝置連它的 Web 介面與 SSH：
+
+```json
+{
+  "tagOwners": {
+    "tag:wol": ["autogroup:admin"]
+  },
+  "grants": [
+    {
+      "src": ["autogroup:admin"],
+      "dst": ["tag:wol"],
+      "ip": ["tcp:443", "tcp:8090", "tcp:22"]
+    }
+  ]
+}
+```
+
+- `tag:wol` 打在小裝置上（用 auth key 或 Admin console 套用，見 [Tags 與 auth key](/admin/tags-auth-keys/)）。
+- 這條 `grants` 只讓管理員自己的裝置（`autogroup:admin`）連到它：`tcp:443` 是 [Tailscale Serve](/features/serve/) 的 HTTPS、`tcp:8090` 是 UpSnap 的原始連接埠、`tcp:22` 是 SSH。不用 Serve 的話，`tcp:443` 可以拿掉。
+- 記得把預設的 `*` 到 `*:*` 全開規則拿掉，這條限制才有作用。語法與拿掉全開規則的注意事項見 [ACL / Grants 入門](/admin/acl-grants/)。
+
+兩個小提醒：grants 只管「走 Tailscale 的流量」，UpSnap 在區網裡送 magic packet 是本機動作，不受影響；另外如果用 [Tailscale SSH](/features/tailscale-ssh/)，連線要同時通過兩種規則——上面這條 `tcp:22` 的網路規則，加上 policy 的 `ssh` 區段裡的 SSH 規則，兩者都要有才會放行。
+
+## Tailscale 本身有沒有 WoL 功能？
+
+沒有可直接使用的功能。查證結果是：
+
+- **官方文件**：沒有 Wake-on-LAN 的文件頁（`tailscale.com/docs/features/wake-on-lan` 回 404）。
+- **官方部落格**（2025 年 8 月的〈Make a dedicated Wake-on-LAN server with Tailscale〉）明說 Tailscale 自己無法喚醒睡著或關機的裝置，要靠另一台裝置代送。
+- **v1.104.1 原始碼**：`feature/wakeonlan` 這個套件裡註冊了一個 PeerAPI 端點 `/v0/wol`（讓其他 tailnet 節點叫這台節點對實體 LAN 送 magic packet），對應的權限是 peer capability `https://tailscale.com/cap/wake-on-lan`；還有一個 `TS_WAKE_MAC` 環境變數，用來回報本機自己的 MAC（對應 [issue #306](https://github.com/tailscale/tailscale/issues/306) 的討論）。但這些是**未對外揭露的內部機制**：沒有 CLI 指令、沒有管理後台按鈕、沒有文件，一般使用者用不到。
+
+所以現階段的結論是：喚醒還是要靠本文這種「同網段小裝置代送」的做法，Tailscale 的角色是把外面安全地接到那台小裝置。
+
+## 喚醒之後
+
+開機只是第一步。喚醒之後通常要接著做遠端桌面或遊戲串流——站內之後會有遠端桌面與 Moonlight／Sunshine 的專文，它們會以本篇當「先把機器叫醒」的前置步驟。
+
+## 參考資料
+
+- [Make a dedicated Wake-on-LAN server with Tailscale（Tailscale 官方部落格，2025-08-19）](https://tailscale.com/blog/wake-on-lan-tailscale-upsnap)
+- [UpSnap（GitHub）](https://github.com/seriousm4x/UpSnap)
+- [etherwake(8)（Debian man page）](https://manpages.debian.org/bookworm/etherwake/etherwake.8.en.html)
+- [wakeonlan(1)（Debian man page）](https://manpages.debian.org/bookworm/wakeonlan/wakeonlan.1.en.html)
+- [Wake-on-LAN（Wikipedia）](https://en.wikipedia.org/wiki/Wake-on-LAN)
+- [Wake-on-LAN packet support（Tailscale issue #306）](https://github.com/tailscale/tailscale/issues/306)
+- [luci-app-wol（OpenWrt 套件）](https://openwrt.org/packages/pkgdata/luci-app-wol)
+- [Asuswrt-Merlin 功能清單（含 WakeOnLan web interface）](https://www.asuswrt-merlin.net/features)
+- [Raspberry Pi 當 subnet router 兼 exit node 的實作（發送端打底）](/use-cases/subnet-router-raspberry-pi/)
+- [華碩路由器裝 Tailscale：Asuswrt-Merlin + Entware](/platforms/asus-merlin/)
+- [ACL / Grants 入門：限制誰能連到哪裡](/admin/acl-grants/)
+- [Tags 與 auth key](/admin/tags-auth-keys/)
+- [Tailscale Serve：把本機服務發布到 tailnet](/features/serve/)
+- [Tailscale SSH](/features/tailscale-ssh/)
