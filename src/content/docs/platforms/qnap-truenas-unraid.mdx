@@ -1,0 +1,208 @@
+---
+title: QNAP、TrueNAS SCALE、Unraid 的安裝與注意事項
+description: 在 QNAP、TrueNAS SCALE、Unraid 三種 NAS 系統上安裝 Tailscale：各自的安裝來源、kernel TUN 與 userspace 的差別、subnet router 與 exit node 支援、更新方式與重開機後的狀態保存，以及和 Synology 的對照
+sidebar:
+  order: 3.5
+  label: QNAP、TrueNAS、Unraid
+---
+
+把 Tailscale 裝在 NAS 上，是最常見的 homelab 用法之一——NAS 本來就常開、有固定位置，很適合當成「回家用的入口」。但 QNAP、TrueNAS SCALE、Unraid 三家對「怎麼跑 Tailscale」的選擇完全不同：一個是官方 App Center 套件、一個是 Docker 映像檔、一個是系統層外掛。這篇把三者的安裝來源、網路底層（kernel TUN vs userspace）、進階功能支援與注意事項一次講清楚，最後給一張對照表。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件整理，以 Tailscale v1.104 為準，未實際驗證。涉及第三方軟體版本：QNAP（QTS 5.x／QuTS hero h5.x）、TrueNAS SCALE（25.10，Docker 型 Apps）、Unraid（7.x）。QNAP 的套件最低版本、CPU 架構與啟動方式另以 Tailscale v1.104.1 原始碼（`release/dist/qnap`）核對。
+
+## 一句話先定位三家的差異
+
+| 平台          | Tailscale 怎麼裝                                                         | 底層                        |
+| ------------- | ------------------------------------------------------------------------ | --------------------------- |
+| QNAP          | App Center 的官方套件（QPKG），以 root 直接跑 `tailscaled`               | 預設 kernel TUN             |
+| TrueNAS SCALE | Apps 目錄的官方 Docker app（`tailscale/tailscale` 映像檔）               | 預設 userspace，可切 kernel |
+| Unraid        | Community Applications 的官方合作外掛（plugin），在系統層跑 `tailscaled` | 預設 kernel TUN             |
+
+一句話：**QNAP 與 Unraid 是「系統層的完整 Tailscale 節點」，TrueNAS SCALE 是「跑在 Docker 裡的 Tailscale 節點」**。這決定了三者能做的事與限制。
+
+## QNAP：App Center 官方套件
+
+### 安裝來源
+
+QNAP 是三者裡最「開箱即用」的：Tailscale 有官方 App Center 套件。在 App Center 的 **Communications** 分類找到 **Tailscale**、安裝、開啟、登入就完成；也可以直接從 [QNAP App Center 網站](https://www.qnap.com/en/app-center/?os=qts&type=Communications)下載。
+
+不想等 App Center 的版本、想用新功能時，可改裝手動下載的 QPKG——從 [Tailscale Packages 伺服器](https://pkgs.tailscale.com/stable/#qpkgs)（stable 或 unstable）下載對應架構的 `.qpkg`，再到 App Center 右上角 **Install Manually** 選檔安裝。官方文件特別說明：這個 QPKG 套件的建置工具由社群（ivokub）貢獻、之後移交給 Tailscale 維護（`tailscale/tailscale-qpkg`）。
+
+### 支援的系統版本與 CPU 架構
+
+- **CPU 架構**：官方文件列的是 **x86-64bit** 與 **arm-64bit** 兩大類。原始碼 `release/dist/qnap/targets.go` 裡實際有 7 種建置目標：`x86`、`x86_ce53xx`（皆 32-bit x86）、`x86_64`（64-bit x86）、`arm-x31`、`arm-x41`、`arm-x19`（32-bit ARM）、`arm_64`（64-bit ARM）。
+- **最低 QTS 版本**：套件的 `qpkg.cfg.in` 明列 `QTS_MINI_VERSION="5.0.0"`，也就是 **QTS 5.0.0／QuTS hero h5.0.0 以上**；QTS 4 不支援（`tailscale-qpkg` 的 issue #122 裡，Tailscale 維護者也直接回「The Tailscale app doesn't run on QTS 4」）。
+
+如果你的機型在 App Center 找不到 Tailscale，多半是架構或版本不符（例如 ARM 32-bit 的舊機型或 QTS 4），官方建議改裝手動 QPKG。
+
+### 網路底層：kernel TUN，不是 userspace
+
+QNAP 的套件以 root 執行 `tailscaled`，啟動腳本（`release/dist/qnap/files/Tailscale/shared/Tailscale.sh`）只有 `--port`、`--statedir`、`--socket`，**沒有** `--tun=userspace-networking`，所以預設走的是 kernel TUN（`tailscale0`）。
+
+這點和 Synology DSM 7 正好相反：DSM 7 的套件沒權限建 TUN，預設只能用 userspace（hybrid）networking、要另外跑 `configure-host` 才能讓 NAS 上的其他服務連出去（見 [DSM 7 讓 NAS 上的其他服務也能連出去](/synology/dsm7-outbound-tun/)）。**QNAP 沒有這個限制**——kernel TUN 直接開好，NAS 上的其他程式可以經由 tailnet 主動連出。
+
+### 支援的功能
+
+官方 QNAP 整合文件列出的功能：
+
+- **Taildrop**：建立一個名為 `Taildrop` 的共用資料夾，其他裝置就能自動傳檔進來。
+- **subnet router**：可以當，但**要在 CLI 設定**（圖形介面沒有對應按鈕）。
+- **exit node**：可以當。
+- node sharing、ACL 管控、不開防火牆埠的遠端存取，都是標準能力。
+
+### 在 QNAP 上跑 CLI
+
+當 subnet router 這類功能要進 CLI。裝完套件後，`tailscale` 執行檔在掛載的 QPKG 路徑下，用 SSH 進 NAS 後執行（路徑用官方文件的寫法）：
+
+```shell
+$(getcfg SHARE_DEF defVolMP -f /etc/config/def_share.info)/.qpkg/Tailscale/tailscale [...]
+```
+
+方便起見，把路徑加進 `$PATH`：
+
+```shell
+export PATH=$PATH:$(getcfg SHARE_DEF defVolMP -f /etc/config/def_share.info)/.qpkg/Tailscale/
+```
+
+之後就能直接 `tailscale status`、`tailscale up --advertise-routes=192.168.1.0/24`。
+
+### `--accept-routes` 的預設值
+
+QNAP 是 Linux，`--accept-routes` 的預設和一般 Linux 一樣是**關**（`false`）。也就是說：QNAP 預設**不會**接受其他 subnet router 廣告的路由——要連到別台宣告的網段，得自己跑 `tailscale set --accept-routes=true`。各平台預設值的完整對照見 [Windows 無人值守模式與當 exit node](/platforms/windows-unattended/) 一文的表格。
+
+### 更新與重開機
+
+- **更新**：App Center 內更新，或手動換新的 QPKG。App Center 的版本通常落後官方 release，追新功能就用手動 QPKG。
+- **狀態保存**：套件用 `--statedir=${QPKG_ROOT}/state`（放在安裝路徑下），身分是持久化的，重開機不會變新節點。這和 Docker 映像檔預設的 `TS_STATE_DIR` 陷阱（沒設就會每次重啟變孤兒節點，見 [Docker 官方映像檔](/platforms/docker/)）不同，QNAP 套件預設就處理好了。
+
+## TrueNAS SCALE：官方 Docker app
+
+### 安裝來源
+
+TrueNAS SCALE 的 Tailscale 是 **Apps 目錄裡的官方 app**，名稱就是 **Tailscale**，背後用 Tailscale 官方維護的 [tailscale/tailscale Docker 映像檔](https://hub.docker.com/r/tailscale/tailscale)。在 Apps 頁籤按 **Check for available apps**、找到 Tailscale 安裝，再進 **Edit** 填設定。
+
+### 設定欄位
+
+官方文件列出的 app 設定欄位（依官方 Tailscale 整合文件）：
+
+| 欄位             | 用途                                                |
+| ---------------- | --------------------------------------------------- |
+| **Auth Key**     | 驗證用 auth key（建議用 auth key 而非互動登入）     |
+| **Hostname**     | 這台 TrueNAS 在 tailnet 上的主機名稱                |
+| **Userspace**    | 勾選即用 userspace networking（預設勾選）           |
+| **Exit node**    | 勾選後當 exit node（仍需到 admin console 核准）     |
+| **Route**        | 廣告的 subnet 網段，例如 `192.168.0.0/24`，可填多個 |
+| **Host Network** | 勾選後用 host network（ZFS replication 情境需要）   |
+
+subnet router 就是填 **Route** 欄位；exit node 就是勾 **Exit node**；兩者設定完都要到 admin console 的 [Machines](https://console.tailscale.com/admin/machines) 頁面勾選核准。
+
+### userspace 預設、kernel 要另外開
+
+TrueNAS 的 app 預設走 **userspace networking**（官方文件叫你「勾選 Userspace」）。userspace 模式的優點是不需要 `/dev/net/tun`、任何環境都能跑；缺點是效能較低、而且**只有這個 app 自己在 tailnet 上**——TrueNAS 主機本身的其他服務不因此進 tailnet。
+
+要讓 TrueNAS 主機本體也走 tailnet（典型情境是**跨機 ZFS replication**），官方文件要你把 **Userspace 取消勾選**、**Host Network 勾選**，然後到 Network → Interfaces 確認 `tailscale0` 介面出現。userspace 與 kernel 的取捨站內已講過，見 [Docker 官方映像檔](/platforms/docker/) 的「userspace 與 kernel 模式」一節。
+
+### 24.10 起改用 Docker，TrueCharts 已不維護
+
+這點是找舊教學時最容易踩的坑：**TrueNAS SCALE 24.10（Electric Eel）把 Apps 後端從 k3s／Helm 換成 Docker Compose**，在那之前的 app 是跑在 k3s 上的 Helm chart。當時社群流行的 **TrueCharts** catalog 也在 24.10 之後宣布不再支援 SCALE（官方已導向遷移）。所以如果你看到「TrueNAS + TrueCharts 裝 Tailscale」的舊教學，那套已經過時——現在直接用官方 Apps 目錄裡的 Tailscale app 就好。
+
+### TrueNAS Core（BSD）不官方支援
+
+Tailscale 官方文件特別註明：推薦用的是 Linux 版的 **TrueNAS SCALE**；**TrueNAS Core**（BSD 版）沒有官方支援，只有社群維護的 FreeBSD 版（在 [FreshPorts](https://www.freshports.org/security/tailscale) 上）。
+
+## Unraid：官方合作的外掛（plugin）
+
+### 安裝來源
+
+Unraid 是**官方合作**的整合，但裝的是一個 **plugin**：進 web 介面的 **Apps** 選單（新機器先裝 Community Applications），搜尋 Tailscale、選 **Tailscale (Plugin)**（注意別選到舊的 Docker 選項），安裝後到 **Settings → Network Services → Tailscale** 做 **Reauthenticate → Connect**。
+
+這個 plugin 由 Derek Kaser（社群暱稱 EDACerton）開發，代表 Unraid 維護——Tailscale 官方文件的說法就是「We recommend the Tailscale (Plugin) which Derek Kaser maintains on behalf of Unraid」；Unraid 7.0.0 的 release notes 也把 Tailscale plugin 與 Tailscale Docker 整合列進正式功能。
+
+### Unraid 7 起內建整合
+
+官方支援是 **Unraid 7.0.0（2025 年 1 月）** 才加的。之前沒有官方整合，使用者裝的是同一個作者的社群 plugin——原始 repo `dkaser/unraid-tailscale` 已在 2025 年 7 月歸檔，之後移進 Lime Technology 的 repos（`unraid/unraid-tailscale`）。所以「社群 plugin 的歷史」很簡單：作者先做社群版，Unraid 7 把他吸收成官方合作。
+
+Unraid 7 還帶了 **原生 ts.net 憑證支援**：plugin 裝好後，https webGUI 可以直接用 Tailscale 憑證，tailnet URL 會顯示在 Settings → Management Access。
+
+### 系統層 plugin vs Docker 容器整合
+
+Unraid 有兩條並存的路，別搞混：
+
+- **Tailscale (Plugin)**：系統層外掛，在 Unraid 主機上以 root 跑 `tailscaled`（kernel TUN）。整台 Unraid——webGUI、SSH、SMB，甚至 **array 停止時**都還能經 Tailscale 連上，這是社群版 plugin 的重要賣點。
+- **Docker 容器整合**：Unraid 7 起可在**個別容器**開 Tailscale，讓每個容器變成 tailnet 上一個獨立裝置（有自己的主機名稱與憑證）。這走 OAuth client + tag，適合把單一服務（如 Pi-hole）分享給沒裝 Tailscale 的人。
+
+兩者的定位差別：**plugin 是「讓整台 Unraid 進 tailnet」**，**Docker 整合是「讓某個容器進 tailnet」**。
+
+### exit node 與 subnet router
+
+- **exit node**：在 plugin 的圖形介面點 **Run as Exit Node**，再到 admin console 核准。
+- **subnet router**：在終端機（主選單的 `>_`）跑：
+
+  ```shell
+  tailscale up --advertise-routes=192.168.1.0/24
+  ```
+
+  多個網段用逗號分隔，再到 admin console 核准。
+
+### 更新與重開機
+
+- **更新**：plugin 走 Unraid 的 plugin 更新機制（Settings 裡的 plugin 更新，或手動）。
+- **狀態保存**：plugin 在系統層跑、狀態持久化，重開機自動恢復，且不依賴 array 是否啟動。
+
+## 三平台對照表
+
+| 項目                     | QNAP                             | TrueNAS SCALE                                            | Unraid                                        |
+| ------------------------ | -------------------------------- | -------------------------------------------------------- | --------------------------------------------- |
+| 安裝來源                 | App Center 官方套件，或手動 QPKG | Apps 目錄官方 app（Docker 映像檔）                       | Community Applications 的 Tailscale (Plugin)  |
+| 是否 kernel TUN          | 是（預設 `tailscale0`）          | 預設 userspace，可取消 Userspace＋Host Network 開 kernel | 是（系統層 plugin）                           |
+| subnet router／exit node | 皆支援；subnet router 需 CLI     | 皆支援（Route／Exit node 欄位）                          | 皆支援；subnet router 需 CLI、exit node 在 UI |
+| Tailscale SSH            | 未查證（官方文件未明列）         | 未查證（官方文件未明列）                                 | 未查證（官方教學影片有列）                    |
+| 更新方式                 | App Center 更新，或手動換 QPKG   | Apps 目錄更新 app                                        | plugin 更新                                   |
+
+## 與 Synology 的比較：outbound 是關鍵差異
+
+三者和 Synology 最大的差別在**「NAS 上的其他服務能不能主動連出去」**：
+
+- **Synology DSM 7**：套件沒 TUN 權限，預設只能「被連入」，要連出得跑 `configure-host` 建立 TUN、還要在套件升級後重跑，防火牆也要放行 `100.64.0.0/10`。完整流程見 [DSM 7 讓 NAS 上的其他服務也能連出去](/synology/dsm7-outbound-tun/)。
+- **QNAP**：套件以 root 跑、kernel TUN 預設開好，**沒有** DSM 7 那套額外步驟。
+- **Unraid**：plugin 是系統層、kernel TUN，整台主機可連出。
+- **TrueNAS SCALE**：預設 userspace，只有 app 本身在 tailnet；要讓主機連出（如 ZFS replication）才需取消 Userspace＋Host Network。
+
+另外，Synology 家的遠端入口有 QuickConnect 這條「不裝 VPN 也能連」的路，QNAP／TrueNAS／Unraid 沒有對應的內建服務，所以裝 Tailscale 對這三家來說更是「預設就該做的遠端存取方案」。QuickConnect 與 Tailscale 的取捨見 [QuickConnect 與 Tailscale：什麼時候用哪一個](/synology/quickconnect-vs-tailscale/)。
+
+## 最小權限的 grants 範例
+
+把 NAS 當 subnet router 或 exit node 之後，誰能用它由 [ACL / Grants](/admin/acl-grants/) 決定——預設全開。建議只開給自己或特定成員。以 exit node 為例（`dst` 用 `autogroup:internet` 表示「經由它上網」，不是寫那台 NAS）：
+
+```json
+{
+  "grants": [
+    {
+      "src": ["autogroup:admin"],
+      "dst": ["autogroup:internet"],
+      "ip": ["*"]
+    }
+  ]
+}
+```
+
+subnet route 的範例（`dst` 放區網網段）與完整語法見 [ACL / Grants 入門](/admin/acl-grants/)、[Subnet Router](/features/subnet-router/) 與 [Exit Node](/features/exit-node/)。另外，NAS 這種常開的裝置建議到 admin console 對它 **Disable key expiry**，避免金鑰 180 天到期後失聯。
+
+## 參考資料
+
+- [Access QNAP NAS from anywhere（Tailscale 官方）](https://tailscale.com/docs/integrations/qnap)
+- [Access TrueNAS SCALE from anywhere（Tailscale 官方）](https://tailscale.com/docs/integrations/truenas)
+- [Access Unraid NAS from anywhere（Tailscale 官方）](https://tailscale.com/docs/integrations/unraid)
+- [Unraid + Tailscale（Unraid 官方）](https://unraid.net/tailscale)
+- [Unraid 7.0.0 Release Notes（Tailscale integration，Unraid 官方）](https://docs.unraid.net/unraid-os/release-notes/7.0.0/#tailscale-integration)
+- [tailscale-qpkg（Tailscale 官方 QPKG 套件 repo）](https://github.com/tailscale/tailscale-qpkg)
+- [Tailscale 原始碼：`release/dist/qnap`（QPKG 套件定義與啟動腳本）](https://github.com/tailscale/tailscale/blob/main/release/dist/qnap)
+- [Tailscale 原始碼：`cmd/tailscaled/tailscaled.go`（預設 TUN 名稱）](https://github.com/tailscale/tailscale/blob/main/cmd/tailscaled/tailscaled.go)
+- [TrueNAS SCALE 24.10 (Electric Eel) Release Notes（TrueNAS 官方，Docker-based Apps）](https://www.truenas.com/docs/scale/24.10/gettingstarted/scalereleasenotes/)
+- [DSM 7 讓 NAS 上的其他服務也能連出去：TUN 與 configure-host](/synology/dsm7-outbound-tun/)
+- [QuickConnect 與 Tailscale：什麼時候用哪一個](/synology/quickconnect-vs-tailscale/)
+- [Docker 官方映像檔：環境變數、userspace 與 Serve 設定檔](/platforms/docker/)
+- [Windows 無人值守模式與當 exit node](/platforms/windows-unattended/)
+- [ACL / Grants 入門](/admin/acl-grants/)
+- [Subnet Router：存取整個區網內沒裝 Tailscale 的設備](/features/subnet-router/)
+- [Exit Node：讓所有流量經由指定裝置出去](/features/exit-node/)
