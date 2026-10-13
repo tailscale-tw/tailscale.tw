@@ -16,16 +16,16 @@ sidebar:
 
 你和朋友要先決定兩台機器怎麼「看得到」彼此，有兩種做法：
 
-- **同一 tailnet**：其中一個人建一個 tailnet（個人方案最多 6 位使用者），邀請對方加入，兩台機器都進同一個 tailnet。最簡單，但會占用使用者名額，對方和他的其他裝置也會出現在這個 tailnet 裡。
-- **裝置分享（node sharing）**：各自保留自己的 tailnet，只把收備份的那台機器分享給對方。對方接受後，那台機器會出現在他的 tailnet 裡，但他看不到你的其他裝置。做法見 [分享裝置給 tailnet 以外的人](/admin/sharing/)。
+- **同一 tailnet**：其中一個人建一個 tailnet（個人方案最多 6 位使用者，見 [方案與限制比較](/getting-started/plans/)），邀請對方加入，兩台機器都進同一個 tailnet。最簡單，但會占用使用者名額，對方和他的其他裝置也會出現在這個 tailnet 裡。
+- **裝置分享（node sharing）**：各自保留自己的 tailnet，只把收備份的那台機器分享給對方。對方接受後，那台機器會出現在他的 tailnet 裡，但他看不到你的其他裝置。做法見 [分享裝置給 tailnet 以外的人](/admin/sharing/)，站上另一個走 node sharing 的實例是 [跟朋友開 Minecraft／Palworld 私服](/use-cases/game-server-with-friends/)。
 
-接下來的原則兩種做法都適用。範例以「同一 tailnet」來說明比較好讀；用裝置分享時，把「你」和「朋友」各自的 policy 分開想，規則寫在自己管理的那一邊即可。
+兩種做法都能做異地備份，但 grants 的寫法不同。下面「核心設計」的範例用 tag 當 `src`／`dst`，那是**同一 tailnet** 專用的寫法；裝置分享時，Tailscale 會把 tag 從分享出去、分享進來的機器上剝掉——帶 tag 的機器不能分享出去，你 tailnet 裡帶 tag 的機器也連不到分享來的機器，所以兩邊機器都**不能打 tag**。這種做法要把規則寫在分享方（朋友）的 policy 裡，用你接受分享的 email（或 `autogroup:shared`）當 `src`、那台機器的 Tailscale IP 當 `dst`，只開備份埠。
 
 ## 核心設計：只開備份埠，其餘全拒
 
 不管用哪個工具，異地備份的存取規則只有一句話：**對方那台機器只開放備份用的那一個埠給你的備份來源，其他全部拒絕**。這樣即使你的備份來源機器被入侵，攻擊者從它身上能連到對方機器的，也就只有備份埠，進不了管理介面、SSH 或其他服務。
 
-假設你在 tailnet 裡放了一台備份來源（`tag:backup`），朋友放了一台收備份的機器（`tag:offsite`），policy 這樣寫：
+假設你在 tailnet 裡放了一台備份來源（`tag:backup`），朋友放了一台收備份的機器（`tag:offsite`），policy 這樣寫（這是「同一 tailnet」的寫法，裝置分享請改用 email／IP，見上一節）：
 
 ```json
 {
@@ -43,7 +43,7 @@ sidebar:
 }
 ```
 
-- 上面四個埠是各做法的備份埠，**實際用哪種就只留哪一個**：PBS 用 `tcp:8007`、rest-server 用 `tcp:8000`、restic 走 SFTP 用 `tcp:22`、群暉 Hyper Backup Vault 用 `tcp:6281`。
+- 上面四個埠是各做法的備份埠，**實際用哪種就只留哪一個**：PBS 用 `tcp:8007`、rest-server 用 `tcp:8000`、restic 走 SFTP 用 `tcp:22`、群暉 Hyper Backup Vault 用 `tcp:6281`（DSM 7 的目的地建立任務時還要暫時放行 `tcp:5000`／`tcp:5001` 給登入驗證，見做法三）。
 - `src` 是你的備份來源，`dst` 是朋友的機器，只有這條放行的連線會通，tailnet 裡的其他人、其他埠一律連不上。
 - 記得拿掉預設的全開規則（`*` 到 `*:*`），否則這條限制沒有作用。grants 的寫法見 [ACL / Grants 入門](/admin/acl-grants/)，tag 的設定見 [Tags 與 auth key](/admin/tags-auth-keys/)。
 
@@ -59,7 +59,7 @@ PBS 的 remote 設定、fingerprint、API token 最小權限、pull／push 兩�
 - **方向**：push（你家推過去）適合朋友只是提供機器、由你主動推；pull（朋友家那台來拉）適合異地那台由你管理。差別在於誰持有誰的 token。
 - **最小權限**：remote 的登入身分用 API token，只給同步需要的角色，不要用完整帳號。
 
-防勒索方面：token 若只給寫入權限、不給 prune／modify，異地那台就無法從「你家」這個方向刪掉備份；真要刪，得用異地那台自己的管理權限。
+防勒索方面，重點在 **push 方向**：push 時 remote 用的 token 是異地那台發的，只給「寫入」權限（`DatastoreBackup`）、不給 prune／modify。這樣你家那台機器（即使被入侵、拿到這支 token）也只能把備份「寫過去」，刪不掉異地那台已有的備份；真要清掉，得用異地那台自己的管理權限。
 
 ## 做法二：restic + rest-server
 
@@ -77,7 +77,7 @@ rest-server --path /srv/restic --append-only --listen :8000
 ```
 
 - **預設埠是 8000**（`--listen` 預設 `:8000`）。
-- 建議同時用 `.htpasswd` 做 HTTP 基本驗證，`htpasswd -B -c .htpasswd <使用者>`，替你的備份來源單獨開一個帳號。append-only 加上這個帳號只授權「寫入」，是最常見的組合。
+- 建議同時用 `.htpasswd` 做 HTTP 基本驗證，替你的備份來源單獨開一個帳號。檔名固定是 `.htpasswd`，要放在**資料目錄的根層**（此例是 `/srv/restic/.htpasswd`），或用 `--htpasswd-file` 指定別的位置；生成指令是 `htpasswd -B -c .htpasswd <使用者>`（在資料目錄下執行）。注意：沒加 `--no-auth` 時，rest-server 若開不了 `.htpasswd` 會**拒絕啟動**，所以檔案要放在它找得到的地方。append-only 加上這個帳號只授權「寫入」，是最常見的組合。
 - 也可以把 `--listen` 綁到 Tailscale IP 或 `tailscale0` 介面，避免 8000 意外暴露到區網或公網。
 
 你這邊初始化 repo 並備份：
@@ -106,7 +106,7 @@ SFTP 後端沒有 append-only：對方機器上的帳號若能寫，就能刪。
 兩邊都是群暉 NAS 的話，用內建的 Hyper Backup 最省事：來源 NAS 跑 Hyper Backup 建立任務，目的地 NAS 裝 **Hyper Backup Vault**，前者把備份推到後者。
 
 - **目的地要裝 Hyper Backup Vault**：它把 NAS 變成其他遠端 NAS 的備份目的地，用來收 `.hbk` 備份檔、顯示任務狀態。
-- **連線埠是 6281**（DSM 7 的 Vault 還會用到 DSM 管理埠 5000／5001；DSM 6 的 Vault 只靠 6281）。走 Tailscale 時 grants 開 `tcp:6281`，路由器上完全不用轉送。
+- **資料埠是 6281**，但 DSM 7 的目的地建立任務時會分兩步：登入驗證走 DSM 管理埠 **5000／5001**，通過後資料才走 **6281**（DSM 7.2 起把登入驗證與資料埠分離；DSM 6 的 Vault 只靠 6281）。所以走 Tailscale 時，建立任務、按「登入」驗證的階段要先放行目的地的 `tcp:5000`／`tcp:5001`，驗證完成後可以再收斂回只留 `tcp:6281`。路由器上則完全不用轉送。
 - 在 Hyper Backup 建立任務時，目的地選「遠端 Synology NAS」，位址填對方 NAS 的 Tailscale IP 或 MagicDNS 名稱，埠填 6281。
 - 建議開啟**傳輸加密**與**用戶端加密**：用戶端加密讓備份檔在對方 NAS 上是加密的，朋友看不到內容；傳輸加密保護途中資料。
 
