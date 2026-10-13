@@ -28,7 +28,7 @@ sidebar:
 tailscale ping <客戶端>
 ```
 
-最後一行是 `via <IP>:<埠>` 代表直連；`via DERP(...)` 則還在中繼。連線方式、為什麼會走 DERP、怎麼改善，見 [直連與 DERP 中繼](/troubleshooting/direct-vs-derp/)。行動網路、公司或飯店的防火牆常常擋 UDP，這類環境要特別注意。
+最後一行是 `via <IP>:<埠>` 代表直連；`via DERP(...)` 則還在中繼；v1.104 起還可能印出 `via peer-relay(...)`（經由其他節點轉送的 Peer Relay），同樣不算直連。連線方式、為什麼會走 DERP、怎麼改善，見 [直連與 DERP 中繼](/troubleshooting/direct-vs-derp/)。行動網路、公司或飯店的防火牆常常擋 UDP，這類環境要特別注意。
 
 ## 1. 在遊戲電腦上裝 Sunshine
 
@@ -47,16 +47,18 @@ Sunshine 預設綁定所有網路介面（`bind_address` 留空＝`0.0.0.0`）�
 
 Sunshine 預設用一組固定的埠（可在 Web UI 的 **Network** 改基準埠，其他埠會跟著平移）：
 
-| 埠                 | 協定     | 用途                                 |
-| ------------------ | -------- | ------------------------------------ |
-| 47984              | TCP      | HTTPS，Moonlight 配對與串流          |
-| 47989              | TCP      | HTTP（基準埠）                       |
-| 47990              | TCP      | Web UI（HTTPS）                      |
-| 48010              | TCP／UDP | RTSP 控制                            |
-| 47998–48000、48002 | UDP      | 影片、音訊與控制串流                 |
-| 5353               | UDP      | mDNS，區網自動發現（tailnet 用不到） |
+| 埠         | 協定 | 用途                                 |
+| ---------- | ---- | ------------------------------------ |
+| 47984      | TCP  | HTTPS，Moonlight 配對與串流          |
+| 47989      | TCP  | HTTP（基準埠）                       |
+| 47990      | TCP  | Web UI（HTTPS）                      |
+| 48010      | TCP  | RTSP 控制                            |
+| 47998–48000 | UDP  | 影片、音訊與控制串流                 |
+| 5353       | UDP  | mDNS，區網自動發現（tailnet 用不到） |
 
 這些埠在 tailnet 內使用即可，不用對外開。**47990 是唯一需要特別控管的**：它是管理介面。
+
+> **關於 48002 與 UDP 48010**：這兩個埠出現在 Moonlight 官方文件的「手動轉發」與防火牆清單裡，但那是給 GeForce Experience（GameStream 舊協定）相容用的。Sunshine 本身不監聽 UDP 48002，RTSP 的 48010 也是走 TCP；Sunshine 原始碼的 UPnP 轉發清單就只有上表的 TCP 47984／47989／48010 與 UDP 47998–48000。所以走 Sunshine 時不需要開這兩個埠，只要讓上表列出的埠在 tailnet 內可達即可。
 
 Sunshine 有個 `origin_web_ui_allowed` 設定，控制誰能開 Web UI，預設是 `lan`（只允許區域網路裝置）。這裡有個容易誤判的細節：Sunshine 原始碼把 Tailscale 的 `100.64.0.0/10` 也歸在「LAN」範圍內，所以 tailnet 裝置**預設就能開到 Web UI**。換句話說，`lan` 擋的是公網，擋不住你自己的 tailnet；要限制只能靠 Tailscale 的 grants（見最後一節）。
 
@@ -68,6 +70,8 @@ Moonlight 的自動發現靠 mDNS 廣播，只在同一個實體區網裡有效�
 2. 輸入遊戲電腦的 **Tailscale IP**（`100.x.y.z`）或 **MagicDNS 名稱**（例如 `gaming-pc.tailxxxxx.ts.net`）。
 
 名稱比 IP 好記，兩者都行。iOS／tvOS 的 Moonlight 依 Apple 準則，必須先在**家裡的區網**配對過一次，之後才能改走 Tailscale。
+
+填 IP 最直接；用 MagicDNS 名稱的話有一點要注意：MagicDNS 名稱同時會回 IPv4（100.x）與 IPv6（`fd7a:115c:a1e0::/48`）位址，而 Sunshine 的 `address_family` 預設是 `ipv4`，不綁 IPv6。若 Moonlight 先嘗試 IPv6 位址，會連不上、要等它 fallback 回 IPv4。遇到連不上時，可在 Sunshine 的 Web UI 把 **Network** 的 `address_family` 改成 `both`，或直接改用 100.x IP。
 
 ## 4. 畫質與位元率的起點
 
@@ -96,7 +100,7 @@ Moonlight 從 Google Play 安裝，再裝 Tailscale。掌機（或手機）的�
 
 ## grants：最小權限
 
-不要用預設全開的規則。給遊戲電腦一個 tag，只開放 Sunshine 需要的埠，Web UI 的 47990 只給管理員：
+不要用預設全開的規則。給遊戲電腦一個 tag，只開放 Sunshine 需要的埠，Web UI 的 47990 只給管理員。以下是要**加進既有 policy 的片段**，不是整份 policy：
 
 ```json
 {
@@ -113,9 +117,7 @@ Moonlight 從 Google Play 安裝，再裝 Tailscale。掌機（或手機）的�
         "tcp:48010",
         "udp:47998",
         "udp:47999",
-        "udp:48000",
-        "udp:48002",
-        "udp:48010"
+        "udp:48000"
       ]
     },
     {
