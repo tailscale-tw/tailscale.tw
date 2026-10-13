@@ -8,7 +8,7 @@ sidebar:
 
 想跟朋友一起玩 Minecraft 或 Palworld，又不放心把伺服器公開到網際網路上。傳統做法是在路由器開埠轉送（port forwarding），等於把遊戲埠暴露給全世界，任何人都掃得到；改用 Tailscale 的**裝置分享**（node sharing），可以只把那一台遊戲伺服器分享給特定朋友，不對外開任何埠，對方也只看到那一台機器、看不到你 tailnet 裡的其他裝置。
 
-> 本文依 2026 年 10 月的 Tailscale 官方文件整理，以 Tailscale v1.104 為準。遊戲埠號以 Minecraft Wiki 與 Palworld 官方伺服器文件為準；內容未實際架設驗證。
+> 本文依 2026 年 10 月的 Tailscale 官方文件整理，以 Tailscale v1.104 為準。遊戲埠號以 Minecraft Wiki 與 Palworld 官方伺服器文件為準（Palworld 的 Steam 查詢埠 27015/UDP 官方文件未列，依 loef.dev 的社群文件補註）；內容未實際架設驗證。
 
 裝置分享的完整流程、限制與「和邀請使用者進 tailnet 的差異」，站上已有專文 [分享裝置給 tailnet 以外的人](/admin/sharing/)。這篇聚焦在「遊戲私服」這個情境，重複的部分只帶重點。
 
@@ -31,7 +31,7 @@ sidebar:
 | Minecraft Bedrock | `19132` | UDP  | Bedrock Dedicated Server 預設監聽埠  |
 | Palworld          | `8211`  | UDP  | 啟動參數 `-port=8211` 可改           |
 
-Palworld 還有一個 Steam 查詢埠 `27015/UDP`，用途是讓伺服器出現在 Steam 的社群伺服器瀏覽器；走 Tailscale 的私服不需要公開列表，朋友直接輸入 IP 連線即可，這個埠可以不必開。
+Palworld 還有一個 Steam 查詢埠 `27015/UDP`，用途是讓伺服器出現在 Steam 的社群伺服器瀏覽器（見 [palworld-server-docker 文件](https://github.com/thijsvanloef/palworld-server-docker)）；走 Tailscale 的私服不需要公開列表，朋友直接輸入 IP 連線即可，這個埠可以不必開。
 
 ## 架好遊戲伺服器
 
@@ -88,7 +88,7 @@ sudo ufw enable
 
 有兩種輸入方式：
 
-- **Tailscale IP**（最穩）：遊戲伺服器的 `100.x.y.z`，在 [Machines](https://console.tailscale.com/admin/machines) 頁面或那台機器上 `tailscale ip` 查。Minecraft 直接輸入 IP，Java 版可只填 IP（預設埠 25565），Bedrock 版要連埠一起，例如 `100.101.102.103:19132`。
+- **Tailscale IP**（最穩）：遊戲伺服器的 `100.x.y.z`，在 [Machines](https://console.tailscale.com/admin/machines) 頁面或那台機器上 `tailscale ip` 查。Minecraft 直接輸入 IP，Java 版可只填 IP（預設埠 25565）；Bedrock 版的「加入伺服器」介面是 Address 與 Port 兩個分開欄位，**Server Address** 填 IP、**Port** 欄填 `19132`（留預設值即可，除非伺服器改用別的埠），不要把 `:19132` 加在 IP 後面貼進 Address 欄。
 - **MagicDNS 名稱**：分享出去的機器只能用**完整名稱** `<機器名稱>.<你的 tailnet 名稱>.ts.net`，例如 `minecraft-server.yak-bebop.ts.net`，不能只打 `minecraft-server`。朋友自己的 tailnet 也要開 [MagicDNS](/features/magicdns/) 才能用名稱連線。
 
 一般先給 Tailscale IP，熟了再換 MagicDNS 名稱比較省事。
@@ -122,6 +122,7 @@ sudo ufw enable
 幾點說明：
 
 - 遊戲伺服器建議打上 tag（`tag:game`）。tag 裝置的金鑰不會過期，伺服器不用每隔一陣子重登入，做法見 [Tags 與 auth key](/admin/tags-auth-keys/)。
+- 不想打 tag 也沒關係：把上面兩個規則的 `dst` 從 `["tag:game"]` 換成遊戲伺服器的 Tailscale IP（例如 `["100.101.102.103"]`），其餘不用動。
 - `autogroup:shared` 代表所有接受了裝置分享的外部使用者；想對單一朋友更精準，就把 `src` 換成他的 email。
 - 分享的使用者本來就只連得到分享給他的機器，`dst` 寫 `tag:game` 或 `*` 差異不大，`ip` 才是真正把範圍限縮到遊戲埠的地方。
 - 小心 `"src": ["*"]` 這類規則：它會連被分享的使用者一起套用。站內規則用 `autogroup:member`（不含只接受裝置分享的人）比較安全，語法見 [ACL / Grants 入門](/admin/acl-grants/)。
@@ -156,5 +157,6 @@ sudo ufw enable
 - [Tutorial: Setting up a Java Edition server（Minecraft Wiki）](https://minecraft.wiki/w/Tutorial:Setting_up_a_Java_Edition_server)
 - [Tutorial: Setting up a Bedrock Edition server（Minecraft Wiki）](https://minecraft.wiki/w/Tutorial:Setting_up_a_Bedrock_Edition_server)
 - [Configure the server（Palworld 官方伺服器文件）](https://docs.palworldgame.com/settings-and-operation/arguments)
+- [palworld-server-docker（loef.dev 社群文件，列出 27015/UDP 查詢埠）](https://github.com/thijsvanloef/palworld-server-docker)
 - [分享裝置給 tailnet 以外的人](/admin/sharing/)
 - [ACL / Grants 入門](/admin/acl-grants/)
