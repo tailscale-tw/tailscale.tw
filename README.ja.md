@@ -1,4 +1,4 @@
-# Tailscale 台灣（Tailscale Taiwan）
+# tailscale.tw 社群筆記（tailscale.tw community notes）
 
 [正體中文](README.md) | [English](README.en.md) | **日本語**
 
@@ -6,7 +6,9 @@
 
 なお、本サイトの記事は台灣正體中文（台湾で使われる繁体字中国語）で書かれています。記事本文は日本語ではありませんのでご注意ください。この README は日本語の読者向けの案内です。
 
-本サイトはコミュニティが運営する非公式のドキュメントで、Tailscale Inc. とは関係ありません。公式ドキュメントは [tailscale.com/kb](https://tailscale.com/kb) をご覧ください。
+> This is an unofficial community site. It is not affiliated with, endorsed by, or sponsored by Tailscale Inc. "Tailscale" is a trademark of Tailscale Inc.
+>
+> 本サイトは非公式のコミュニティサイトで、Tailscale Inc. とは提携関係にありません。Tailscale は Tailscale Inc. の商標です。公式ドキュメントは [tailscale.com/docs](https://tailscale.com/docs) をご覧ください。
 
 ## コンテンツ
 

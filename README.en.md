@@ -1,10 +1,10 @@
-# Tailscale 台灣 (Tailscale Taiwan)
+# tailscale.tw 社群筆記 (tailscale.tw community notes)
 
 [正體中文](README.md) | **English** | [日本語](README.ja.md)
 
 Source code for [tailscale.tw](https://tailscale.tw), a set of Tailscale notes and tutorials. Articles are written in Traditional Chinese (Taiwan, 台灣正體中文), covering getting started, core features, access control, PVE, Synology, performance tuning, and real-world use cases.
 
-This is an unofficial, community-maintained site and is not affiliated with Tailscale Inc. For official documentation, see [tailscale.com/kb](https://tailscale.com/kb).
+> This is an unofficial community site. It is not affiliated with, endorsed by, or sponsored by Tailscale Inc. "Tailscale" is a trademark of Tailscale Inc. For official documentation, see [tailscale.com/docs](https://tailscale.com/docs).
 
 ## Contents
 

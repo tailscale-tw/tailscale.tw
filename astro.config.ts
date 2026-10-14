@@ -10,13 +10,13 @@ const nimbusConfig = defineNimbusConfig({
   // Canonical origin. Drives canonical URLs, absolute OG image URLs,
   // robots.txt, sitemap, and the links in /llms.txt.
   site: "https://tailscale.tw",
-  title: "Tailscale 台灣",
+  title: "tailscale.tw 社群筆記",
   description:
     "分享 Tailscale 在 PVE 與 Synology 上的使用心得、小祕技與安裝教學。",
   locale: "zh-TW",
   github: "https://github.com/tailscale-tw/tailscale.tw",
   editPattern: "https://github.com/tailscale-tw/tailscale.tw/edit/main/{path}",
-  socialImageAlt: "Tailscale 台灣文件站預覽圖",
+  socialImageAlt: "tailscale.tw 社群筆記預覽圖",
 });
 
 export default defineConfig({

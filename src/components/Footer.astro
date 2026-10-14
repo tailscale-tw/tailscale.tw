@@ -1,9 +1,12 @@
 ---
 /**
  * Footer — Monospace (TUI) 風格頁尾：點狀分隔線 + 連結欄 + 版權行。
- * 內容：友站連結（Tailscale Community / YouTube）、GitHub repo。
+ * 內容：友站連結（Tailscale Community / YouTube）、GitHub repo、非官方聲明。
  */
 import { config } from "virtual:nimbus/config";
+import { withBase } from "@cloudflare/nimbus-docs/runtime";
+
+const aboutHref = withBase("/about/", import.meta.env.BASE_URL);
 
 const year = new Date().getFullYear();
 
@@ -48,6 +51,10 @@ const columns = [
       </div>
     ))}
   </div>
+  <p class="disclaimer">
+    非官方社群網站，與 Tailscale Inc. 無隸屬關係。Tailscale 為 Tailscale Inc.
+    之商標。<a href={aboutHref}>關於本站</a>
+  </p>
   <p class="copy">
     © {year} {config.title}. 字型：Sarasa Mono TC（SIL OFL 1.1）。
   </p>
@@ -99,8 +106,19 @@ const columns = [
     text-underline-offset: 4px;
   }
 
-  .copy {
+  .disclaimer {
     margin: calc(var(--nb-line) * 2) 0 0;
+    color: var(--nb-foreground);
+  }
+
+  .disclaimer a {
+    color: var(--nb-primary);
+    text-decoration: underline 1px var(--nb-ring);
+    text-underline-offset: 4px;
+  }
+
+  .copy {
+    margin: 0;
     color: var(--nb-muted-foreground);
   }
 </style>
