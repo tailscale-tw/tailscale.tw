@@ -40,6 +40,11 @@ App connectors 適用[所有方案](https://tailscale.com/pricing)。
 
 App connector 最接近「**只對特定網域生效的 Exit Node**」：範圍比 Exit Node 小，卻比 Subnet Router 好用（不用自己維護網段與 IP）。三者的詳細差異見 [Subnet Router](/features/subnet-router/) 與 [Exit Node](/features/exit-node/)。
 
+兩個官方文件特別提醒的路由細節：
+
+- **與 Exit Node 併用時**：即使裝置掛了 exit node，連到已設定網域的流量仍會**先經 app connector**、再連到目標網域，而不是走 exit node（官方原文 "This routing occurs even when the originating device uses an exit node"）。
+- **多個網域共用同一個 IP 時**：只要其中一個網域在 connector 的清單裡，通往那個 IP 的**所有**連線都會走 connector，就算直接用 IP 連也一樣。服務與其他網站共用 CDN 或託管 IP 時，要一併把這點納入考量。
+
 ## 前置條件
 
 要架 app connector，你需要：
@@ -115,7 +120,7 @@ sudo sysctl -p /etc/sysctl.d/99-tailscale.conf
 - **`grants`** 有兩條，缺一不可：
   - 第一條開 `tcp:53`、`udp:53` 到 app connector tag。這是讓裝置能用 app connector 的 PeerAPI 做 DoH 查詢、發現「這個網域該走哪台 connector」的**最小權限**。
   - 第二條開 `autogroup:internet`，讓裝置能存取 app connector 廣告出來的路由（也就是那些網域解析出的 IP）。**注意**：官方文件提醒，`autogroup:internet` 同時也會放行 tailnet 裡的 Exit Node——如果你不需要 exit node，這條會比你想要的寬一些。
-- **`nodeAttrs`**：把網域對應到 connector tag。`domains` 是這個 app connector 負責的網域；`connectors` 是實際轉送的 tag。多個網域用逗號分開，也可以用萬用字元（`*.github.com`），但**不能**用 TLD 層級的萬用字元（`*.com` 不行）。
+- **`nodeAttrs`**：把網域對應到 connector tag。`domains` 是這個 app connector 負責的網域，以 JSON 陣列逐項列出；`connectors` 是實際轉送的 tag。可以用萬用字元（`*.github.com`），但**不能**用 TLD 層級的萬用字元（`*.com` 不行）。
 
 `grants` 的寫法見 [ACL / Grants 入門](/admin/acl-grants/)，tag 與 `tagOwners` 見 [Tags 與 auth key](/admin/tags-auth-keys/)。
 
@@ -167,7 +172,7 @@ app connector 廣告的路由，和 Subnet Router 一樣要用戶端「接受路
 sudo tailscale set --accept-routes
 ```
 
-**Linux 用戶端預設不接受路由**，容易漏掉。Android、iOS、macOS、tvOS、Windows 都預設自動接受。漏開的話，Linux 裝置連那些網域時不會走 app connector。若希望強制用戶端不能關掉這個設定，可以用系統政策（MDM）的 `UseTailscaleSubnets` 鎖定，見官方 [Manage client preferences](https://tailscale.com/docs/features/client/manage-preferences)。
+**Linux 用戶端預設不接受路由**，容易漏掉。Android、iOS、macOS、tvOS、Windows 都預設自動接受。漏開的話，Linux 裝置連那些網域時不會走 app connector。若希望強制用戶端不能關掉這個設定，可以用系統政策（MDM）的 `UseTailscaleSubnets` 鎖定，見官方 [Customize Tailscale using system policies](https://tailscale.com/docs/features/tailscale-system-policies#set-whether-the-device-accepts-tailscale-subnets)。
 
 ## 家用情境：動態 IP 讓 allowlist 打折扣
 
