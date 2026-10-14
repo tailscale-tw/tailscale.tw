@@ -179,11 +179,11 @@ tailscale ssh ubuntu@my-server
 - 瀏覽器會以 WebAssembly 跑一個 Tailscale 用戶端，在 tailnet 裡成為一台暫時（ephemeral）的節點，名稱像 `tailscale-ssh-console-alice-example-com-xxxxx`，關掉後自動移除。
 - 連線全程經過 DERP relay，仍是端對端加密。
 
-看不到 SSH 選項，代表那台機器沒開 Tailscale SSH，或 policy 不允許你連。
+看不到 SSH 選項，代表那台機器沒開 Tailscale SSH，或 policy 不允許你連。完整的運作原理與安全限制見 [Tailscale SSH 工作階段錄影與瀏覽器 SSH](/features/ssh-session-recording/)。
 
 ## Session recording
 
-Tailscale 曾提供把 Tailscale SSH session 錄下來、串流到 tailnet 內錄影節點（`tsrecorder`）的功能。官方已**不再提供**這個做法給新使用者，既有使用者的支援預計在 2027 年 8 月結束，之後改由 Tailscale PAM 提供 session 紀錄與特權存取管理。個人使用通常用不到，有稽核需求再參考官方文件。
+Tailscale 曾提供把 Tailscale SSH session 錄下來、串流到 tailnet 內錄影節點（`tsrecorder`）的功能。官方已**不再提供**這個做法給新使用者，既有使用者的支援預計在 2027 年 8 月結束，之後改由 Tailscale PAM 提供 session 紀錄與特權存取管理。個人使用通常用不到，有稽核需求再參考官方文件。運作原理、`tsrecorder` 的設定方式與後續的 Tailscale PAM，見 [Tailscale SSH 工作階段錄影與瀏覽器 SSH](/features/ssh-session-recording/)。
 
 ## 關閉
 

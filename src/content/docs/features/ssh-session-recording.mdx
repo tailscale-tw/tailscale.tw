@@ -1,0 +1,221 @@
+---
+title: Tailscale SSH 工作階段錄影與瀏覽器 SSH
+description: 兩個建立在 Tailscale SSH 之上的功能：把 SSH 工作階段錄成 asciinema 格式的工作階段錄影（tsrecorder，已停止提供給新使用者），以及在 Admin console 直接用瀏覽器開 SSH 的 SSH Console。含運作原理、設定步驟、最小權限 grants 與限制
+sidebar:
+  order: 7.5
+  label: SSH 工作階段錄影
+---
+
+裝了 [Tailscale SSH](/features/tailscale-ssh/) 之後，有兩個延伸功能都和「記錄或遠端操作 SSH 工作階段」有關，但用途完全不同：
+
+- **工作階段錄影（session recording）**：把 Tailscale SSH 的畫面串流到 tailnet 內一台自己架的 recorder，存成 asciinema 格式，供日後稽核、重播。這篇會誠實說明它目前的上線狀態。
+- **瀏覽器 SSH（SSH Console）**：在 Admin console 的 Machines 頁面直接開一個瀏覽器裡的 SSH 視窗，適合手邊的裝置沒裝 Tailscale、或只想快速登進去操作的情境。
+
+兩者都只對「走 Tailscale SSH」的連線生效，所以請先讀過 [Tailscale SSH](/features/tailscale-ssh/)，再回來看這篇。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件整理，以 Tailscale v1.104 為準。工作階段錄影（`tsrecorder`）與瀏覽器 SSH（SSH Console）官方都標示 beta；工作階段錄影已停止提供給新使用者（既有支援到 2027 年 8 月）。本文的設定步驟屬文件整理、未實機驗證，Docker（`tailscale/tsrecorder:stable`）與 `asciinema` 未釘版本。上線狀態與方案限制可能變動，動手前請重新查官方文件。
+
+## 兩個功能的差別
+
+|                | 工作階段錄影                                                 | 瀏覽器 SSH                            |
+| -------------- | ------------------------------------------------------------ | ------------------------------------- |
+| 官方名稱       | Tailscale SSH session recording                              | Tailscale SSH Console                 |
+| 目的           | 把 SSH 畫面錄下來稽核、重播                                  | 在瀏覽器裡操作 SSH                    |
+| 上線狀態       | beta；已停止提供給新使用者（既有使用者到 2027 年 8 月）      | beta                                  |
+| 方案           | 官方文件標示：Personal、Enterprise（不含 Standard／Premium） | 所有方案                              |
+| 誰能設定／使用 | Owner、Admin、Network admin                                  | Owner、Admin、IT admin、Network admin |
+| 額外組件       | 自己架一台 recorder（`tsrecorder`）                          | 無，瀏覽器就是節點                    |
+
+## 工作階段錄影
+
+### 上線狀態：已停止提供給新使用者
+
+Tailscale 已**不再**透過 `tsrecorder` 提供工作階段錄影給新使用者；既有使用者的支援預計到 **2027 年 8 月**結束，之後改由 **Tailscale PAM** 提供 session 紀錄與特權存取管理。也就是說，如果你現在才要開始用，官方文件開頭就放著這則 deprecation 公告，`tsrecorder` 這條路等於關門了。
+
+需要工作階段錄影與稽核時，官方目前的建議是：
+
+- **Tailscale PAM**（beta）：在 Admin console 的 Sessions 頁面查看連線紀錄；SSH 服務可開啟錄影，用 video replay、full text、events 檢視 session 內容。
+- 或聯絡 Tailscale Sales。
+
+本文接下來的設定步驟，是依官方文件整理的**歷史做法**，未實機驗證，主要讓你了解運作原理，以及既有使用者或自架情境下的做法。
+
+### 運作方式
+
+- 錄影從**目的節點**（被連的 SSH 伺服器）串流到 tailnet 內一台 **recorder** 節點。recorder 是用 `tsnet` 寫成的二進位檔，部署成 Docker 容器。
+- 流量走 tailnet，端對端加密，Tailscale 看不到內容。
+- 錄影存成 **asciinema** 格式：一行一筆的 JSON，可直接當文字搜尋，也能用 `asciinema` CLI 或 recorder 內建網頁重播。
+- recorder 可以把錄影存在主機檔案系統，也可以直接上傳到 Amazon S3 或其他 S3 相容儲存。
+
+### 只錄輸出，不錄按鍵
+
+官方文件寫得很清楚：錄影記錄的是「終端機畫面上出現的所有文字」，也就是**輸出（output），不記錄按鍵本身（keystroke）**。但有兩個細節：
+
+- 一般打字時，終端機預設會把輸入的字元**回顯（echo）**到畫面上。這些回顯的字元屬於「輸出」，所以會出現在錄影裡——你輸入的指令通常還是看得見。
+- 真正錄不到的是**不回顯的輸入**，例如在密碼提示下輸入的字元。畫面沒出現的字，錄影裡就沒有。
+- 使用二進位協定時（例如舊版的 `scp`），錄影會把傳送的二進位資料也錄進去，可能包含敏感內容。
+
+換句話說，錄影是「螢幕錄影」而非「鍵盤側錄」；但螢幕上出現過的密碼、token 等敏感字，一樣會進錄影檔。
+
+### 自己架 recorder（文件整理）
+
+前置條件：Tailscale SSH 已設定好，且你是 tailnet 的 Owner、Admin 或 Network admin。
+
+#### 1. 建 tag 與 auth key
+
+recorder 一定要有 tag，建議開一個專用 tag：
+
+```json
+"tagOwners": {
+  "tag:session-recorder": ["autogroup:admin"]
+}
+```
+
+再到 Admin console 的 Keys 頁面建一把 auth key、掛上這個 tag（tailnet 有 device approval 就用 pre-approved key）。
+
+#### 2. 部署 recorder
+
+```bash
+export TS_AUTHKEY=<你的-auth-key>
+docker pull tailscale/tsrecorder:stable
+
+docker run --name tsrecorder --rm -it \
+  -e TS_AUTHKEY=$TS_AUTHKEY \
+  -v $HOME/tsrecorder:/data \
+  tailscale/tsrecorder:stable \
+  /tsrecorder --dst=/data/recordings --statedir=/data/state --ui
+```
+
+`--dst` 必填，指定錄影存放位置（本機路徑或 S3 region URL）。其他常用旗標：
+
+| 旗標                                       | 用途                                                                |
+| ------------------------------------------ | ------------------------------------------------------------------- |
+| `--dst`（必填）                            | 錄影存放位置，本機路徑或 S3 region URL（環境變數 `TSRECORDER_DST`） |
+| `--statedir`                               | 內部狀態目錄；未指定 `--state` 時必填                               |
+| `--state`                                  | 指向 state 檔，跨容器重啟保存節點身分（例如掛在 persistent volume） |
+| `--ui`                                     | 開啟內建網頁 UI（聽 443 埠）；啟用前 tailnet 要先開 HTTPS           |
+| `--hostname`                               | recorder 節點名稱，預設 `recorder`                                  |
+| `--access-key`／`--secret-key`／`--bucket` | 用 S3 存放時的 AWS 憑證與 bucket                                    |
+
+recorder 的 80 埠用來接收錄影，443 埠是網頁 UI。recorder 用 `tsnet` 加入 tailnet，所以跑 Docker 的主機**不必**是 tailnet 成員。使用 Tailscale 的 Kubernetes operator 時，也可以改用 `Recorder` Custom Resource 部署。
+
+#### 3. 在 policy 開啟錄影
+
+在 `ssh` 規則裡加上 `recorder` 欄位，指定 recorder 的 tag：
+
+```json
+{
+  "action": "accept",
+  "src": ["group:admins"],
+  "dst": ["tag:server"],
+  "users": ["ubuntu"],
+  "recorder": ["tag:session-recorder"],
+  "enforceRecorder": false
+}
+```
+
+- 沒寫 `recorder` 的規則，session 就不錄。
+- `enforceRecorder` 預設 `false`（fail open）：recorder 連不上時，SSH 照常放行，只是那段沒錄到。設 `true`（fail closed）則 recorder 不可用時**拒絕** SSH 連線，並中斷已在錄的 session。
+- 同一條連線同時符合多條規則、`enforceRecorder` 值不同時，以 policy 檔案裡**先出現**的那條為準。
+
+### 最小權限範例
+
+```json
+{
+  "groups": {
+    "group:admins": ["alice@example.com"]
+  },
+  "tagOwners": {
+    "tag:server": ["group:admins"],
+    "tag:session-recorder": ["group:admins"]
+  },
+  "grants": [
+    // 網路層：admins 才能 SSH 到 tag:server（22 埠）
+    {
+      "src": ["group:admins"],
+      "dst": ["tag:server"],
+      "ip": ["22"]
+    },
+    // 只有開了 --ui 才需要：限制誰能開 recorder 的網頁 UI（443 埠）
+    {
+      "src": ["group:admins"],
+      "dst": ["tag:session-recorder"],
+      "ip": ["tcp:443"]
+    }
+  ],
+  "ssh": [
+    {
+      "action": "accept",
+      "src": ["group:admins"],
+      "dst": ["tag:server"],
+      "users": ["ubuntu"],
+      "recorder": ["tag:session-recorder"],
+      "enforceRecorder": true
+    }
+  ]
+}
+```
+
+SSH 伺服器把錄影送到 recorder 的 80 埠，這條由 Tailscale 自動放行，**不用寫進 grants**。要自己寫的是：誰能 SSH 到伺服器（22 埠），以及——如果開了網頁 UI——誰能開 443 埠。後者別設成全 tailnet 都開，否則任何人都能看錄影。規則寫法見 [ACL / Grants 入門](/admin/acl-grants/)。
+
+### 查看錄影
+
+錄影存在你指定的目錄，路徑是 `/dir/<stable-node-id>/<timestamp>.cast`。
+
+- 開 `--ui`：瀏覽器開 `https://{recorder-name}.{tailnet-dns-name}.ts.net`。
+- CLI：`cat <session-recording.cast>` 直接看原始 JSON，`asciinema play <session-recording.cast>` 重播。
+- 搜尋：asciinema 是文字格式，`grep "sudo" <session-recording.cast>` 就能找關鍵字。
+
+recorder 磁碟滿了會存不下錄影，導致 session 被中斷、新 session 被拒。要清出空間或加儲存，再把 policy 的 `recorder` 欄位加回去。
+
+### 限制
+
+- 只錄 **Tailscale SSH** 的 session，其他走 tailnet 的 SSH 不錄。
+- 錄影從**目的節點**串流，不能改成從來源節點串流。
+- 只錄輸出、不錄輸入；輸出裡的敏感資料（例如螢幕上顯示的密碼、token）也會一併錄進去。
+- 生產環境可部署多台 recorder 做 failover（見官方文件）。
+
+## 瀏覽器 SSH（SSH Console）
+
+### 運作方式
+
+在 Admin console 的 Machines 頁面對某台機器按 SSH 按鈕，瀏覽器就開出一個 SSH 視窗，不必在裝置上裝 SSH 用戶端。
+
+背後是 **WebAssembly**：瀏覽器裡跑 Tailscale 用戶端、WireGuard、userspace networking stack 和一個 SSH client。開 session 時，Tailscale 用你的身分產生一把 ephemeral auth key，建一台暫時（ephemeral）節點，名稱像 `tailscale-ssh-console-alice-example-com-12345abcde`；session 結束後這台節點自動移除。
+
+- 連線端對端加密，Tailscale 讀不到內容。
+- 流量全部經 DERP relay，不是直連；DERP 也無法解密內容。
+
+### 誰能用、怎麼開
+
+- beta，**所有方案**都能使用。
+- 只有 **Owner、Admin、IT admin、Network admin** 能用，一般 Member 看不到這個選項。
+
+步驟：
+
+1. 到 Machines 頁面找到要連的機器。
+2. 右邊選單選 **SSH to machine**（或 hover 後按 **SSH**）。
+3. 選本機帳號；下拉沒列到的帳號選 **Other** 手動輸入。
+4. 依提示重新驗證身分（每個新 session 都要重新驗證）。
+5. 新視窗標題 `Tailscale — SSH to <機器名>` 就是 SSH session。
+
+看不到 SSH 按鈕，代表那台機器沒開 Tailscale SSH，或 policy 不允許你連。
+
+### 安全與限制
+
+- 每次開 session 會依序「建 auth key → 建 ephemeral 節點 → 授權 → 撤銷 auth key」，這些事件都進 configuration audit logs。
+- 結束方式：執行 `exit`、關視窗，或 policy 改到不再允許——改 policy 後 session 會自動結束。
+- 只能從 Admin console 發起，不能產生獨立的 SSH session。
+- 所有流量走 DERP relay。
+
+## 參考資料
+
+- [Tailscale SSH session recording（官方文件）](https://tailscale.com/docs/features/tailscale-ssh/tailscale-ssh-session-recording)
+- [Tailscale SSH Console（官方文件）](https://tailscale.com/docs/features/tailscale-ssh/tailscale-ssh-console)
+- [Tailscale SSH（官方文件）](https://tailscale.com/docs/features/tailscale-ssh)
+- [Tailscale PAM session logs（官方文件）](https://tailscale.com/docs/privileged-access-management/session-logs)
+- [Session recording with the Tailscale Kubernetes Operator（官方文件）](https://tailscale.com/docs/kubernetes-operator/recorder)
+- [Deploy multiple Tailscale SSH session recorder nodes（官方文件）](https://tailscale.com/docs/reference/multiple-recorder-nodes)
+- [tailscale/tsrecorder（Docker Hub）](https://hub.docker.com/r/tailscale/tsrecorder/tags)
+- [asciinema](https://asciinema.org)
+- [Tailscale SSH：不用管理 SSH 金鑰](/features/tailscale-ssh/)
+- [方案與限制比較（Personal、Personal Plus、Premium 等）](/getting-started/plans/)
