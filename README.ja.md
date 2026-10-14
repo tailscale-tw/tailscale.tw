@@ -8,7 +8,7 @@
 
 > This is an unofficial community site. It is not affiliated with, endorsed by, or sponsored by Tailscale Inc. "Tailscale" is a trademark of Tailscale Inc.
 >
-> 本サイトは非公式のコミュニティサイトで、Tailscale Inc. とは提携関係にありません。Tailscale は Tailscale Inc. の商標です。公式ドキュメントは [tailscale.com/docs](https://tailscale.com/docs) をご覧ください。
+> 本サイトは非公式のコミュニティサイトで、Tailscale Inc. とは提携関係になく、承認・後援も受けていません。Tailscale は Tailscale Inc. の商標です。公式ドキュメントは [tailscale.com/docs](https://tailscale.com/docs) をご覧ください。
 
 ## コンテンツ
 
