@@ -1,10 +1,12 @@
-# Tailscale 台灣
+# tailscale.tw 社群筆記
 
 **正體中文** | [English](README.en.md) | [日本語](README.ja.md)
 
 [tailscale.tw](https://tailscale.tw) 的原始碼：以台灣正體中文撰寫的 Tailscale 使用筆記與教學，從入門、核心功能、存取控制，到 PVE、Synology、效能調校與實際應用情境。
 
-本站為社群維護的非官方文件，與 Tailscale Inc. 無隸屬關係。官方文件請見 [tailscale.com/kb](https://tailscale.com/kb)。
+> This is an unofficial community site. It is not affiliated with, endorsed by, or sponsored by Tailscale Inc. "Tailscale" is a trademark of Tailscale Inc.
+>
+> 非官方社群網站，與 Tailscale Inc. 無隸屬關係。Tailscale 為 Tailscale Inc. 之商標。官方文件請見 [tailscale.com/docs](https://tailscale.com/docs)。
 
 ## 內容
 
