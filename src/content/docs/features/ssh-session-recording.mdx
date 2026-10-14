@@ -13,18 +13,18 @@ sidebar:
 
 兩者都只對「走 Tailscale SSH」的連線生效，所以請先讀過 [Tailscale SSH](/features/tailscale-ssh/)，再回來看這篇。
 
-> 本文依 2026 年 10 月的 Tailscale 官方文件整理，以 Tailscale v1.104 為準。工作階段錄影（`tsrecorder`）官方已停止提供給新使用者，本文的設定步驟屬文件整理、未實機驗證；瀏覽器 SSH（SSH Console）目前為 beta。上線狀態與方案限制可能變動，動手前請重新查官方文件。
+> 本文依 2026 年 10 月的 Tailscale 官方文件整理，以 Tailscale v1.104 為準。工作階段錄影（`tsrecorder`）與瀏覽器 SSH（SSH Console）官方都標示 beta；工作階段錄影已停止提供給新使用者（既有支援到 2027 年 8 月）。本文的設定步驟屬文件整理、未實機驗證，Docker（`tailscale/tsrecorder:stable`）與 `asciinema` 未釘版本。上線狀態與方案限制可能變動，動手前請重新查官方文件。
 
 ## 兩個功能的差別
 
-|                | 工作階段錄影                                      | 瀏覽器 SSH                            |
-| -------------- | ------------------------------------------------- | ------------------------------------- |
-| 官方名稱       | Tailscale SSH session recording                   | Tailscale SSH Console                 |
-| 目的           | 把 SSH 畫面錄下來稽核、重播                       | 在瀏覽器裡操作 SSH                    |
-| 上線狀態       | 已停止提供給新使用者（既有使用者到 2027 年 8 月） | beta                                  |
-| 方案           | 原標示 Personal 與 Enterprise                     | 所有方案                              |
-| 誰能設定／使用 | Owner、Admin、Network admin                       | Owner、Admin、IT admin、Network admin |
-| 額外組件       | 自己架一台 recorder（`tsrecorder`）               | 無，瀏覽器就是節點                    |
+|                | 工作階段錄影                                                 | 瀏覽器 SSH                            |
+| -------------- | ------------------------------------------------------------ | ------------------------------------- |
+| 官方名稱       | Tailscale SSH session recording                              | Tailscale SSH Console                 |
+| 目的           | 把 SSH 畫面錄下來稽核、重播                                  | 在瀏覽器裡操作 SSH                    |
+| 上線狀態       | beta；已停止提供給新使用者（既有使用者到 2027 年 8 月）      | beta                                  |
+| 方案           | 官方文件標示：Personal、Enterprise（不含 Standard／Premium） | 所有方案                              |
+| 誰能設定／使用 | Owner、Admin、Network admin                                  | Owner、Admin、IT admin、Network admin |
+| 額外組件       | 自己架一台 recorder（`tsrecorder`）                          | 無，瀏覽器就是節點                    |
 
 ## 工作階段錄影
 
@@ -42,7 +42,7 @@ Tailscale 已**不再**透過 `tsrecorder` 提供工作階段錄影給新使用�
 ### 運作方式
 
 - 錄影從**目的節點**（被連的 SSH 伺服器）串流到 tailnet 內一台 **recorder** 節點。recorder 是用 `tsnet` 寫成的二進位檔，部署成 Docker 容器。
-- 流量走 tailnet，端到端加密，Tailscale 看不到內容。
+- 流量走 tailnet，端對端加密，Tailscale 看不到內容。
 - 錄影存成 **asciinema** 格式：一行一筆的 JSON，可直接當文字搜尋，也能用 `asciinema` CLI 或 recorder 內建網頁重播。
 - recorder 可以把錄影存在主機檔案系統，也可以直接上傳到 Amazon S3 或其他 S3 相容儲存。
 
@@ -51,7 +51,7 @@ Tailscale 已**不再**透過 `tsrecorder` 提供工作階段錄影給新使用�
 官方文件寫得很清楚：錄影記錄的是「終端機畫面上出現的所有文字」，也就是**輸出（output），不記錄按鍵本身（keystroke）**。但有兩個細節：
 
 - 一般打字時，終端機預設會把輸入的字元**回顯（echo）**到畫面上。這些回顯的字元屬於「輸出」，所以會出現在錄影裡——你輸入的指令通常還是看得見。
-- 真正錄不到的是**不回顯的輸入**，例如密碼提示。畫面沒出現的字，錄影裡就沒有。
+- 真正錄不到的是**不回顯的輸入**，例如在密碼提示下輸入的字元。畫面沒出現的字，錄影裡就沒有。
 - 使用二進位協定時（例如舊版的 `scp`），錄影會把傳送的二進位資料也錄進去，可能包含敏感內容。
 
 換句話說，錄影是「螢幕錄影」而非「鍵盤側錄」；但螢幕上出現過的密碼、token 等敏感字，一樣會進錄影檔。
@@ -182,7 +182,7 @@ recorder 磁碟滿了會存不下錄影，導致 session 被中斷、新 session
 
 背後是 **WebAssembly**：瀏覽器裡跑 Tailscale 用戶端、WireGuard、userspace networking stack 和一個 SSH client。開 session 時，Tailscale 用你的身分產生一把 ephemeral auth key，建一台暫時（ephemeral）節點，名稱像 `tailscale-ssh-console-alice-example-com-12345abcde`；session 結束後這台節點自動移除。
 
-- 連線端到端加密，Tailscale 讀不到內容。
+- 連線端對端加密，Tailscale 讀不到內容。
 - 流量全部經 DERP relay，不是直連；DERP 也無法解密內容。
 
 ### 誰能用、怎麼開
@@ -218,4 +218,4 @@ recorder 磁碟滿了會存不下錄影，導致 session 被中斷、新 session
 - [tailscale/tsrecorder（Docker Hub）](https://hub.docker.com/r/tailscale/tsrecorder/tags)
 - [asciinema](https://asciinema.org)
 - [Tailscale SSH：不用管理 SSH 金鑰](/features/tailscale-ssh/)
-- [方案與限制比較（Personal、Standard、Premium 等）](/getting-started/plans/)
+- [方案與限制比較（Personal、Personal Plus、Premium 等）](/getting-started/plans/)
