@@ -1,0 +1,207 @@
+---
+title: App connectors：以網域而不是 IP 做路由
+description: 用 App connectors 讓 tailnet 裡的裝置以網域名稱（而不是 IP）經由指定的 Linux 出口連到 SaaS 或自架服務，並配合服務的 IP allowlist，讓服務只信任固定出口 IP。說明 policy file 的 tagOwners、autoApprovers、grants 與 nodeAttrs、裝置設定、Linux 用戶端的 --accept-routes，以及與 Subnet Router、Exit Node 的差異
+sidebar:
+  order: 3.5
+  label: App connectors
+---
+
+很多 SaaS 服務（GitHub、Salesforce、Stripe、Microsoft 365……）的企業方案可以設 **IP allowlist**：只有從白名單裡的 IP 連進來的請求才被接受，其他一律拒絕。目的是讓「拿到帳號密碼但不在公司網路裡的人」也登不進來。
+
+問題是，tailnet 裡的裝置各用自己的出口上網，來源 IP 每台都不一樣，根本沒辦法全部列進 allowlist。[Exit Node](/features/exit-node/) 可以把所有流量集中到一台裝置，但它的範圍太大：連看 YouTube、上 Google 都會繞去那台機器。**App connectors** 解決的就是這件事——只把**指定網域**的流量，經由指定的 Linux 裝置送出去。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件整理，以 Tailscale v1.104 為準。`--advertise-connector` 旗標與 macOS 上的限制，已對照 v1.104 原始碼核對；本文未實際部署過 app connector，設定步驟依官方文件撰寫。
+
+## App connector 是什麼
+
+App connector 是 tailnet 裡一台被指定用來「轉送特定網域流量」的 Linux 裝置。它和 [Subnet Router](/features/subnet-router/) 很像，差別在於：
+
+- Subnet Router 廣告的是**網段**（例如 `192.168.1.0/24`），流量依目的 IP 決定要不要走它。
+- App connector 廣告的是**網域名稱**（例如 `github.com`、`*.github.com`），tailnet 會自動把這些網域解析到的 IP 廣告成路由，流量依網域決定要不要走它。
+
+官方說法是「以網域名稱而不是 IP 位址做路由」。實際運作上，app connector 會用 DoH（DNS over HTTPS，經 PeerAPI）持續解析設定的網域，把解出來的 IP 自動廣告給 tailnet；其他裝置連這些網域時，流量就經由 app connector 出去。
+
+幾個官方列出的用途：
+
+- **SaaS 的 IP allowlist**：讓服務只看到 app connector 的固定出口 IP，tailnet 內獲准的人都能用，其他人就算拿到帳密也連不進（服務會擋掉）。
+- **自架服務、雲端 VPC**：把內部服務或雲端資源的流量集中管理。
+- **集中管理**：在一處控制哪些裝置能用哪些 app，不必逐台設定。
+- **監控與備援**：部署多台 app connector 提供冗餘，用第三方工具監看流量。
+
+App connectors 適用[所有方案](https://tailscale.com/pricing)。
+
+## 和 Subnet Router、Exit Node 的差異
+
+| 功能          | 依什麼決定路由  | 出口裝置   | 典型用途                        |
+| ------------- | --------------- | ---------- | ------------------------------- |
+| Subnet Router | 目的 IP（網段） | 各平台皆可 | 存取區網內沒裝 Tailscale 的設備 |
+| App connector | 目的網域        | 僅 Linux   | SaaS 的 IP allowlist、集中出口  |
+| Exit Node     | 全部流量        | 各平台皆可 | 公共 Wi-Fi 保護、看台灣限定內容 |
+
+App connector 最接近「**只對特定網域生效的 Exit Node**」：範圍比 Exit Node 小，卻比 Subnet Router 好用（不用自己維護網段與 IP）。三者的詳細差異見 [Subnet Router](/features/subnet-router/) 與 [Exit Node](/features/exit-node/)。
+
+## 前置條件
+
+要架 app connector，你需要：
+
+- tailnet 的 **Owner、Admin 或 Network admin** 角色，才能改 policy file 與後台的 app 設定。
+- 一台當 app connector 的 **Linux** 裝置，而且要：
+  - **有公開 IP**（能直接上網、有自己對外的位址）。
+  - 已開啟 **IP forwarding**。
+- 一個 SaaS 或自架服務的管理權限（要設 IP allowlist 時才需要）。
+
+官方文件特別強調：**只有 Linux 能當 app connector 裝置**。macOS 上雖然下得了 `--advertise-connector`，但 CLI 會跳出警告，說這不受官方支援、有效能與穩定性的疑慮——v1.104 原始碼的警告文字直接寫「Linux is the only recommended platform for app connectors」。
+
+IP forwarding 的開啟方式與 Subnet Router 相同：
+
+```bash
+echo 'net.ipv4.ip_forward = 1' | sudo tee -a /etc/sysctl.d/99-tailscale.conf
+echo 'net.ipv6.conf.all.forwarding = 1' | sudo tee -a /etc/sysctl.d/99-tailscale.conf
+sudo sysctl -p /etc/sysctl.d/99-tailscale.conf
+```
+
+## 設定步驟
+
+下面以把 `github.com` 經由一台 app connector 路由為例。完整分為三步：更新 policy file、設定裝置、在後台新增 app。
+
+### 1. 更新 tailnet policy file
+
+在 Admin console 的 [Access controls](https://console.tailscale.com/admin/acls) 頁面，加入下面四個區塊：
+
+```json
+{
+  "tagOwners": {
+    "tag:github-app-connector": ["group:github-admins"]
+  },
+  "autoApprovers": {
+    "routes": {
+      "0.0.0.0/0": ["tag:github-app-connector"],
+      "::/0": ["tag:github-app-connector"]
+    }
+  },
+  "grants": [
+    {
+      "src": ["autogroup:member"],
+      "dst": ["tag:github-app-connector"],
+      "ip": ["tcp:53", "udp:53"]
+    },
+    {
+      "src": ["autogroup:member"],
+      "dst": ["autogroup:internet"],
+      "ip": ["*"]
+    }
+  ],
+  "nodeAttrs": [
+    {
+      "target": ["*"],
+      "app": {
+        "tailscale.com/app-connectors": [
+          {
+            "name": "GitHub",
+            "connectors": ["tag:github-app-connector"],
+            "domains": ["github.com", "*.github.com"]
+          }
+        ]
+      }
+    }
+  ]
+}
+```
+
+逐段說明：
+
+- **`tagOwners`**：定義 tag 名稱，並指定誰能把這個 tag 掛到裝置上。上例中只有 `group:github-admins` 群組的人能把 `tag:github-app-connector` 掛上裝置。
+- **`autoApprovers`**：自動核准 app connector 廣告的路由。app connector 解析出網域的 IP 後會廣告成路由，這些路由要核准才生效；`0.0.0.0/0` 與 `::/0` 代表自動核准這個 tag 廣告的所有 IPv4 與 IPv6 路由。**自訂（custom）app 一定需要這條**；預設（preset）app 的路由由 Tailscale 代管、多數情況不用，但若它經 DNS 學到新路由，還是需要這條來自動核准。
+- **`grants`** 有兩條，缺一不可：
+  - 第一條開 `tcp:53`、`udp:53` 到 app connector tag。這是讓裝置能用 app connector 的 PeerAPI 做 DoH 查詢、發現「這個網域該走哪台 connector」的**最小權限**。
+  - 第二條開 `autogroup:internet`，讓裝置能存取 app connector 廣告出來的路由（也就是那些網域解析出的 IP）。**注意**：官方文件提醒，`autogroup:internet` 同時也會放行 tailnet 裡的 Exit Node——如果你不需要 exit node，這條會比你想要的寬一些。
+- **`nodeAttrs`**：把網域對應到 connector tag。`domains` 是這個 app connector 負責的網域；`connectors` 是實際轉送的 tag。多個網域用逗號分開，也可以用萬用字元（`*.github.com`），但**不能**用 TLD 層級的萬用字元（`*.com` 不行）。
+
+`grants` 的寫法見 [ACL / Grants 入門](/admin/acl-grants/)，tag 與 `tagOwners` 見 [Tags 與 auth key](/admin/tags-auth-keys/)。
+
+### 2. 設定 app connector 裝置
+
+在要當 app connector 的 Linux 裝置上執行：
+
+```bash
+sudo tailscale up --advertise-connector --advertise-tags=tag:github-app-connector
+```
+
+- `--advertise-connector`：讓這台裝置成為 app connector，依 policy file 的 `nodeAttrs` 轉送指定網域的流量。
+- `--advertise-tags`：用指定的 tag 重新認證這台裝置。tag 是認證時決定的，所以這裡要用 `tailscale up`（或 `login`）帶上，而不是 `tailscale set`。
+
+如果裝置**已經**掛上了 `tag:github-app-connector`，只想補開 connector 功能，可以單獨執行：
+
+```bash
+sudo tailscale set --advertise-connector
+```
+
+tagged 裝置預設不會金鑰過期，適合這類常駐的伺服器角色。
+
+### 3. 在後台新增 app
+
+到 Admin console 的 [Apps](https://console.tailscale.com/admin/apps) 頁面，點 **Add an app**：
+
+- **預設（preset）app**：Tailscale 內建了一些常見 SaaS 的網域清單（GitHub、Microsoft 365、Google Workspace、Salesforce、Stripe、Okta、Confluence、Jira、AWS 系列等）。選 preset 後，網域會自動填好，之後還會定時同步該服務官方公布的網域與路由。選 preset 時，`nodeAttrs` 也會由後台自動寫入 policy file。
+- **自訂（custom）app**：選 **Custom** 手動輸入網域，多個用逗號分開。可以對子網域用萬用字元（`*.example.com`），但不能對 TLD 用（`*.com` 不行）。
+
+接著在 **Connectors** 選你設定好的 tag（`tag:github-app-connector`），**Save**。名字旁出現綠色圖示代表正常運作中。
+
+> 手動設自訂 app 時，服務商往往使用**多個網域**（例如登入、API、靜態資源各一個），要全部加進 `domains`，否則連到漏掉的網域不會走 connector。GitHub 社群維護的 [domain-list-community](https://github.com/v2fly/domain-list-community/tree/master/data) 有各服務對應網域的整理，可以參考。
+
+### 4. （選用）在服務設定 IP allowlist
+
+這是 app connector 最核心的用途。設定完成後，tailnet 內連到該服務的流量，來源 IP 會變成 app connector 裝置的**公開 IP**。到服務的 IP allowlist 設定頁，把每台 app connector 裝置的公開 IP 加進去：
+
+- 多台 connector 做冗餘時，**每台的公開 IP 都要加**。
+- 後台 [Apps](https://console.tailscale.com/admin/apps) 頁面的 app 詳情會列出 **Egress IPs**，直接複製即可；新增 connector 後記得回來補。
+- 加的是**公開 IP**，不是 tailnet 內的 `100.x.y.z` Tailscale IP。公開 IP 可以在雲端供應商的管理介面查到。
+
+這樣一來，服務只信任 app connector 的出口：tailnet 內獲准使用這個 app connector 的人連得上，其他沒有通過 app connector 的連線（即使有帳密）會被服務擋掉。
+
+## Linux 用戶端要開 --accept-routes
+
+app connector 廣告的路由，和 Subnet Router 一樣要用戶端「接受路由」才會注入：
+
+```bash
+sudo tailscale set --accept-routes
+```
+
+**Linux 用戶端預設不接受路由**，容易漏掉。Android、iOS、macOS、tvOS、Windows 都預設自動接受。漏開的話，Linux 裝置連那些網域時不會走 app connector。若希望強制用戶端不能關掉這個設定，可以用系統政策（MDM）的 `UseTailscaleSubnets` 鎖定，見官方 [Manage client preferences](https://tailscale.com/docs/features/client/manage-preferences)。
+
+## 家用情境：動態 IP 讓 allowlist 打折扣
+
+app connector 的賣點是「服務只信任固定出口 IP」，但這個好處在**家用網路**上通常發揮不了：
+
+- 裝置要有**公開 IP**。台灣不少家用寬頻落在 [CGNAT](/troubleshooting/taiwan-isp-nat/) 後面，根本拿不到自己的公開 IP，架不了 app connector。
+- 就算有公開 IP，**家用 IP 多是動態的**。IP 一換，服務的 allowlist 裡就是舊的 IP，大家會突然連不上，直到你手動去更新白名單。動態 IP 不適合當需要「穩定、可信任」的 allowlist 出口。
+
+所以實務上，app connector 大多架在**有固定公開 IP 的 VPS 或雲端主機**上，而不是家裡的機器。家裡的機器更適合當 [Subnet Router](/features/subnet-router/) 或 [Exit Node](/features/exit-node/)——這兩種角色不需要「穩定的公開出口 IP」這個前提。
+
+## 確認與除錯
+
+- 後台 [Apps](https://console.tailscale.com/admin/apps) 頁面：app 名字旁綠色圖示代表 connector 正常。
+- 從一台用戶端看那個網域現在解析到哪裡、走不走 connector：連上去後用 `traceroute` 看路徑，第一跳會是 app connector 的 Tailscale IP。也可以到服務端看進來的來源 IP 是不是 connector 的公開 IP。
+- 裝置要能看到 connector 這台 peer，DNS 查詢才有地方送：確認 grants 裡有開 `tcp:53`／`udp:53` 到 connector tag。
+- Linux 用戶端連不到：先查 `tailscale debug prefs` 裡 `RouteAll` 是不是 `true`（對應 `--accept-routes`）。
+
+## 限制
+
+官方文件列出的限制：
+
+- **只有 Linux** 能當 app connector 裝置。
+- App connector **不能跨 tailnet 分享**。
+- 單一 instance 或整個 tailnet 廣告超過 **10K 條路由**，會對用戶端造成明顯問題。
+- 整個 tailnet 最多廣告 **250 個網域**（所有 app 合計）。
+- 不建議用頻繁更換或 ephemeral（一次性）的裝置當 connector：connector 會隨時間學習並累積路由，穩定的路由基礎設施效能與可靠度較好。
+- 用 Terraform、GitOps 這類外部工具管理 policy file 時，後台對 app connector 的改動會在下次同步被覆寫，要改就回外部工具改。
+- 若 app connector 使用中失效、又沒有其他 connector，該網域的解析會開始失敗，直到 connector 恢復。
+
+## 參考資料
+
+- [How app connectors work（官方）](https://tailscale.com/docs/features/app-connectors)
+- [Set up an app connector（官方）](https://tailscale.com/docs/features/app-connectors/how-to/setup)
+- [Secure your SaaS with Tailscale App connectors（官方部落格）](https://tailscale.com/blog/saas)
+- [How to Route Domain-Specific Traffic with App Connectors（官方部落格）](https://tailscale.com/blog/app-connectors-explained)
+- [Subnet Router：存取整個區網內沒裝 Tailscale 的設備](/features/subnet-router/)
+- [Exit Node：讓所有流量經由指定裝置出去](/features/exit-node/)

@@ -136,6 +136,7 @@ sudo tailscale set --snat-subnet-routes=false
 - **高可用性（HA）**：多台 Subnet Router 廣告**完全相同**的網段才互為容錯備援；要注意 HA 備援機別開 `--accept-routes`，否則它會把流量繞去主路由器。更細的網段分配（longest prefix matching）時，記得 Tailscale 不會自動退回較寬的前綴——特定網段的裝置下線，流量就是直接丟包。
 - **效能調校**：轉送 UDP 的效能可以用 [UDP GRO forwarding](/performance/udp-gro-forwarding/) 提升；TCP 的擁塞控制（[BBR](/performance/bbr/)）則只影響節點自己發起或終止的連線，對被轉送的流量沒有作用。
 - **Raspberry Pi 實作**：想用一台常開的 Pi 把 subnet router（與 exit node）落地，完整的安裝、開機自啟、兼兩種角色的取捨與當 Wake-on-LAN 發送端，見 [Raspberry Pi 當 subnet router 兼 exit node 的實作](/use-cases/subnet-router-raspberry-pi/)。
+- **以網域而不是 IP 路由**：只想把特定網域（例如 SaaS）的流量集中到一台出口、配合服務的 IP allowlist 時，用 [App connectors](/features/app-connectors/) 比 subnet router 更省事——它會自動解析網域、廣告路由，不必自己維護網段。
 
 ## 參考資料
 
