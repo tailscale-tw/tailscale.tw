@@ -25,7 +25,7 @@ Taildrive 在 Tailscale 用戶端裡內建一個 WebDAV 伺服器。只要 Tails
 幾個重要的限制先講：
 
 - Taildrive 是 **alpha** 功能，自 Tailscale v1.64.0 起提供。
-- **分享（share）資料夾**：只有 Linux、macOS、Windows 可以。iOS 與 Android **不能分享**，只能存取別人分享的資料夾。
+- **分享（share）資料夾**：只有 Linux、macOS、Windows、Synology（限 DSM 7）可以。iOS、Android 與 DSM 6 的 Synology **不能分享**，只能存取別人分享的資料夾。
 - **分享進來的裝置**：被[分享](/admin/sharing/)進 tailnet 的裝置無法存取這個 tailnet 上的任何 Taildrive 資料夾；反過來，你分享到別的 tailnet 的裝置，也無法存取那個 tailnet 的資料夾。
 - 連線走 HTTP，但內容仍是 Tailscale 的 WireGuard 端對端加密，不是明文暴露在網際網路上。
 
@@ -64,7 +64,7 @@ Taildrive 在 Tailscale 用戶端裡內建一個 WebDAV 伺服器。只要 Tails
 | `drive:share`  | 允許這台裝置分享資料夾 |
 | `drive:access` | 允許這台裝置存取分享   |
 
-要**分享**資料夾，兩個都要；只要**存取**別人的分享，只要 `drive:access`。例如讓所有成員都能分享也能存取：
+要**分享**資料夾，只要 `drive:share`；只要**存取**別人的分享，只要 `drive:access`。例如讓所有成員都能分享也能存取：
 
 ```json
 "nodeAttrs": [
@@ -110,9 +110,9 @@ Taildrive 在 Tailscale 用戶端裡內建一個 WebDAV 伺服器。只要 Tails
   },
   "nodeAttrs": [
     {
-      // 只有檔案伺服器能分享資料夾
+      // 只有檔案伺服器能分享資料夾（drive:access 只有在它自己也要掛載時才需要）
       "target": ["tag:fileserver"],
-      "attr": ["drive:share", "drive:access"]
+      "attr": ["drive:share"]
     },
     {
       // 其他成員只能存取，不能分享
@@ -172,7 +172,7 @@ tailscale drive share docs /srv/docs
 Synology 在分享前要多做兩件事：
 
 1. 確認 NAS 跑的是 **DSM 7**。DSM 6 只能存取別人分享的資料夾，不能自己分享。
-2. 在 **控制台 → 共用資料夾** 對要分享的共用資料夾選 **編輯 → 權限**，把下拉選單切成 **系統內部使用者**，替 `tailscale` 這個系統帳號勾選 **讀取／寫入**，儲存。同時要[開啟 SSH／終端機](https://kb.synology.com/en-global/DSM/help/DSM/AdminCenter/system_terminal?version=7)才能在命令列執行 `tailscale` 指令。
+2. 在 **控制台 → 共用資料夾** 對要分享的**上層**共用資料夾（top-level Shared Folder）選 **編輯 → 權限**，把下拉選單切成 **系統內部使用者**，替 `tailscale` 這個系統帳號勾選 **讀取／寫入**，儲存。權限設在上層共用資料夾即可，它底下的任何子目錄之後都能用 Taildrive 分享。同時要[開啟 SSH／終端機](https://kb.synology.com/en-global/DSM/help/DSM/AdminCenter/system_terminal?version=7)才能在命令列執行 `tailscale` 指令。
 
 ### macOS：設定裡的 File Sharing
 
@@ -209,8 +209,9 @@ defaults write /Users/$(whoami)/Library/Preferences/io.tailscale.ipn.macsys.plis
 
 - **macOS**：連線時會跳出「不安全的連線」提示，選 **繼續** 即可——連線雖然是 HTTP，但內容仍走 Tailscale 的 WireGuard 加密。接著以 **Guest** 連線。連上後 Finder 會顯示你的 tailnet 名稱資料夾，裡面依裝置列出各分享。
 - **Windows**：Windows 預設限制 WebDAV 檔案 50MB，超過會傳不上去。要到登錄編輯器 `HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\WebClient\Parameters` 的 `FileSizeLimitInBytes`，改成 `4294967295`（約 4GB，最大值）。
-- **Android**：Tailscale 不提供檔案瀏覽器，要另外裝 WebDAV App。官方文件以 [Material Files](https://play.google.com/store/apps/details?id=me.zhanghai.android.files) 為例：側邊選單 → **＋ Add storage…** → **WebDAV server**，主機填 `100.100.100.100`、連接埠 `8080`、通訊協定選 **HTTP**、驗證選 **None**。注意**有些 WebDAV App 只吃 `https`，但 Taildrive 只跑 `http`**，這種 App 不能用。若 App 硬要帳號密碼，隨便填一組即可，Taildrive 不看它，而是用你的 Tailscale 身分決定權限。
+- **Android**：Tailscale 不提供檔案瀏覽器，要另外裝 WebDAV App。官方文件以 [Material Files](https://play.google.com/store/apps/details?id=me.zhanghai.android.files) 為例：側邊選單 → **＋ Add storage…** → **WebDAV server**，主機填 `100.100.100.100`、連接埠 `8080`、**Path 留空**、**Name 自取**（例如 `Tailscale`）、通訊協定選 **HTTP**、驗證選 **None**，最後按 **Connect and add**。注意**有些 WebDAV App 只吃 `https`，但 Taildrive 只跑 `http`**，這種 App 不能用。若 App 硬要帳號密碼，隨便填一組即可，Taildrive 不看它，而是用你的 Tailscale 身分決定權限。
 - **iOS**：在「檔案」App 的位置列表選 **Tailscale**，第一次會要求開啟 Tailscale 的檔案提供者，允許後就能從任何整合「檔案」App 的程式讀寫分享（實際能不能寫由 grants 的 `access` 決定）。
+- **Synology**：在 File Station 的連線設定裡，**帳號名稱與密碼留空**即可——Taildrive 不看帳密，而是用你的 Tailscale 身分決定權限；**Codepage 要選 Unicode (UTF-8)**。連上後左側會出現 WebDAV 連線，點進去就會看到你的 tailnet 名稱資料夾。
 
 ## 常見問題
 
