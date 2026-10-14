@@ -81,3 +81,32 @@ jobs:
           packageManager: bun
           # 設定讀自 wrangler.jsonc；--message 用 SHA（Cloudflare API 拒絕非 ASCII 字串）
           command: deploy --message="${{ github.sha }}"
+
+  indexnow:
+    name: Notify IndexNow
+    needs: deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # 只呼叫外部 action 抓公開 sitemap，不需 deploy job 的 deployments: write。
+    permissions:
+      contents: read
+
+    steps:
+      # 等 Cloudflare 邊緣節點完成新部署的傳播，確保 IndexNow 抓到的是
+      # 更新後的 sitemap（含新文章）。
+      - name: "⏳ Wait for edge propagation"
+        run: sleep 30
+
+      - name: "📡 Notify IndexNow"
+        # SHA-pinned to v3.0.0 (38ddfbd) — mitigates floating-tag supply-chain risk.
+        uses: bojieyang/indexnow-action@38ddfbd93579a8a44c0dee662121bf9d51098f71 # v3.0.0
+        with:
+          sitemap-location: "https://tailscale.tw/sitemap-index.xml"
+          # IndexNow key 本即公開（驗證檔 public/6930…txt 任何人可訪問），故直接內嵌。
+          key: "69309504354a19c8396274e569bc9eb7"
+          # 通用端點，一次通知所有參與的搜尋引擎（Bing、Yandex、Seznam、Naver…）。
+          endpoint: api.indexnow.org
+          # 站內文章更新頻率低，回看 14 天即涵蓋少見的連續更新；
+          # 重複提交為冪等操作，無副作用。
+          since: 14
+          since-unit: day
