@@ -1,0 +1,231 @@
+---
+title: Taildrive（alpha）：直接掛載 tailnet 上的資料夾
+description: 用 Taildrive 在 tailnet 上長期分享資料夾：nodeAttrs 與 grants 的最小權限寫法、各平台怎麼分享與掛載、與 Taildrop 和 SMB 的比較
+sidebar:
+  order: 5.5
+  label: Taildrive
+---
+
+[Taildrop](/features/taildrop/) 是「把檔案傳給另一台自己的裝置」，傳完就結束。Taildrive 則是把某個**資料夾**持續掛在 tailnet 上，讓有權限的人隨時讀寫——像是放在自己 tailnet 裡的雲端硬碟，不必另外架檔案伺服器、也不必管理另一套帳號密碼。
+
+> 本文依 2026 年 10 月的 Tailscale 官方文件與 v1.104 原始碼整理。Taildrive 目前仍是 **alpha** 功能，各平台的行為與 policy 寫法可能變動；本文未實機驗證，屬文件整理。
+
+## Taildrive 是什麼
+
+Taildrive 在 Tailscale 用戶端裡內建一個 WebDAV 伺服器。只要 Tailscale 連線中，它就跑在 `100.100.100.100:8080`，把你在裝置上分享出去的資料夾，用 WebDAV 讓 tailnet 裡的其他裝置掛載。
+
+每個分享都有一個全域唯一的路徑，格式是 `/<tailnet>/<裝置名稱>/<分享名稱>`。例如在 `example.com` 這個 tailnet、名為 `nas-device` 的機器上，把某個資料夾以 `docs` 這個名稱分享，路徑就是：
+
+```
+/example.com/nas-device/docs
+```
+
+和一般檔案伺服器最大的差別是：**誰能看什麼、能讀還是能寫，都寫在 tailnet 的 policy file 裡**。不用在檔案伺服器上另外建立帳號、設定資料夾權限，一切跟著 tailnet 身分走。
+
+幾個重要的限制先講：
+
+- Taildrive 是 **alpha** 功能，自 Tailscale v1.64.0 起提供。
+- **分享（share）資料夾**：只有 Linux、macOS、Windows、Synology（限 DSM 7）可以。iOS、Android 與 DSM 6 的 Synology **不能分享**，只能存取別人分享的資料夾。
+- **分享進來的裝置**：被[分享](/admin/sharing/)進 tailnet 的裝置無法存取這個 tailnet 上的任何 Taildrive 資料夾；反過來，你分享到別的 tailnet 的裝置，也無法存取那個 tailnet 的資料夾。
+- 連線走 HTTP，但內容仍是 Tailscale 的 WireGuard 端對端加密，不是明文暴露在網際網路上。
+
+## 與 Taildrop、SMB 的比較
+
+三個都是「在 tailnet 裡碰檔案」，但用途不同：
+
+|          | Taildrop               | Taildrive                                                | SMB over Tailscale                |
+| -------- | ---------------------- | -------------------------------------------------------- | --------------------------------- |
+| 用途     | 一次性的檔案傳送       | 長期掛載、持續讀寫的資料夾                               | 掛載既有的 SMB 檔案伺服器         |
+| 對象     | 只能傳給**自己**的裝置 | tailnet 裡的任何使用者或 tag 裝置（依 policy）           | 有 SMB 帳號的人                   |
+| 權限控管 | 無（不受 ACL 限制）    | 用 `nodeAttrs` + `grants` 控管，可細分到單一分享與讀／寫 | 依 SMB 伺服器上的帳號與資料夾權限 |
+| tag 裝置 | 不能用                 | 可以分享、也可以被指定為分享來源                         | 由 SMB 伺服器決定                 |
+| 成熟度   | alpha                  | alpha                                                    | 成熟                              |
+| 額外需求 | 無                     | 無（內建在 Tailscale 用戶端）                            | 一台跑 SMB 的伺服器               |
+
+簡單的判斷方式：
+
+- **臨時傳幾個檔案給自己** → [Taildrop](/features/taildrop/)。
+- **想要一個 tailnet 內共享、權限由 policy 統一管的資料夾** → Taildrive。
+- **已經有 Synology、TrueNAS 或 Samba 這類現成的 SMB 伺服器**，而且需要它既有的帳號、ACL、快照等機制 → 直接走 SMB，見 [Time Machine 走 SMB 備份到家裡的 NAS](/use-cases/time-machine-over-tailscale/) 與 [QuickConnect 與 Tailscale](/synology/quickconnect-vs-tailscale/) 裡的比較。
+
+## 開啟 Taildrive
+
+開啟要兩步，都在 tailnet 的 policy file 裡完成，需要 Owner、Admin 或 Network admin 權限：
+
+1. 用 `nodeAttrs` 替裝置加上 `drive` 屬性。
+2. 用 `grants` 定義誰能存取哪些分享、能讀還是能寫。
+
+### 1. 用 nodeAttrs 開啟裝置
+
+`nodeAttrs` 有兩個相關屬性：
+
+| 屬性           | 作用                   |
+| -------------- | ---------------------- |
+| `drive:share`  | 允許這台裝置分享資料夾 |
+| `drive:access` | 允許這台裝置存取分享   |
+
+要**分享**資料夾，只要 `drive:share`；只要**存取**別人的分享，只要 `drive:access`。例如讓所有成員都能分享也能存取：
+
+```json
+"nodeAttrs": [
+  {
+    "target": ["autogroup:member"],
+    "attr": ["drive:share", "drive:access"],
+  }
+]
+```
+
+### 2. 用 grants 設定權限
+
+`nodeAttrs` 只決定「誰的裝置能用 Taildrive」，真正的「能看哪個分享、能不能寫」由 `grants` 控管，capability 名稱是 `tailscale.com/cap/drive`：
+
+```json
+"grants": [
+  {
+    "src": ["autogroup:member"],
+    "dst": ["tag:fileserver"],
+    "app": {
+      "tailscale.com/cap/drive": [{
+        "shares": ["company-docs"],
+        "access": "ro"
+      }]
+    }
+  }
+]
+```
+
+- `src`：誰可以存取（使用者、群組、tag、`autogroup:*`）。
+- `dst`：分享來源裝置（這裡是掛著 `tag:fileserver` 的檔案伺服器）。
+- `shares`：開放哪些分享名稱，可用 `*` 表示全部。
+- `access`：`ro`（唯讀）或 `rw`（可讀可寫）。
+
+### 最小權限範例
+
+把上面兩步合成一個完整範例：只有檔案伺服器（`tag:fileserver`）能分享，成員只能**唯讀**存取它分享的 `company-docs`，其他分享一律看不到：
+
+```json
+{
+  "tagOwners": {
+    "tag:fileserver": ["autogroup:admin"]
+  },
+  "nodeAttrs": [
+    {
+      // 只有檔案伺服器能分享資料夾（drive:access 只有在它自己也要掛載時才需要）
+      "target": ["tag:fileserver"],
+      "attr": ["drive:share"]
+    },
+    {
+      // 其他成員只能存取，不能分享
+      "target": ["autogroup:member"],
+      "attr": ["drive:access"]
+    }
+  ],
+  "grants": [
+    {
+      // 成員只能唯讀存取 company-docs，其他分享都看不到
+      "src": ["autogroup:member"],
+      "dst": ["tag:fileserver"],
+      "app": {
+        "tailscale.com/cap/drive": [
+          {
+            "shares": ["company-docs"],
+            "access": "ro"
+          }
+        ]
+      }
+    }
+  ]
+}
+```
+
+policy file 的寫法見 [ACL / Grants 入門](/admin/acl-grants/)。
+
+## 分享資料夾
+
+| 平台         | 分享方式                                            |
+| ------------ | --------------------------------------------------- |
+| Linux        | `tailscale drive share <名稱> <路徑>`               |
+| Windows      | `tailscale drive share <名稱> <路徑>`（PowerShell） |
+| Synology     | `tailscale drive share <名稱> <路徑>`（限 DSM 7）   |
+| macOS        | 設定 → File Sharing，圖形介面                       |
+| iOS／Android | 不支援分享                                          |
+
+### Linux／Windows／Synology：`tailscale drive`
+
+```bash
+tailscale drive share docs /srv/docs
+```
+
+- **分享名稱**：只用來組路徑，不一定要等於資料夾名稱。名稱強制轉小寫，只能含小寫字母 `a-z`、底線 `_`、小括號 `()` 或空格，前後空格會被去掉。強制小寫是為了避開不支援大小寫區分的用戶端。
+- **路徑**：要分享的資料夾在檔案系統上的路徑。
+
+其他常用指令：
+
+| 指令                               | 作用               |
+| ---------------------------------- | ------------------ |
+| `tailscale drive list`             | 列出本機目前的分享 |
+| `tailscale drive rename <舊> <新>` | 重新命名分享       |
+| `tailscale drive unshare <名稱>`   | 移除分享           |
+
+`tailscale drive list` 的輸出會多一欄 `as`，代表「這個分享是以哪個本機使用者身分分享的」。**別人連進來時，讀寫是以這個使用者的身分進行**：他讀得到這個使用者讀得到的檔案，他建立的檔案也歸這個使用者所有。Linux／Synology 上常見是 `root`；Windows 上這欄是空白。想改用特定使用者身分分享，Linux 上可以用 `sudo -u <使用者> tailscale drive share ...`。
+
+Synology 在分享前要多做兩件事：
+
+1. 確認 NAS 跑的是 **DSM 7**。DSM 6 只能存取別人分享的資料夾，不能自己分享。
+2. 在 **控制台 → 共用資料夾** 對要分享的**上層**共用資料夾（top-level Shared Folder）選 **編輯 → 權限**，把下拉選單切成 **系統內部使用者**，替 `tailscale` 這個系統帳號勾選 **讀取／寫入**，儲存。權限設在上層共用資料夾即可，它底下的任何子目錄之後都能用 Taildrive 分享。同時要[開啟 SSH／終端機](https://kb.synology.com/en-global/DSM/help/DSM/AdminCenter/system_terminal?version=7)才能在命令列執行 `tailscale` 指令。
+
+### macOS：設定裡的 File Sharing
+
+macOS 用圖形介面管理，但因為是 alpha，**File Sharing 分頁預設被隱藏**。先在終端機執行下列其中一則（視安裝來源），再重開 Tailscale App：
+
+App Store 版：
+
+```bash
+defaults write io.tailscale.ipn.macos FileSharingConfiguration -string show
+```
+
+從 tailscale.com 下載的版本：
+
+```bash
+defaults write /Users/$(whoami)/Library/Preferences/io.tailscale.ipn.macsys.plist FileSharingConfiguration show
+```
+
+接著在 Tailscale 的 **Settings** 會出現 **File Sharing** 分頁，選 **Choose Shared Folders**、按 **＋** 加入資料夾。分享名稱預設取自資料夾名稱，點兩下名稱可改名，按 **－** 移除。
+
+## 存取資料夾
+
+所有平台的共通點：**Tailscale 必須連線中**，然後連到 `100.100.100.100:8080` 這個 WebDAV 伺服器。
+
+| 平台     | 掛載方式                                                                                        |
+| -------- | ----------------------------------------------------------------------------------------------- |
+| macOS    | Finder → 前往 → 連接伺服器（`Cmd` + `K`），網址填 `http://100.100.100.100:8080`，以「訪客」連線 |
+| Windows  | 檔案總管對「本機」按右鍵 → 連線網路磁碟機 → 選擇自訂的網路位置，網址同上                        |
+| Linux    | 用 [davfs2](https://wiki.archlinux.org/title/Davfs2) 掛載                                       |
+| iOS      | 「檔案」App → 瀏覽 → 位置裡的 **Tailscale**                                                     |
+| Android  | 用支援 WebDAV 的檔案瀏覽器（例如 Material Files）                                               |
+| Synology | File Station → 工具 → 遠端連線 → 連線設定 → WebDAV                                              |
+
+幾個平台要注意的細節：
+
+- **macOS**：連線時會跳出「不安全的連線」提示，選 **繼續** 即可——連線雖然是 HTTP，但內容仍走 Tailscale 的 WireGuard 加密。接著以 **Guest** 連線。連上後 Finder 會顯示你的 tailnet 名稱資料夾，裡面依裝置列出各分享。
+- **Windows**：Windows 預設限制 WebDAV 檔案 50MB，超過會傳不上去。要到登錄編輯器 `HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\WebClient\Parameters` 的 `FileSizeLimitInBytes`，改成 `4294967295`（約 4GB，最大值）。
+- **Android**：Tailscale 不提供檔案瀏覽器，要另外裝 WebDAV App。官方文件以 [Material Files](https://play.google.com/store/apps/details?id=me.zhanghai.android.files) 為例：側邊選單 → **＋ Add storage…** → **WebDAV server**，主機填 `100.100.100.100`、連接埠 `8080`、**Path 留空**、**Name 自取**（例如 `Tailscale`）、通訊協定選 **HTTP**、驗證選 **None**，最後按 **Connect and add**。注意**有些 WebDAV App 只吃 `https`，但 Taildrive 只跑 `http`**，這種 App 不能用。若 App 硬要帳號密碼，隨便填一組即可，Taildrive 不看它，而是用你的 Tailscale 身分決定權限。
+- **iOS**：在「檔案」App 的位置列表選 **Tailscale**，第一次會要求開啟 Tailscale 的檔案提供者，允許後就能從任何整合「檔案」App 的程式讀寫分享（實際能不能寫由 grants 的 `access` 決定）。
+- **Synology**：在 File Station 的連線設定裡，**帳號名稱與密碼留空**即可——Taildrive 不看帳密，而是用你的 Tailscale 身分決定權限；**Codepage 要選 Unicode (UTF-8)**。連上後左側會出現 WebDAV 連線，點進去就會看到你的 tailnet 名稱資料夾。
+
+## 常見問題
+
+- **連不上 `100.100.100.100:8080`？** 先確認 Tailscale 連線中，且這台裝置的 `nodeAttrs` 有 `drive:access`。
+- **看得到裝置資料夾，但裡面沒有我要的分享？** grants 的 `shares` 只開了你名單上的分享，沒列到的分享對你隱藏。要存取別人的分享，`src` 也要涵蓋到你。
+- **改了 grants 沒生效？** 先確認 policy 已存檔且沒有語法錯誤，然後重新掛載（或重新連線）一次再看。
+- **別人建立的檔案算誰的？** 算分享者的本機使用者（`tailscale drive list` 的 `as` 欄）。這是 Taildrive 目前的設計，per-user 的權限對應不是它提供的東西。
+- **能用 rclone 連 Taildrive 嗎？** 可以，但用戶端 1.64.2 或更早要加 `--inplace`，建議用 1.65.75 以後的版本。
+- **我想傳的只是幾個檔案、不是長期掛資料夾？** 用 [Taildrop](/features/taildrop/) 比較直接。
+
+## 參考資料
+
+- [Taildrive（官方文件）](https://tailscale.com/docs/features/taildrive)
+- [Tailscale 原始碼：`tailscale drive` CLI 說明](https://github.com/tailscale/tailscale/blob/main/cmd/tailscale/cli/drive.go)
+- [Taildrop：裝置間傳送檔案](/features/taildrop/)
+- [透過 Tailscale 在外面也能用 Time Machine 備份到家裡的 NAS](/use-cases/time-machine-over-tailscale/)
+- [QuickConnect 與 Tailscale：什麼時候用哪一個](/synology/quickconnect-vs-tailscale/)

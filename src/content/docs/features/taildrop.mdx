@@ -146,6 +146,7 @@ NAS 要先建立一個名為 `Taildrop` 的共用資料夾，收到的檔案會�
 - **Linux 收不到檔案？** 檔案還在收件匣裡，要執行 `sudo tailscale file get <目錄>` 取出。
 - **檔案會經過 Tailscale 的伺服器嗎？** 和其他 Tailscale 流量一樣，Taildrop 走點對點的加密連線，並使用最快的可用路徑。無法直連時會經由 DERP relay 轉送，但內容仍是端對端加密的，relay 看不到檔案內容。
 - **想傳給別人？** Taildrop 只能傳給自己的裝置。要和別人交換檔案，可以考慮用 [Tailscale Serve](/features/serve/) 在 tailnet 內分享資料夾，或用 [Tailscale Funnel](/features/funnel/) 短暫公開到網際網路。
+- **想長期掛一個共用資料夾？** Taildrop 適合一次性的傳檔。要讓 tailnet 上的人持續讀寫同一個資料夾，用 [Taildrive](/features/taildrive/)。
 
 ## 參考資料
 
