@@ -39,6 +39,8 @@ jobs:
   deploy:
     name: Build & Deploy
     needs: lint
+    # 手動觸發只允許在 main：feature branch 的未審內容不該部署到正式站。
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -81,3 +83,126 @@ jobs:
           packageManager: bun
           # 設定讀自 wrangler.jsonc；--message 用 SHA（Cloudflare API 拒絕非 ASCII 字串）
           command: deploy --message="${{ github.sha }}"
+
+  # 部署成功後，把本次 push 實際變動的內容頁送交 IndexNow，讓搜尋引擎
+  # 盡快收錄。從 git diff 取變動頁面，而不是回看時間窗：只改樣式或 CI
+  # 的部署不會重送沒變動的頁面。
+  indexnow:
+    name: Notify IndexNow
+    needs: deploy
+    # 同 deploy job 的理由：feature branch 不部署、也不通知搜尋引擎。
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # checkout + git diff 是本 job 唯一需要權限的地方。
+    permissions:
+      contents: read
+
+    steps:
+      - name: "☁️ Checkout repository"
+        uses: actions/checkout@v6
+        with:
+          # 完整歷史：比對基準可能是本次 push 前的任意 commit
+          fetch-depth: 0
+
+      # 依 src/lib/sitemap-lastmod.ts 的 filePathToUrlPath 規則把變動的
+      # 檔案路徑轉成 URL（兩處需保持同步）。partial 不對應單一頁面，
+      # 只警告、不送交。刪除的頁面不送：IndexNow 只管新增與更新。
+      - name: "🔎 Detect changed pages"
+        run: |
+          BEFORE="${{ github.event.before }}"
+          # workflow_dispatch 沒有 before；首次 push / force push 的 before
+          # 可能是全零或不可達。都退回用上一個 commit 當比對基準。
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "$BEFORE" 2>/dev/null; then
+            BEFORE="$(git rev-parse "$GITHUB_SHA^" 2>/dev/null || true)"
+          fi
+          if [ -z "$BEFORE" ]; then
+            echo "::error::無法決定比對基準 commit"
+            exit 1
+          fi
+
+          pages_raw="$(git diff --name-only --diff-filter=d "$BEFORE" "$GITHUB_SHA" -- src/content/docs)" || {
+            echo "::error::git diff 失敗（$BEFORE…$GITHUB_SHA）"
+            exit 1
+          }
+          partials_raw="$(git diff --name-only --diff-filter=d "$BEFORE" "$GITHUB_SHA" -- src/content/partials)" || true
+          pages=()
+          if [ -n "$pages_raw" ]; then mapfile -t pages <<<"$pages_raw"; fi
+          partials=()
+          if [ -n "$partials_raw" ]; then mapfile -t partials <<<"$partials_raw"; fi
+
+          if [ "${#partials[@]}" -gt 0 ]; then
+            echo "::warning::partial 有變動但無法推得受影響頁面，請視需要另行處理：${partials[*]}"
+          fi
+
+          if [ "${#pages[@]}" -eq 0 ]; then
+            echo "本次 push 沒有內容頁變動，略過 IndexNow 通知"
+            echo "SKIP_NOTIFY=true" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          echo "本次 push 變動的內容頁："
+          printf '%s\n' "${pages[@]}"
+
+          urls=()
+          for f in "${pages[@]}"; do
+            case "$f" in
+              *[!a-z0-9._/-]*)
+                echo "::error::路徑含非預期字元，無法安全轉成 URL：$f"
+                exit 1;;
+            esac
+            rel="${f#src/content/docs/}"
+            rel="${rel%.mdx}"
+            rel="${rel%.md}"
+            case "$rel" in
+              index) path="/";;
+              */index) path="/${rel%/index}/";;
+              *) path="/$rel/";;
+            esac
+            urls+=("https://tailscale.tw$path")
+          done
+
+          # -c 壓成單行：GITHUB_ENV 的 NAME=value 只吃單行值
+          echo "CHANGED_URLS_JSON=$(printf '%s\n' "${urls[@]}" | jq -Rnc '[inputs]')" >> "$GITHUB_ENV"
+
+      # 不猜固定秒數：輪詢線上 key 驗證檔，回 200 且內容與 repo 一致才繼續。
+      # 這同時涵蓋「驗證檔已隨部署上線」與「檔名 / 內容 / workflow 三處 key 一致」。
+      - name: "⏳ Wait for edge propagation"
+        if: env.SKIP_NOTIFY != 'true'
+        run: |
+          key_files=()
+          for f in public/*.txt; do
+            base="${f##*/}"
+            if [[ "$base" =~ ^[0-9a-f]{32}\.txt$ ]]; then
+              key_files+=("$f")
+            fi
+          done
+          if [ "${#key_files[@]}" -ne 1 ]; then
+            echo "::error::預期恰好一個 IndexNow key 驗證檔（public/<32-hex>.txt），實際找到 ${#key_files[@]} 個"
+            exit 1
+          fi
+          key_file="${key_files[0]}"
+          key="${key_file##*/}"
+          key="${key%.txt}"
+          if [ "$(cat "$key_file")" != "$key" ]; then
+            echo "::error::key 檔內容與檔名不一致：$key_file"
+            exit 1
+          fi
+          live="$(curl --retry 10 --retry-all-errors --retry-delay 3 -fsS "https://tailscale.tw/${key}.txt")"
+          if [ "$live" != "$key" ]; then
+            echo "::error::線上驗證檔內容與 repo 不一致"
+            exit 1
+          fi
+          echo "KEY=$key" >> "$GITHUB_ENV"
+
+      # 直接 POST JSON（host / key / keyLocation / urlList）到通用端點，
+      # 一次通知所有參與的搜尋引擎。curl -f 讓 4xx / 5xx（403 key 錯、
+      # 429 限流…）直接讓 job 變紅，失敗不會被藏起來。
+      - name: "📡 Notify IndexNow"
+        if: env.SKIP_NOTIFY != 'true'
+        run: |
+          payload="$(jq -nc --arg host 'tailscale.tw' --arg key "$KEY" --arg keyLocation "https://tailscale.tw/${KEY}.txt" --argjson urlList "$CHANGED_URLS_JSON" '{host: $host, key: $key, keyLocation: $keyLocation, urlList: $urlList}')"
+          echo "$payload"
+          curl -fsS --max-time 60 -X POST 'https://api.indexnow.org/indexnow' \
+            -H 'Content-Type: application/json; charset=utf-8' \
+            --data "$payload"
