@@ -8,7 +8,7 @@ import { mount } from "@cloudflare/nimbus-docs/client";
 
 declare global {
   interface Window {
-    __nbApplyTheme?: (mode?: "light" | "dark") => void;
+    __nbApplyTheme?: (mode?: "light" | "dark" | null) => void;
   }
 }
 
@@ -20,7 +20,7 @@ function initThemeToggle(button: HTMLElement): () => void {
         : "dark";
     try {
       localStorage.setItem("ui-mode", mode);
-      window.__nbApplyTheme?.();
+      window.__nbApplyTheme?.(null);
     } catch {
       // Storage is blocked (private mode, restricted contexts): keep the
       // choice for this page.

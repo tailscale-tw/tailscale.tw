@@ -113,9 +113,11 @@ const resolvedMarkdownUrl =
           if (e.key === KEY) applyTheme();
         });
 
-        // The toggle passes a mode only when storage refused it.
+        // The toggle passes a mode only when storage refused it, and null
+        // once a later write succeeds, so the stored choice wins again.
         window.__nbApplyTheme = mode => {
           if (mode === "dark" || mode === "light") unsaved = mode;
+          else if (mode === null) unsaved = null;
           applyTheme();
         };
       })();
