@@ -2,7 +2,7 @@
 /**
  * MobileTOC — compact "jump to section" menu for narrow viewports.
  *
- * The desktop `TOC` rail only renders at `lg+` (right column). Below that
+ * The desktop `TOC` rail only renders at `xl+` (right column). Below that
  * there's no on-this-page nav, so this native `<select>` fills the gap: it
  * sits under the page title, tracks the active heading via scroll-spy, and
  * jumps to a section on change.
@@ -38,11 +38,13 @@ const hasHeadings = headings.length > 0;
       class="w-full appearance-none rounded-md border border-border bg-background py-2.5 pl-3 pr-9 text-sm font-medium text-foreground transition-colors hover:border-foreground/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
     >
       <option value="_top">Overview</option>
-      {headings.map(heading => (
-        <option value={heading.slug}>
-          {`${" ".repeat(Math.max(0, heading.depth - 2))}${heading.text}`}
-        </option>
-      ))}
+      {headings
+        .filter(heading => heading.slug)
+        .map(heading => (
+          <option value={heading.slug}>
+            {`${" ".repeat(Math.max(0, heading.depth - 2))}${heading.text}`}
+          </option>
+        ))}
     </select>
     <Icon
       name="ph:caret-down"

@@ -204,7 +204,7 @@ export function initSearch(config: SearchConfig): SearchInstance {
   }
 
   input.addEventListener("input", handleInput);
-  input.closest("dialog")?.addEventListener("keydown", handleKeydown);
+  input.addEventListener("keydown", handleKeydown);
 
   return {
     async reset() {
@@ -222,7 +222,7 @@ export function initSearch(config: SearchConfig): SearchInstance {
       activeController?.abort();
       if (debounceTimer) clearTimeout(debounceTimer);
       input.removeEventListener("input", handleInput);
-      input.closest("dialog")?.removeEventListener("keydown", handleKeydown);
+      input.removeEventListener("keydown", handleKeydown);
     },
   };
 }
