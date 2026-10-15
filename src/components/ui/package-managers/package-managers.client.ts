@@ -16,6 +16,9 @@ function initPackageManager(container: HTMLElement): () => void {
   const checkTpl = container.querySelector<HTMLTemplateElement>(
     "[data-nb-pm-icon-check]"
   );
+  const failTpl = container.querySelector<HTMLTemplateElement>(
+    "[data-nb-pm-icon-fail]"
+  );
 
   const tabs = initTabs({
     container,
@@ -41,15 +44,20 @@ function initPackageManager(container: HTMLElement): () => void {
       } = {
         btn,
         handler: async () => {
+          let copied = true;
           try {
             await navigator.clipboard.writeText(btn.dataset.nbCommand ?? "");
           } catch {
-            return;
+            copied = false;
           }
-          btn.replaceChildren(cloneIcon(checkTpl));
+          btn.replaceChildren(
+            cloneIcon(copied ? checkTpl : (failTpl ?? copyTpl))
+          );
+          btn.setAttribute("aria-label", copied ? "Copied" : "Couldn't copy");
           if (handlerInfo.timer) window.clearTimeout(handlerInfo.timer);
           handlerInfo.timer = window.setTimeout(() => {
             btn.replaceChildren(cloneIcon(copyTpl));
+            btn.setAttribute("aria-label", "Copy to clipboard");
           }, 1500);
         },
       };
