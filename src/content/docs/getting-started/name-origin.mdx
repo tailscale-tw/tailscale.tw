@@ -1,0 +1,98 @@
+---
+title: Tailscale 這個名字從哪裡來：Google 論文〈The Tail at Scale〉
+description: Tailscale 的名字借自 Jeff Dean 與 Luiz Barroso 2013 年的 Google 論文〈The Tail at Scale〉，但意思反過來用；整理論文內容、創辦人的說法與穿山甲吉祥物的由來
+sidebar:
+  order: 5
+  label: Tailscale 名稱由來
+---
+
+Tailscale 這個名字其實在玩一篇 Google 論文的標題：2013 年刊登於《Communications of the ACM》的〈The Tail at Scale〉。有意思的是，Tailscale 借了這個標題，意思卻反過來用。
+
+> 本文依 2026 年 10 月查得的公開資料整理（論文、維基百科、創辦人訪談與 Tailscale 官方部落格），來源列於文末。
+
+## 論文：〈The Tail at Scale〉
+
+〈The Tail at Scale〉發表於 2013 年 2 月的 CACM，作者是兩位 Google 基礎架構的核心人物。
+
+**Jeff Dean** 是 Google 第 30 號員工，1999 年加入。他和長期搭檔 Sanjay Ghemawat 一起設計了 MapReduce、Bigtable 等支撐 Google 搜尋的基礎系統，後來共同創辦 Google Brain，2023 年起擔任 Google 首席科學家。2026 年 8 月，他離開待了 27 年的 Google，與 Sanjay Ghemawat、Oriol Vinyals、Quoc Le 共同創辦 Discovery Loop。這是一家公益公司（public benefit corporation），目標是用 AI 自動化科學與工程研究，Alphabet 是創始投資人兼雲端合作夥伴。
+
+**Luiz André Barroso** 是 Google 倉儲級（warehouse-scale）資料中心的主要設計者，與 Urs Hölzle 合著《The Datacenter as a Computer》，這本書被視為該領域的標準教科書。他於 2023 年 9 月 16 日辭世，享年 59 歲。
+
+### 論文在講什麼：長尾延遲
+
+大型線上服務處理一個使用者請求時，常常要把工作「扇出」（fan-out）給大量伺服器平行處理，再等所有結果回來才能組成回應。問題在於：整個請求的速度取決於**最慢**的那一台。
+
+論文用一個簡單的例子說明。假設單台伺服器有 1% 的機率回應變慢，看起來很罕見；但如果一個請求要同時等 100 台伺服器，只要其中一台慢，整個請求就慢：
+
+```text
+1 − 0.99¹⁰⁰ ≈ 63%
+```
+
+超過六成的請求會被拖住。規模一大，罕見事件就變成常態，這就是「tail at scale」。
+
+論文的核心主張是：在這種規模下，要完全消除延遲變異既昂貴又不切實際，比較好的做法是設計出**能容忍長尾的系統**，就像容錯系統能容忍故障一樣。它提出的技巧包括：
+
+- **Hedged requests（對沖請求）**：請求等得太久沒回應，就再送一份給另一台副本，誰先回就用誰。
+- **Tied requests（綁定請求）**：同時把請求排進多台伺服器的佇列，其中一台開始處理時就通知其他台取消。
+- **Micro-partitioning（微分區）與 selective replication（選擇性複製）**：把資料切得更細、熱門資料多放幾份，讓負載更容易重新平衡。
+- **Latency-induced probation（延遲觀察期）**：暫時把表現異常緩慢的機器移出服務。
+
+## Tailscale：同一個 tail，同一個 scale，方向相反
+
+Tailscale 於 2019 年創立，創辦人包括 Avery Pennarun、David Crawshaw、David Carney 與 Brad Fitzpatrick。Pennarun 本人在 Google 待過七年多，參與過 Google Wallet、Google Fiber 等專案。
+
+關於名字的由來，有幾個說法可以對照著看。
+
+### 說法一：取自論文
+
+最直接的說法來自 2022 年 1 月 Pennarun 與 Fitzpatrick 上 _Security Cryptography Whatever_ podcast 的訪談（[逐字稿](https://securitycryptographywhatever.com/2022/01/15/tailscale-with-avery-pennarun-brad-fitzpatrick/)）。主持人問「Are you guys named for the paper?」，Pennarun 回答是：最初就是拿 Google 那篇〈The Tail at Scale〉開的玩笑，取名是出於對這篇論文的欣賞，但意思被他反過來用。大型服務才會碰到那些極罕見的長尾問題，而長尾上的絕大多數產品只需要一兩台伺服器，根本不會遇到，所以他說 Tailscale 講的是「the scale at tail」，而不是「the tail at scale」。
+
+他也提到，公司名稱比產品還早決定，甚至在還沒想好要做什麼之前就定了。當時的出發點，是受不了大家看了 Google 精彩的技術分享，就把所有東西都設計過頭。英文維基百科的 Tailscale 條目也引用這段訪談，寫明公司名稱的靈感來自這篇論文。
+
+### 說法二：Internet-scale 的反面
+
+Pennarun 在 2025 年接受 Stratechery 的 Ben Thompson 訪問時說，Tailscale 這個名字比公司更早出現。他想要的是「Internet-scale」的反面：大家都在模仿 Google 的規模，但大多數人根本不需要。他更有興趣解決的，是每個人都會碰到、卻不需要 Google 規模基礎設施就能解決的那條「長尾小問題」。
+
+他在 2026 年初接受 Pulse 2.0 訪問時也有類似說法：在 Google 學到很多關於規模的事，然後刻意打造 Tailscale 去解決相反的問題，也就是日常網路連線的長尾。
+
+### 說法三：小團隊、人的尺度
+
+Tailscale 官方部落格 2023 年一篇談吉祥物的文章，則把名字拆成 Tail 和 Scale 來解釋：讓小型、人的尺度的團隊能輕鬆建立可信任的網路，而不必背負那些無法隨小團隊擴展的軟體與維運「長尾」問題。
+
+同一篇文章還順便解釋了非官方吉祥物的由來：穿山甲（pangolin）既有尾巴（tail）又有鱗片（scale），完美對應公司名字。他們甚至提議把一群穿山甲的集合名詞定為「a network of pangolins」。
+
+### 三種說法其實是同一件事
+
+把這三種說法放在一起，會發現它們並不衝突。論文提供了字面上的梗；真正的意思則被翻轉過來：
+
+|              | 〈The Tail at Scale〉          | Tailscale                            |
+| ------------ | ------------------------------ | ------------------------------------ |
+| tail 指的是  | 延遲分布的長尾：少數極慢的請求 | 需求的長尾：每個人都有的零碎網路問題 |
+| scale 指的是 | 成千上萬台伺服器的 Google 規模 | 人的尺度：一個人、一個家、一個小團隊 |
+| 要解決的問題 | 在超大規模下馴服長尾延遲       | 讓不需要超大規模的人也能輕鬆連線     |
+
+一篇教你在成千上萬台機器上馴服長尾，一家公司則讓你連十台機器都不用煩惱 NAT、防火牆，還有家裡和公司之間到底要怎麼連。至於 Tailscale 實際上怎麼做到，可以接著看 [Tailscale 是什麼](/getting-started/what-is-tailscale/) 與 [NAT 穿透原理](/getting-started/nat-traversal/)。
+
+## 參考資料
+
+**論文**
+
+- Jeffrey Dean, Luiz André Barroso. [The Tail at Scale](https://cacm.acm.org/research/the-tail-at-scale/). _Communications of the ACM_, Vol. 56, No. 2, 2013.
+- Google Research 頁面：[The Tail at Scale](https://research.google/pubs/the-tail-at-scale/)
+
+**Tailscale 命名**
+
+- Wikipedia：[Tailscale](https://en.wikipedia.org/wiki/Tailscale)
+- Security Cryptography Whatever podcast：[Tailscale with Avery Pennarun and Brad Fitzpatrick](https://securitycryptographywhatever.com/2022/01/15/tailscale-with-avery-pennarun-brad-fitzpatrick/)（2022-01-15，逐字稿；節目音檔在 [Buzzsprout](https://www.buzzsprout.com/1822302/episodes/9890092-tailscale-with-avery-pennarun-brad-fitzpatrick)）
+- Stratechery：[An Interview with Tailscale Co-Founder and CEO Avery Pennarun](https://stratechery.com/2025/an-interview-with-tailscale-co-founder-and-ceo-avery-pennarun/)（2025）
+- Tailscale Blog：[Stratechery 訪談重點整理（origin story）](https://tailscale.com/blog/stratechery-origin-story)
+- Tailscale Blog：[A network of pangolins](https://tailscale.com/blog/network-pangolins)（2023-07-07）
+- Pulse 2.0：[Interview With Co-Founder & CEO Avery Pennarun](https://pulse2.com/tailscale-profile-avery-pennarun-interview/)（2026-01-26）
+
+**作者相關**
+
+- Wikipedia：[Jeff Dean](https://en.wikipedia.org/wiki/Jeff_Dean)
+- GeekWire：[The startup idea that convinced a UW computer science legend to leave Google after 27 years](https://www.geekwire.com/2026/the-startup-idea-that-convinced-a-uw-computer-science-legend-to-leave-google-after-27-years/)（2026-08）
+- IEEE Computer Society：[In Memoriam — Luiz Barroso](https://www.computer.org/about/in-memoriam)
+- SIGARCH Computer Architecture Today：[Remembering Luiz Barroso](https://www.sigarch.org/remembering-luiz-barroso/)
+- IEEE Spectrum：[The Visionary Designer Behind Google's Warehouse-Scale Data Centers](https://spectrum.ieee.org/the-visionary-designer-behind-googles-warehousescale-data-centers)
