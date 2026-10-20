@@ -110,7 +110,7 @@ sudo tailscale set --exit-node=<ID>      # 只套用這一次的推薦
 sudo tailscale set --exit-node=auto:any  # 持續跟著推薦自動切換
 ```
 
-`auto:any` 會在可用的 Exit Node 或網路狀況改變時自動換到新的推薦；手動指定的 Exit Node 則不會被推薦結果改掉。圖形介面裡是在 **Exit Nodes** 選單選 **Recommended**。推薦時會優先選自己的 Exit Node，tailnet 裡沒有可用的才會推薦 [Mullvad](/features/mullvad-exit-node/) 的伺服器。
+這裡的 `<ID>` 是 `exit-node suggest` 輸出的節點 ID，不是前面用的 Tailscale IP（`100.x.y.z`），照它提示的指令貼上即可。`auto:any` 會在可用的 Exit Node 或網路狀況改變時自動換到新的推薦；手動指定的 Exit Node 則不會被推薦結果改掉。圖形介面裡是在 **Exit Nodes** 選單選 **Recommended**。推薦時會優先選自己的 Exit Node，tailnet 裡沒有可用的才會推薦 [Mullvad](/features/mullvad-exit-node/) 的伺服器。
 
 ## 連本地區網：--exit-node-allow-lan-access
 
