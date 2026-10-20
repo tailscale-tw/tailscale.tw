@@ -10,48 +10,75 @@ sidebar:
 
 ## 前言
 
-Tailscale 是一個基於 WireGuard 技術的網路連接工具，可幫助您輕鬆建立安全的私人網絡。而 Proxmox Virtual Environment (PVE) 則是一個強大的開源虛擬化平台，支援 LXC 容器和 KVM 虛擬機。
+Tailscale 是一個基於 WireGuard 技術的網路連線工具，可以幫你輕鬆建立安全的私人網路。Proxmox Virtual Environment（PVE）則是一個強大的開源虛擬化平台，支援 LXC 容器和 KVM 虛擬機。
 
-在 PVE 的 LXC 容器中使用 Tailscale 需要特別設定，因為預設情況下，無特權(unprivileged)的 LXC 容器無法訪問 Tailscale 所需的網路資源。本文將詳細講解如何解決這個問題。
+在 PVE 的 LXC 容器中使用 Tailscale 需要特別設定，因為預設情況下，無特權（unprivileged）的 LXC 容器存取不到 Tailscale 需要的網路資源。本文說明如何解決這個問題。
+
+Tailscale 官方也有一支示範影片：
+
+<Embed
+  src="https://www.youtube-nocookie.com/embed/JC63OGSzTQI"
+  title="How to install Tailscale in an LXC on Proxmox"
+/>
 
 ## 背景知識
 
 ### LXC 容器簡介
 
-LXC (Linux Containers) 是一種輕量級的虛擬化技術，可讓您在單一主機上運行多個獨立的 Linux 系統，比傳統的虛擬機消耗更少的資源。LXC 容器分為:
+LXC（Linux Containers）是一種輕量級的虛擬化技術，可以在單一主機上執行多個獨立的 Linux 系統，比傳統的虛擬機消耗更少的資源。LXC 容器分為：
 
-- **特權容器**: 容器內的 root 用戶擁有主機系統上的 root 權限
-- **無特權容器**: 容器內的 root 用戶在主機系統上被映射為非特權用戶，安全性更高
+- **特權容器**：容器內的 root 使用者擁有主機上的 root 權限
+- **無特權容器**：容器內的 root 使用者（`uid 0`）在主機上被對應成非特權使用者，安全性更高
 
-### Tailscale 工作原理
+### Tailscale 的運作方式
 
-Tailscale 使用 UDP 封包進行資料傳輸，不需要任何特權操作或核心模組即可建立隧道連接。不過，它確實需要訪問 `/dev/tun` 設備，而無特權的 LXC 容器通常沒有這個權限。
+Tailscale 把封包包在 UDP 裡傳送，建立通道不需要核心模組或任何特權操作。不過它需要存取 `/dev/net/tun`（TUN 裝置），而無特權的 LXC 容器通常沒有這個裝置。
 
 ## 在 PVE LXC 容器中啟用 Tailscale 的步驟
 
-### 1. 修改 LXC 容器配置
+### 1. 讓容器存取 `/dev/net/tun`
 
-首先，我們需要修改 LXC 容器的配置文件，以允許容器訪問 `/dev/tun` 設備。
+以下三種方式擇一即可。
 
-#### 對於 **Proxmox 7.0 及以上**版本，請在 LXC 容器的配置文件中添加以下行：
+#### 方式一：PVE 網頁介面（Device Passthrough）
+
+這是官方文件目前的主要做法：
+
+1. 建立 LXC 容器。
+2. 進入容器的 **Resources** 分頁。
+3. 選 **Add** → **Device Passthrough**。
+4. 在 **Add Device** 視窗的 **Device Path** 欄位填入 `/dev/net/tun`，按 **Add**。
+
+#### 方式二：`pct set` 指令
+
+在 PVE 主機上執行（`CTID` 換成容器 ID，例如 `112`）：
+
+```bash
+pct set CTID --dev0 /dev/net/tun
+pct set CTID --features keyctl=1,nesting=1
+```
+
+第一行做的事跟方式一相同；第二行開啟容器的 `keyctl` 與 `nesting` 功能，官方文件把這兩行列在一起。
+
+#### 方式三：手動修改容器設定檔
+
+網頁介面沒有 Device Passthrough 的舊版 PVE（例如 Proxmox 7.0），可以直接修改容器的設定檔。假設容器 ID 為 112，就編輯 `/etc/pve/lxc/112.conf`，加入：
 
 ```
 lxc.cgroup2.devices.allow: c 10:200 rwm
 lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file
 ```
 
-例如，假設您的 LXC 容器 ID 為 112，則需要編輯 `/etc/pve/lxc/112.conf` 文件。
-
-#### 對於 **Proxmox 6.x 及更早**版本，請使用以下配置：
+**Proxmox 6.x 及更早**的版本用的是 `cgroup` 而不是 `cgroup2`：
 
 ```
 lxc.cgroup.devices.allow: c 10:200 rwm
 lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file
 ```
 
-### 2. 重啟 LXC 容器
+### 2. 重新啟動 LXC 容器
 
-配置更改後，需要重啟 LXC 容器才能使更改生效。您可以通過 PVE Web 介面或使用命令行重啟：
+改完設定後，容器要先關機再開機才會生效（如果容器原本就在執行中）。可以在 PVE 網頁介面操作，或在主機上用指令：
 
 ```bash
 pct stop 112
@@ -60,59 +87,62 @@ pct start 112
 
 ### 3. 在 LXC 容器中安裝 Tailscale
 
-現在，您可以在 LXC 容器內安裝 Tailscale package。根據您容器中運行的 Linux 發行版，安裝命令會有所不同。
-
-#### Debian/Ubuntu:
+確認容器裡已經有 `/dev/net/tun` 後，就可以安裝 Tailscale 的 Linux 套件。最簡單的方式是用官方安裝腳本，它會自動判斷發行版與版本（容器裡要先有 `curl`）：
 
 ```bash
-curl -fsSL https://pkgs.tailscale.com/stable/debian/bullseye.noarmor.gpg | sudo tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
-curl -fsSL https://pkgs.tailscale.com/stable/debian/bullseye.tailscale-keyring.list | sudo tee /etc/apt/sources.list.d/tailscale.list
-sudo apt-get update
-sudo apt-get install tailscale
+curl -fsSL https://tailscale.com/install.sh | sh
 ```
 
-#### CentOS/RHEL:
+想手動設定套件庫的話，各發行版的指令可以在 [Tailscale 的套件頁面](https://pkgs.tailscale.com/stable/)找到。注意套件庫網址裡有發行版代號（例如 Debian 的 `bookworm`），要跟容器的版本一致，不要直接照抄舊文章裡的代號。
 
-```bash
-dnf config-manager --add-repo https://pkgs.tailscale.com/stable/centos/8/tailscale.repo
-dnf install tailscale
-```
+### 4. 啟動並設定 Tailscale
 
-### 4. 啟動並配置 Tailscale
-
-安裝完成後，啟動 Tailscale 服務並登入您的 Tailscale 帳戶：
+安裝完成後，啟動 Tailscale 服務並登入 Tailscale 帳號：
 
 ```bash
 sudo systemctl enable --now tailscaled
 sudo tailscale up
 ```
 
-執行最後一個命令後，您將獲得一個 URL。訪問該 URL 並登入您的 Tailscale 帳戶以授權此設備。
+執行最後一個指令後會出現一個網址，打開它並登入 Tailscale 帳號，就能授權這台裝置。
 
-## 常見問題解答
+## 常見問題
 
-### 對於較舊的系統（CentOS 7 或 Ubuntu 16.x）
+### 較舊的系統（CentOS 7 或 Ubuntu 16.x）
 
-某些舊版本的 Linux 系統在 Proxmox 7.0 中可能仍然無法訪問 `/dev/net/tun`。這是因為這些系統的 systemd 版本太舊，無法認識 `cgroup2`。
+某些舊版 Linux 在 Proxmox 7.0 中可能還是存取不到 `/dev/net/tun`，因為這些系統的 systemd 太舊，不認得 `cgroup2`。
 
-Proxmox 提供了解決此問題的[指南](https://pve.proxmox.com/wiki/Upgrade_from_6.x_to_7.0#Old_Container_and_CGroupv2)。
+Proxmox 有提供這個問題的[解決指南](https://pve.proxmox.com/wiki/Upgrade_from_6.x_to_7.0#Old_Container_and_CGroupv2)。
 
-### 使用 user space network 模式
+### 不開放 TUN：使用 userspace networking 模式
 
-如果您不想授予容器 `/dev/tun` 訪問權限，可以使用 Tailscale 的[user space network 模式](https://tailscale.com/kb/1112/userspace-networking)。這種模式不需要任何管理訪問權限，但性能可能略低。
+如果不想讓容器存取 `/dev/net/tun`，可以改用 Tailscale 的 [userspace networking 模式](https://tailscale.com/docs/concepts/userspace-networking)。這個模式完全不需要管理權限，但效能可能略低。
 
-啟用方法：
+userspace networking 是 `tailscaled` 的啟動選項，不是 `tailscale up` 的旗標。用 Debian、Ubuntu 或 RHEL 系的套件安裝的話，編輯 `/etc/default/tailscaled`，把 `FLAGS` 改成：
+
+```
+FLAGS="--tun=userspace-networking"
+```
+
+再重新啟動服務：
 
 ```bash
-sudo tailscale up --netfilter-mode=off
+sudo systemctl restart tailscaled
+sudo tailscale up
 ```
+
+這個模式下，其他 tailnet 裝置連進這個容器沒問題；但容器裡的程式要主動連到其他 tailnet 裝置時，得經由 `tailscaled` 提供的 SOCKS5 或 HTTP proxy，細節見上面的官方文件。
+
+使用 Proxmox 6.x 以前的手動設定時，不開放 TUN 就是把設定檔裡的 `lxc.mount.entry:` 那行拿掉。
 
 ## 結論
 
-通過以上設定，您可以在 Proxmox 虛擬環境的 LXC 容器中成功運行 Tailscale，從而將您的容器安全地連接到您的 Tailscale 網絡。這種配置特別適合於需要在多個虛擬環境中建立安全連接的使用場景，例如家庭實驗室、個人雲服務或分散式開發環境。
+完成以上設定後，就可以在 Proxmox 的 LXC 容器中執行 Tailscale，把容器安全地接上你的 Tailscale 網路。這種做法特別適合需要在多個虛擬環境之間建立安全連線的情境，例如家庭實驗室、個人雲端服務或分散式的開發環境。
 
-Tailscale 與 PVE LXC 容器的結合為網絡管理提供了靈活、安全且易於管理的解決方案，無論您是管理個人的家庭服務器還是企業級的虛擬化環境，都能受益於這種配置。
+不論是管理個人的家用伺服器還是企業的虛擬化環境，Tailscale 搭配 PVE LXC 容器都是靈活、安全又容易管理的做法。
 
 ## 參考文件
 
-- [Tailscale in LXC containers](https://tailscale.com/kb/1130/lxc-unprivileged)
+- [Tailscale in LXC containers](https://tailscale.com/docs/features/containers/lxc/lxc-unprivileged)
+- [Userspace networking mode](https://tailscale.com/docs/concepts/userspace-networking)
+- [Proxmox Container Toolkit（`pct`）](https://pve.proxmox.com/pve-docs/chapter-pct.html)
