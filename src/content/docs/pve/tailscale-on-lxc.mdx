@@ -133,7 +133,7 @@ sudo tailscale up
 
 這個模式下，其他 tailnet 裝置連進這個容器沒問題；但容器裡的程式要主動連到其他 tailnet 裝置時，得經由 `tailscaled` 提供的 SOCKS5 或 HTTP proxy，細節見上面的官方文件。
 
-使用 Proxmox 6.x 以前的手動設定時，不開放 TUN 就是把設定檔裡的 `lxc.mount.entry:` 那行拿掉。
+使用 Proxmox 6.x 及更早版本的手動設定時，不開放 TUN 就是把設定檔裡的 `lxc.mount.entry:` 那行拿掉。
 
 ## 結論
 
