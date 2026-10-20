@@ -10,6 +10,13 @@ sidebar:
 
 > 本文以 Tailscale v1.102（2026 年 10 月）為準，指令採官方文件目前的 `tailscale set` 語法。同樣的旗標也相容於舊式的 `tailscale up`，但用 `up` 改設定時要把之前設過的所有非預設旗標一次帶齊——漏帶會直接報錯（防止不小心把舊設定清掉）——要改單一設定用 `tailscale set` 就好。
 
+Tailscale 官方也有一支介紹影片：
+
+<Embed
+  src="https://www.youtube-nocookie.com/embed/Ad7D2pkFNdA"
+  title="Exit Nodes | Tailscale Explained"
+/>
+
 ## Exit Node 是什麼
 
 Exit Node 是 tailnet 裡一台被指定為「出口」的裝置：其他裝置把預設路由（`0.0.0.0/0`、`::/0`）指向它，所有上網流量就經由它轉送出去，對外看到的 IP 就是它的。
