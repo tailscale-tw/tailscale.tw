@@ -51,6 +51,8 @@ MagicDNS 的開關是整個 tailnet 共用的。只有某台裝置有問題時�
 
 `tailscaled` 在每台裝置上都有一個 DNS 轉發器，位址是 `100.100.100.100`。它回答 MagicDNS 的名稱，其他查詢再依 Admin console 的設定轉給對應的 nameserver。
 
+`100.100.100.100`（常唸作 quad100）位在 `100.64.0.0/10` 這段 CGNAT 保留範圍（見 [Tailscale IP 為什麼是 100.x](/getting-started/tailscale-ip-addresses/)），和 `192.168.0.0/16` 這類私有位址一樣，在網際網路上路由不到。Tailscale 把系統的 DNS 伺服器（或下面所說的特定網域）指向它，再把 `100.100.100.100/32` 的路由導回 Tailscale，所以作業系統送出的未加密 DNS 查詢不會離開裝置。MagicDNS 名稱也不是向某台伺服器查來的：控制伺服器會把這台裝置能存取的所有名稱推送下來，沒有外部服務能記錄你查了哪些 tailnet 名稱。因為是推送，也沒有 TTL 快取的問題，新增裝置或改名之後，其他裝置馬上就能用新名稱。
+
 各平台把查詢交給它的方式不同：
 
 - **macOS**：在 `/etc/resolver/` 下為 tailnet 網域（以及 split DNS 網域）建立設定，只有這些網域走 `100.100.100.100`，其他查詢照舊。
@@ -78,6 +80,7 @@ MagicDNS 不能新增任意的 DNS 紀錄（例如替某個服務多取一個名
 幾點要注意：
 
 - 選 Cloudflare、Google 這類公開 DNS 時，Tailscale 會自動改用 **DNS-over-HTTPS（DoH）** 送出查詢。
+- Nameserver 是 Tailscale IP 或 Subnet Router 後面的內網 IP 時，即使是一般的 UDP DNS，查詢也走 tailnet、由 WireGuard 加密。
 - 加入某個供應商的其中一個位址，Tailscale 會把該供應商的所有位址視為同一組一起使用。
 - 多台 nameserver 不保證依你排列的順序查詢。Tailscale 自己代理查詢時會**同時**問所有 nameserver，用最快的回應。如果某台 DNS 會回答其他台沒有的內網名稱，不要把它和公開 DNS 一起當 global nameserver，改用 split DNS。
 - 開 Override 前確認所有裝置都連得到這些 nameserver。用 Tailscale IP 或內網 IP 的 DNS 伺服器，要被存取規則允許，內網 IP 還需要 [Subnet Router](/features/subnet-router/)。連不到的話，整台裝置都會解析不了網域。
@@ -162,3 +165,4 @@ macOS 的 `host`、`nslookup` 也會繞過系統 DNS，可能出現 `ping nas` �
 - [DNS problems with internal services and DNS rebinding protection（官方）](https://tailscale.com/docs/reference/faq/dns-rebinding)
 - [Use NextDNS（官方）](https://tailscale.com/docs/integrations/nextdns)
 - [tailscale dns（官方 CLI 說明）](https://tailscale.com/docs/reference/tailscale-cli#dns)
+- [Private DNS with MagicDNS（官方部落格）](https://tailscale.com/blog/2021-09-private-dns-with-magicdns)
