@@ -1,6 +1,7 @@
 ---
 import Icon from "@cloudflare/nimbus-docs/components/Icon.astro";
 import { withBase } from "@cloudflare/nimbus-docs/runtime";
+import { config } from "virtual:nimbus/config";
 import { cn } from "@/lib/cn";
 import type { HTMLAttributes } from "astro/types";
 
@@ -17,11 +18,14 @@ const resolvedMarkdownUrl = markdownUrl
 const baseBtn =
   "inline-flex cursor-pointer items-center gap-1.5 rounded-md bg-transparent px-2 py-1 text-muted-foreground no-underline transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2";
 
+// Pin locale and time zone so the date doesn't depend on the build machine
+// (CI runs in UTC with an English locale). zh-TW renders "2026年10月7日".
 const formattedDate = lastUpdated
-  ? new Intl.DateTimeFormat(undefined, {
+  ? new Intl.DateTimeFormat(config.locale ?? "zh-TW", {
       year: "numeric",
-      month: "short",
+      month: "long",
       day: "numeric",
+      timeZone: "Asia/Taipei",
     }).format(lastUpdated)
   : null;
 ---
@@ -40,7 +44,7 @@ const formattedDate = lastUpdated
     {lastUpdated && (
       <span class="inline-flex items-center gap-1.5 px-2 py-1 text-muted-foreground">
         <Icon name="ph:clock" class="w-3.5 h-3.5" />
-        Updated{" "}
+        最後更新{" "}
         <time datetime={lastUpdated.toISOString()}>{formattedDate}</time>
       </span>
     )}
