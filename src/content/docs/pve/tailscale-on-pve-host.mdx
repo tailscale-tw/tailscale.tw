@@ -171,7 +171,9 @@ PVE 主機是整個 homelab 的鑰匙，存取規則應該收到最小：只有�
 ```
 
 - 第一條讓管理員連主機的 Serve（443）、`pveproxy`（8006）與 SSH（22）。只用 Serve 的話可以拿掉 `tcp:8006`；只用 8006 的話拿掉 `tcp:443`。
-- 第二條放行內部網段。範例刻意沒有放行整個 `192.168.1.0/24`：PVE 主機的 LAN IP 也在這個網段裡，放行整個網段就等於繞過第一條的埠限制，任何人都能從 LAN IP 連到主機的所有埠。要開 LAN 網段時，只放行實際需要的主機與埠。
+- 第二條放行內部網段。grants 的 `dst` 比對的是最終的目的 IP，PVE 主機只要在網段裡有位址，放行整個網段就會連主機那個位址的所有埠一起放開，繞過第一條的埠限制。
+  - 範例刻意沒有放行整個 `192.168.1.0/24`，因為主機的 LAN IP 也在裡面。要開 LAN 網段時，只放行實際需要的主機與埠。
+  - `10.10.10.0/24` 同樣包含主機自己的 `10.10.10.1`。範例為了簡潔直接用 `*`，被放行的 `group:pve-admins` 因此也能經由 `10.10.10.1` 連到主機的所有埠；想守住第一條的埠限制，就把 `ip` 收斂到 guest 實際需要的埠，或把 `dst` 改成個別 guest 的 IP。
 - `autoApprovers` 只負責「路由要不要核准」，存取權限仍然由 grants 決定。
 
 想用 Tailscale SSH 取代 OpenSSH，可以 `tailscale set --ssh` 再加 `ssh` 規則，見 [Tailscale SSH](/features/tailscale-ssh/)；建議保留 OpenSSH 當 Tailscale 出問題時的備援。grants 的寫法見 [ACL / Grants 入門](/admin/acl-grants/)。
