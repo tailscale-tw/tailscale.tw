@@ -1,0 +1,237 @@
+---
+title: 在 PVE 主機上安裝 Tailscale：遠端管理與 Subnet Router
+description: 把 Tailscale 直接裝在 Proxmox VE 主機（Debian）上，從外面連回 8006 管理介面與 SSH，並把 VM／LXC 所在的網段分享給 tailnet。說明裝在主機與裝在 LXC／VM 的取捨、PVE 9 的 IP forwarding、Serve 與憑證、存取規則、叢集與 MagicDNS 對容器的影響
+sidebar:
+  order: 1
+  label: 在 PVE 主機上安裝
+---
+
+[在 LXC 中使用 Tailscale](/pve/tailscale-on-lxc/) 講的是把 Tailscale 裝在容器裡；這篇講另一種做法：直接裝在 PVE 主機本身。主機上的 Tailscale 有兩個用途——人在外面也能連回 `:8006` 管理介面和 SSH，以及當 [Subnet Router](/features/subnet-router/)，把 VM、LXC 所在的網段分享給整個 tailnet。
+
+> 本文以 Tailscale v1.104 與 Proxmox VE 9（Debian 13 trixie）為準（2026 年 10 月），依 Tailscale 與 Proxmox 官方文件整理，未實際驗證。PVE 8（Debian 12 bookworm）的做法大致相同，差異處會另外註明。
+
+## 裝在主機，還是裝在 LXC／VM
+
+三種位置都能用，差別在「依賴什麼」和「動到什麼」：
+
+| 位置         | 優點                                                                        | 缺點                                                                                       |
+| ------------ | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| **PVE 主機** | 不依賴任何 guest；VM、LXC 全掛了也連得回管理介面；主機本來就接著每個 `vmbr` | 動到 hypervisor 本身；主機的 MagicDNS 設定會被複製進 LXC（見後文）；大版本升級要顧好套件庫 |
+| **LXC 容器** | 跟主機隔離；可以快照、備份、隨時重建；資源很省                              | 容器沒開就連不回來；無特權容器要先放行 `/dev/net/tun`                                      |
+| **VM**       | 隔離最完整，跟一般 Linux 主機完全一樣                                       | 最吃資源；同樣是 VM 沒開就連不回來                                                         |
+
+建議的分法：
+
+- **遠端管理**（`:8006`、SSH）放在**主機**上。管理通道就是要在出事時還能用，不該依賴某台 guest 有沒有開機。
+- **Subnet Router** 主機或 LXC 都可以。已經在主機上裝了 Tailscale，順便廣告網段最省事；想讓 hypervisor 盡量乾淨，就交給一台專門的 LXC。
+- 個別服務（Jellyfin、Home Assistant…）仍然建議在各自的 guest 裡裝 Tailscale，而不是全部經由主機的 Subnet Router 轉送：直接安裝的效能、存取控制粒度都比較好。
+
+Tailscale 官方的 Proxmox 文件把 VM 和 LXC 視為一般的 Linux 主機，主機上的用法則只談憑證與 Serve（見後文），並沒有說哪種位置是建議做法。
+
+## 1. 在主機上安裝
+
+PVE 主機預設沒有 `sudo`，以下指令都以 root 執行（網頁介面的 **Shell**，或 SSH 登入 root）。
+
+最簡單的方式是官方安裝腳本，會自動偵測 Debian 版本並加入套件庫：
+
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+```
+
+想自己加套件庫的話，PVE 9 是 Debian 13 `trixie`（PVE 8 換成 `bookworm`）：
+
+```bash
+curl -fsSL https://pkgs.tailscale.com/stable/debian/trixie.noarmor.gpg \
+  -o /usr/share/keyrings/tailscale-archive-keyring.gpg
+curl -fsSL https://pkgs.tailscale.com/stable/debian/trixie.tailscale-keyring.list \
+  -o /etc/apt/sources.list.d/tailscale.list
+apt update && apt install tailscale
+```
+
+接著登入。主機屬於伺服器，建議用 tag 登入，tag 裝置預設不會金鑰過期（見 [Tags 與 auth key](/admin/tags-auth-keys/)）；同時先關掉主機的 MagicDNS，原因在[後文](#5-magicdns-會被複製進-lxc)：
+
+```bash
+tailscale up --advertise-tags=tag:pve --accept-dns=false
+```
+
+`tailscale up` 印出的網址用瀏覽器開啟、登入授權。`tag:pve` 要先在 policy 的 `tagOwners` 定義好（見[存取規則](#4-存取規則只開-8006-與-ssh)），否則會被拒絕。
+
+## 2. 遠端存取管理介面
+
+裝好後最直接的用法：用 MagicDNS 名稱或 Tailscale IP 連 8006。
+
+```text
+https://pve.tailxxxxx.ts.net:8006
+```
+
+`pveproxy` 預設聽所有介面，`tailscale0` 也包含在內，不需要另外設定。但 PVE 預設用的是自簽憑證，瀏覽器會跳警告。要換成有效的憑證，有兩種做法，擇一即可：
+
+### 做法一：Tailscale Serve（建議）
+
+讓 Tailscale Serve 在 443 提供 HTTPS，再轉給本機的 8006。憑證由 `tailscaled` 自動取得、自動續期，網址也不用帶連接埠：
+
+```bash
+tailscale serve --bg https+insecure://localhost:8006
+```
+
+- `https+insecure://`：PVE 後端是自簽憑證，Serve 轉給它時不驗證憑證。這段連線只在主機內部的 loopback 上，不會出主機。
+- `--bg`：讓設定在背景常駐，重開機後自動恢復。
+- 之後用 `https://pve.tailxxxxx.ts.net/` 開啟管理介面。
+
+前提是 tailnet 已啟用 MagicDNS 與 HTTPS 憑證，第一次執行時 CLI 會提示你到 Admin console 開啟。noVNC 與 xterm.js 主控台走 WebSocket，經過 Serve 沒問題；SPICE 主控台用的是另一個埠（3128），不在這個 Serve 設定的範圍內。Serve 的完整用法見 [Tailscale Serve](/features/serve/)。
+
+### 做法二：把憑證裝進 PVE
+
+用 `tailscale cert` 取得憑證、`pvenode cert set` 裝進 PVE，連線仍然是 `:8006`。憑證 90 天到期，要排程定期更新，完整腳本見〈[憑證自動更新](/pve/auto-renew-tailscale-certificate-on-pve/)〉。
+
+兩種做法比較：
+
+- Serve 不用寫腳本、不用排程，但多一層代理；PVE 看到的來源 IP 會是 `127.0.0.1`。
+- 裝進 PVE 的話，用 LAN IP 直接連 8006 時也會出示這張憑證（只是名稱對不上 IP，瀏覽器仍會警告）。
+
+兩種做法的憑證都會讓這台主機的 MagicDNS 名稱出現在公開的憑證透明度日誌上，見 [HTTPS 憑證](/features/https-certificates/)。
+
+### 開了 PVE 防火牆時
+
+如果在 Datacenter 層級開了 PVE 防火牆，主機的 input 預設是 DROP，8006 與 22 只放行給 `management` 這個 IPSet（預設是本機的叢集網段）。從 tailnet 用 `100.x.y.z` 直接連 8006 會被擋下，這時有兩個選擇：
+
+- 改用 Serve。Serve 從 loopback 轉給 8006，不受這條限制；tailnet 上只需要放行 443——這也是由 Tailscale 端的 grants 控管，而不是 PVE 防火牆。
+- 在 PVE 防火牆加一條規則，允許 `100.64.0.0/10`（或指定介面 `tailscale0`）連 8006、22。
+
+## 3. 當 Subnet Router
+
+### 開啟 IP forwarding
+
+Debian 13 起，`systemd-sysctl` 不再讀 `/etc/sysctl.conf`，舊文章「把 `/etc/sysctl.conf` 裡的 `net.ipv4.ip_forward` 取消註解」的做法在 PVE 9 上重開機後就不會生效。一律寫到 `/etc/sysctl.d/`：
+
+```bash
+echo 'net.ipv4.ip_forward = 1' | tee -a /etc/sysctl.d/99-tailscale.conf
+sysctl -p /etc/sysctl.d/99-tailscale.conf
+```
+
+如果主機原本就有 NAT 用的內部 bridge（`/etc/network/interfaces` 裡有 `post-up echo 1 > /proc/sys/net/ipv4/ip_forward`），forwarding 其實已經開著，寫進 `sysctl.d` 只是讓它不依賴那一行。用 `sysctl net.ipv4.ip_forward` 確認。開啟 IPv4 forwarding 不影響 VM、LXC 經 bridge 的二層流量。
+
+**IPv6 要小心**：Tailscale 官方的 Subnet Router 文件會一起開 `net.ipv6.conf.all.forwarding = 1`。Linux 開了 IPv6 forwarding 後，預設就不再接受 Router Advertisement；如果 PVE 主機的 IPv6 位址或預設路由是靠 SLAAC 取得的，開下去主機就會失去 IPv6 連線。只廣告 IPv4 網段時不必開；確定要開，先在同一個檔案加上對 bridge 的例外：
+
+```text
+net.ipv6.conf.all.forwarding = 1
+net.ipv6.conf.vmbr0.accept_ra = 2
+```
+
+### 廣告網段
+
+PVE 常見的網路配置有兩種，廣告的網段不一樣：
+
+- **VM、LXC 直接接在 `vmbr0`**（跟主機、家裡其他設備同一個 LAN，例如 `192.168.1.0/24`）：廣告這個 LAN 網段，guest 和 LAN 上其他設備就一起涵蓋了。
+- **另外有一個只在主機內部的 bridge**（例如 `vmbr1`，`10.10.10.0/24`，主機是 `10.10.10.1`、對外做 NAT）：這個網段 LAN 上其他設備看不到，要另外廣告，tailnet 才連得進去。PVE SDN 的 Simple zone 也是同樣的情況。
+
+```bash
+tailscale set --advertise-routes=192.168.1.0/24,10.10.10.0/24
+```
+
+主機必須在要廣告的網段裡有一個 IP（介面）才能轉送。只把 VLAN 標籤帶給 guest、主機本身在該 VLAN 上沒有 IP 的情況（VLAN-aware bridge 常見），主機轉送不到那個網段；要嘛在主機上加一個該 VLAN 的介面（例如 `vmbr0.20`）並設 IP，要嘛改由那個 VLAN 裡的 guest 當 Subnet Router。
+
+### 核准路由
+
+到 Admin console 的 [Machines](https://console.tailscale.com/admin/machines) 頁面，找到這台主機，在 **Subnets** 區點 **Edit**，勾選網段後儲存。要省掉這一步，就在 policy 用 `autoApprovers` 讓 `tag:pve` 廣告的網段自動核准（範例見下一節）。核准、SNAT、用戶端 `--accept-routes` 等細節見 [Subnet Router](/features/subnet-router/)。
+
+PVE 主機本身**不要**開 `--accept-routes`（Linux 預設就是關的）。如果 tailnet 裡有另一台 Subnet Router 也廣告了 `192.168.1.0/24`，主機接受之後可能把往自己 LAN 的流量繞進 tailnet，連帶影響叢集與 guest 的連線。
+
+## 4. 存取規則：只開 8006 與 SSH
+
+PVE 主機是整個 homelab 的鑰匙，存取規則應該收到最小：只有管理員能連，而且只開需要的埠。
+
+```json
+{
+  "groups": {
+    "group:pve-admins": ["alice@example.com"]
+  },
+  "tagOwners": {
+    "tag:pve": ["autogroup:admin"]
+  },
+  "grants": [
+    {
+      "src": ["group:pve-admins"],
+      "dst": ["tag:pve"],
+      "ip": ["tcp:443", "tcp:8006", "tcp:22"]
+    },
+    {
+      "src": ["group:pve-admins"],
+      "dst": ["10.10.10.0/24"],
+      "ip": ["*"]
+    }
+  ],
+  "autoApprovers": {
+    "routes": {
+      "192.168.1.0/24": ["tag:pve"],
+      "10.10.10.0/24": ["tag:pve"]
+    }
+  }
+}
+```
+
+- 第一條讓管理員連主機的 Serve（443）、`pveproxy`（8006）與 SSH（22）。只用 Serve 的話可以拿掉 `tcp:8006`；只用 8006 的話拿掉 `tcp:443`。
+- 第二條放行內部網段。範例刻意沒有放行整個 `192.168.1.0/24`：PVE 主機的 LAN IP 也在這個網段裡，放行整個網段就等於繞過第一條的埠限制，任何人都能從 LAN IP 連到主機的所有埠。要開 LAN 網段時，只放行實際需要的主機與埠。
+- `autoApprovers` 只負責「路由要不要核准」，存取權限仍然由 grants 決定。
+
+想用 Tailscale SSH 取代 OpenSSH，可以 `tailscale set --ssh` 再加 `ssh` 規則，見 [Tailscale SSH](/features/tailscale-ssh/)；建議保留 OpenSSH 當 Tailscale 出問題時的備援。grants 的寫法見 [ACL / Grants 入門](/admin/acl-grants/)。
+
+## 5. MagicDNS 會被複製進 LXC
+
+這是在 PVE 主機上裝 Tailscale 最常踩到的坑，官方的 Proxmox 疑難排解文件專門提到。
+
+PVE 會把主機的 DNS 設定寫進每個 LXC 容器的 `/etc/resolv.conf`。主機開著 MagicDNS 時，容器拿到的是：
+
+```text
+# --- BEGIN PVE ---
+nameserver 100.100.100.100
+search example.ts.net
+# --- END PVE ---
+```
+
+`100.100.100.100` 是 Tailscale 的內建 DNS，只有裝了 Tailscale 的機器才連得到。容器裡沒有 Tailscale 時，DNS 查詢就會逾時。兩種解法：
+
+- 主機不使用 MagicDNS：`tailscale set --accept-dns=false`（第 1 節登入時已經關掉了）。代價是主機上的指令不能用 MagicDNS 名稱（包括完整的 `*.ts.net` 名稱）連其他 tailnet 裝置，只能用 Tailscale IP——對管理用的主機通常無所謂。
+- 保留主機的 MagicDNS，在每個容器裡建立空檔案 `/etc/.pve-ignore.resolv.conf`，讓 PVE 不再覆寫該容器的 `/etc/resolv.conf`。
+
+## 6. 叢集與日常維護
+
+### 多台主機的叢集
+
+- **每台節點各自安裝、各自登入**，用同一個 `tag:pve`，上面的 grants 就一次涵蓋整個叢集。
+- 任何一台節點的 8006 都能管理整個叢集，但節點離線時就連不到它的管理介面，所以每台都裝比只裝一台可靠。每台也各自設定 Serve。
+- **corosync 與遷移流量不要走 Tailscale**。Proxmox 要求 corosync 網路的延遲在數毫秒以內，跨地點經由 tailnet 組叢集不在支援範圍；Tailscale 只用來從外面連進來管理。
+- 想讓 Subnet Router 有備援，可以讓兩台節點廣告**完全相同**的網段，Tailscale 會自動容錯切換，見 [Subnet Router](/features/subnet-router/) 的高可用性段落。
+
+### 更新、重開機之後
+
+Tailscale 是 userspace 程式加上核心內建的 TUN，PVE 更新核心不需要重新編譯任何模組。重開機或升級後，確認這幾件事：
+
+```bash
+systemctl is-enabled tailscaled   # 應為 enabled
+tailscale status                   # 主機在線、看得到其他裝置
+sysctl net.ipv4.ip_forward         # Subnet Router 要是 1
+tailscale serve status             # 有用 Serve 的話，設定還在
+```
+
+**PVE 大版本升級**（例如 8 → 9）會把 Debian 從 `bookworm` 換成 `trixie`。Tailscale 的套件庫設定（`/etc/apt/sources.list.d/tailscale.list`）也要一起改代號，否則會一直停在舊版的套件。升級前用 Tailscale 以外的方式（LAN、IPMI 或主機的實體主控台）確保連得回去，不要在只靠 tailnet 連線的情況下升級主機。
+
+## 7. 效能調校
+
+主機當 Subnet Router 時，[效能調校](/performance/)的兩篇文章都適用，但要注意 PVE 的網路結構：
+
+- **[UDP GRO forwarding](/performance/udp-gro-forwarding/)**：官方建議的指令會對「預設路由那張網卡」設定。在 PVE 上預設路由走的通常是 bridge `vmbr0`，而不是實體網卡（例如 `eno1`）。設定前用 `ethtool -k` 分別看 `vmbr0` 和實體網卡支不支援 `rx-udp-gro-forwarding`，並以 `tailscale set --advertise-routes=...` 重跑後還會不會出現警告為準。
+- **[BBR](/performance/bbr/)**：只影響主機自己發起或終止的 TCP 連線，例如經由 Serve 連管理介面、從主機上傳備份；對轉送到 guest 的流量沒有作用。改的是主機的全域 sysctl，會連帶影響主機上的其他連線，例如 PBS 備份、遷移。
+
+## 參考資料
+
+- [Proxmox（Tailscale 官方）](https://tailscale.com/docs/integrations/proxmox)
+- [Troubleshooting Proxmox（Tailscale 官方）](https://tailscale.com/docs/reference/troubleshooting/containers/proxmox)
+- [Subnet routers（Tailscale 官方）](https://tailscale.com/docs/features/subnet-routers)
+- [Debian 13 release notes：sysctl.conf 不再被讀取](https://www.debian.org/releases/trixie/release-notes/)
+- [Proxmox VE Firewall（Proxmox 官方）](https://pve.proxmox.com/wiki/Firewall)
+- [Cluster Manager：corosync 網路需求（Proxmox 官方）](https://pve.proxmox.com/wiki/Cluster_Manager)
+- [在 LXC 中使用 Tailscale](/pve/tailscale-on-lxc/)
+- [憑證自動更新](/pve/auto-renew-tailscale-certificate-on-pve/)
+- [Subnet Router：存取整個區網內沒裝 Tailscale 的設備](/features/subnet-router/)
+- [Tailscale Serve：在 tailnet 內分享本機服務](/features/serve/)
