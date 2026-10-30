@@ -1,7 +1,6 @@
 ---
 import Icon from "@cloudflare/nimbus-docs/components/Icon.astro";
 import { withBase } from "@cloudflare/nimbus-docs/runtime";
-import { config } from "virtual:nimbus/config";
 import { cn } from "@/lib/cn";
 import type { HTMLAttributes } from "astro/types";
 
@@ -20,8 +19,10 @@ const baseBtn =
 
 // Pin locale and time zone so the date doesn't depend on the build machine
 // (CI runs in UTC with an English locale). zh-TW renders "2026年10月7日".
+// Hard-coded rather than config.locale: the site is zh-TW only, and the
+// schema defaults locale to "en", which would silently revert to English.
 const formattedDate = lastUpdated
-  ? new Intl.DateTimeFormat(config.locale ?? "zh-TW", {
+  ? new Intl.DateTimeFormat("zh-TW", {
       year: "numeric",
       month: "long",
       day: "numeric",
