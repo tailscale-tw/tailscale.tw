@@ -6,7 +6,7 @@ sidebar:
   label: Tailscale Funnel
 ---
 
-[Tailscale Funnel](https://tailscale.com/kb/1223/funnel) 讓**網際網路上的任何人**都能用一個 `*.ts.net` 的 HTTPS 網址連到你裝置上的服務，對方不需要安裝 Tailscale，你也不用開防火牆連接埠、設定路由器的 port forwarding 或申請網域與憑證。它和 [Tailscale Serve](/features/serve/) 用的是同一套機制，差別只在於 Serve 只給 tailnet 內的裝置看，Funnel 則是公開的。
+[Tailscale Funnel](https://tailscale.com/docs/features/tailscale-funnel) 讓**網際網路上的任何人**都能用一個 `*.ts.net` 的 HTTPS 網址連到你裝置上的服務，對方不需要安裝 Tailscale，你也不用開防火牆連接埠、設定路由器的 port forwarding 或申請網域與憑證。它和 [Tailscale Serve](/features/serve/) 用的是同一套機制，差別只在於 Serve 只給 tailnet 內的裝置看，Funnel 則是公開的。
 
 > 本文以 Tailscale v1.102（2026 年 10 月）為準，指令為 v1.52 改版後的新語法：旗標在前、目標在後（例如 `tailscale funnel --bg 3000`）。Funnel 目前仍是 beta 功能，所有方案都能使用。
 
@@ -127,7 +127,7 @@ Funnel 和 Serve 的指令、目標寫法幾乎相同，主要差在誰看得到
 
 ## 參考資料
 
-- [Tailscale Funnel 官方文件](https://tailscale.com/kb/1223/funnel)
+- [Tailscale Funnel 官方文件](https://tailscale.com/docs/features/tailscale-funnel)
 - [`tailscale funnel` 指令參考](https://tailscale.com/kb/1311/funnel)
 - [Funnel 使用範例（官方）](https://tailscale.com/kb/1247/funnel-examples)
 - [macOS 各版本功能比較（官方）](https://tailscale.com/kb/1065/macos-variants)
