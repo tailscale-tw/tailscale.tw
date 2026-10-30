@@ -6,7 +6,7 @@ sidebar:
   label: Tailscale Serve
 ---
 
-本機跑了一個開發中的網站、後台或靜態檔案，想讓同一 tailnet 裡的其他裝置連進來，又不想開防火牆連接埠或上傳到公開主機，就用 [Tailscale Serve](https://tailscale.com/kb/1312/serve)。
+本機跑了一個開發中的網站、後台或靜態檔案，想讓同一 tailnet 裡的其他裝置連進來，又不想開防火牆連接埠或上傳到公開主機，就用 [Tailscale Serve](https://tailscale.com/docs/features/tailscale-serve)。
 
 > 本文以 Tailscale v1.102（2026 年 10 月）為準，指令為 v1.52 改版後的新語法：旗標在前、目標在後（例如 `tailscale serve --bg 3000`）。
 
@@ -16,7 +16,7 @@ Tailscale Serve 會在你的裝置上啟一個 HTTPS（或 HTTP、TCP）服務�
 
 一個 Serve 目標（target）可以是以下四種：
 
-- **本機服務**：連接埠號碼（如 `3000`）、`localhost:3000`，或完整 URL。最常用來分享開發中的網站。注意反向代理永遠轉給 `http://127.0.0.1`，本機服務必須聽在 IPv4 迴路位址，只聽 `[::1]` 的會被拒絕（見範例一）。
+- **本機服務**：連接埠號碼（如 `3000`）、`localhost:3000`，或完整 URL（後端自己上了 HTTPS 就寫 `https://`／`https+insecure://` 開頭的完整 URL，見範例三）。最常用來分享開發中的網站。注意反向代理永遠轉給 `http://127.0.0.1`，本機服務必須聽在 IPv4 迴路位址，只聽 `[::1]` 的會被拒絕（見範例一）。
 - **檔案或資料夾**：絕對路徑（如 `/home/alice/demo`）。分享資料夾時會自動產生目錄列表。
 - **靜態文字**：`text:"..."`，適合放維護公告或快速測試。
 - **TCP 轉發**：`--tcp` 或 `--tls-terminated-tcp`，轉發 SSH、RDP 這類非 HTTP 的 TCP 服務。
@@ -28,7 +28,7 @@ https://my-dev-machine.tailxxxxx.ts.net
 https://my-dev-machine.tailxxxxx.ts.net:8443
 ```
 
-Serve 收到 tailnet 來的請求時，會在轉給本機服務前加上身分標頭（`Tailscale-User-Login`、`Tailscale-User-Name` 等），後端可以用它識別是誰連進來的。例外：來自 tagged 裝置的請求不會帶這些標頭，只靠標頭做授權時要記得處理這個缺口。基於安全，後端服務建議只聽 `127.0.0.1`，避免有人繞過 Serve 直接偽造這些標頭。標頭的完整說明、剝除行為與 Grafana／Open WebUI／Dashy 範例，見 [Serve 的身分標頭](/features/serve-identity-headers/)。
+Serve 收到 tailnet 來的請求時，會在轉給本機服務前加上身分標頭（`Tailscale-User-Login`、`Tailscale-User-Name` 等），後端可以用它識別是誰連進來的。例外：來自 tagged 裝置的請求不會帶這些標頭，只靠標頭做授權時要記得處理這個缺口。基於安全，後端服務建議只聽 `127.0.0.1`，避免有人繞過 Serve 直接偽造這些標頭。標頭的完整說明、剝除行為與 Grafana／Open WebUI／Dashy 範例，見 [Serve 的身分標頭](/features/serve-identity-headers/)。v1.92 起，Serve 還可以把 grants 授予的 app capabilities 也轉發給後端，tagged 裝置也接得上，見下方「把授權細節交給後端」一節。
 
 ## 前置條件
 
@@ -75,6 +75,7 @@ Press Ctrl+C to exit.
 - `--bg` 會把設定寫進節點的 serve config 並持續生效；沒加 `--bg` 的前景分享在重開機或 `tailscale down/up` 後要手動重跑。
 - 關閉單一分享時，`off` 指令的旗標要和當初啟用時一致。`--bg` 輸出的最後一行會直接告訴你該跑哪一行 `off` 指令，建議先跑 `tailscale serve status` 確認連接埠與路徑再關。
 - `reset` 不會印出任何訊息，跑完用 `status` 確認，會顯示 `No serve config`。注意它連 Funnel 的監聽設定也會一起清掉。
+- `status` 與 `status --json` 目前列出的內容並不相同（官方記錄在 [GitHub issue #18289](https://github.com/tailscale/tailscale/issues/18289)），要列出掛在本機的 Service 設定，用 `tailscale serve get-config --all`，細節見 [Tailscale Services](/features/tailscale-services/)。
 
 其他實用旗標：
 
@@ -92,6 +93,8 @@ tailscale serve --bg --set-path=/api http://127.0.0.1:8080/api
 # 轉發本機 TCP 服務（例如 SSH）
 tailscale serve --bg --tcp=2222 tcp://localhost:22
 ```
+
+完整旗標清單見官方的 [`tailscale serve` 指令參考](https://tailscale.com/docs/reference/tailscale-cli/serve)。本文沒展開的還有兩個：`--tun`（僅限 Service，宣告 Layer 3 端點，把整個 Service 的流量原封不動轉進本機，可支援 UDP，只在 Linux 且需另外設定，細節見 [Tailscale Services](/features/tailscale-services/)）與 `--yes`（更新設定時跳過互動確認）。
 
 ## 範例一：分享本機開發中的網站
 
@@ -150,6 +153,56 @@ tailscale serve --bg text:"網站維護中，09:00 UTC 回來"
 
 > macOS 有沙盒限制：從 Mac App Store 或 Standalone 版安裝的 Tailscale 只能分享連接埠，不能分享檔案或資料夾；要用檔案分享請改用開源版用戶端。
 
+## 範例三：HTTPS 後端與自簽憑證
+
+本機服務自己上了 HTTPS（常見於配好自簽憑證的內部服務）時，target 直接寫含 scheme 的完整 URL，不用先套一層 HTTP 反代。要挑的只有後端那張憑證合不合法：
+
+```bash
+# 本機服務用合法憑證（例如 Let's Encrypt 自動續簽的那種）
+tailscale serve --bg https://localhost:8443
+
+# 本機服務用自簽或其他無效憑證，scheme 改成 https+insecure
+tailscale serve --bg https+insecure://localhost:8443
+```
+
+HTTPS 連線一樣由 Tailscale daemon 終止；`https+insecure://` 只影響 **Serve 對後端這一段**的憑證檢查（轉發時跳過驗證），tailnet 上的人連進來時看到的仍是 tailnet 自動配發的正式憑證。兩種寫法的 scheme 都不能省：只寫 `localhost:8443` 而沒有 `https://` 開頭，Serve 會把它當成純 HTTP 目標。
+
+## 讓 TCP 後端看到原始來源 IP：PROXY protocol
+
+HTTP 後端能從身分標頭知道連線是誰（見上方說明與 [Serve 的身分標頭](/features/serve-identity-headers/)），但 `--tcp` 轉發的是不解析內容的 TCP 連線，後端只會看到一條來自 `127.0.0.1` 的連線，無從得知真正的對端。加上 `--proxy-protocol` 之後，Serve 會在每條轉發連線的開頭插入來源 IP 與連接埠資訊，後端解析後就能還原連線者，適合有 IP 白名單或要保留連線紀錄的後端：
+
+```bash
+tailscale serve --proxy-protocol=2 --tls-terminated-tcp=443 tcp://127.0.0.1:9899
+```
+
+執行後的輸出會標明 PROXY protocol 版本：
+
+```text
+Available within your tailnet:
+
+|-- tcp://serve-test.example.ts.net:443 (TLS terminated, PROXY protocol v2)
+|-- tcp://100.101.102.103:443
+|-- tcp://[fd7a:115c:a1e0::1111:2222]:443
+|--> tcp://127.0.0.1:9899
+```
+
+注意後端那側也要有解析能力才收得下去：Caddy、HAProxy、nginx 的 stream 模組等都有對應設定；格式分 v1／v2，官方提醒大多數情況直接用 v2。
+
+## 把授權細節交給後端：`Tailscale-App-Capabilities` 標頭
+
+身分標頭只回答「連線的是誰」，不回答「他被授權了什麼」。Tailscale v1.92 起，grants 項目可以替特定 tag 的服務宣告 **app capability**（例如 `example.com/cap/sql`，並可指定適用的來源），而 Serve 這邊只要用 `--accept-app-caps` 指明要接收的 capability：
+
+```bash
+# 前提：policy 檔的 grants 已宣告 example.com/cap/sql 給特定群組或使用者
+tailscale serve --accept-app-caps=example.com/cap/sql --bg 8080
+```
+
+之後凡是經由這個 Serve 的請求，使用者（或 tag 裝置）被授予的 app capability 就會以序列化 JSON 塞進 `Tailscale-App-Capabilities` 標頭，後端解析後就知道該請求帶著哪些授權；非 ASCII 內容會用 RFC 2047 Q-encoding 編碼。
+
+和身分標頭是同一套保護：請求自帶的同名標頭會先被剝除再填入正確值，防偽原理相同。tagged 裝置也接得上：grants 有授權給 tag 的話，tag 裝置的請求同樣會帶這個標頭——身分三標頭對 tag 裝置一律空白（見 [Serve 的身分標頭](/features/serve-identity-headers/)），兩者正好互補。Funnel 的公開流量不帶這個標頭。
+
+grants 的基本寫法見 [ACL / Grants 入門](/admin/acl-grants/)；app capability 在 policy 檔的完整宣告方式與 Serve 指令的搭配，見官方範例集的 [Forward app capabilities to a local service](https://tailscale.com/docs/reference/examples/serve#forward-app-capabilities-to-a-local-service)。
+
 ## 與 Funnel 的差異
 
 |            | Serve                       | Funnel                            |
@@ -173,7 +226,8 @@ tailscale serve --bg text:"網站維護中，09:00 UTC 回來"
 
 ## 參考資料
 
-- [Tailscale Serve 官方文件](https://tailscale.com/kb/1312/serve)
-- [`tailscale serve` 指令參考](https://tailscale.com/kb/1242/tailscale-serve)
-- [Tailscale Funnel 官方文件](https://tailscale.com/kb/1223/funnel)
+- [Tailscale Serve 官方文件](https://tailscale.com/docs/features/tailscale-serve)
+- [`tailscale serve` 指令參考](https://tailscale.com/docs/reference/tailscale-cli/serve)
+- [Tailscale Serve 官方範例集](https://tailscale.com/docs/reference/examples/serve)
+- [Tailscale Funnel 官方文件](https://tailscale.com/docs/features/tailscale-funnel)
 - [Vite Server Options（`server.host`、`server.allowedHosts`）](https://vite.dev/config/server-options.html)
