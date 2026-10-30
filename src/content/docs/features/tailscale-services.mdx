@@ -111,7 +111,7 @@ tailscale serve advertise svc:web-server
 | `tailscale serve advertise svc:…` | drain 之後重新廣告，把主機加回 Service                         |
 | `tailscale service list`          | 列出這個節點目前可以連到的 Service（含 IP、名稱、端點）        |
 
-查看設定可隨時用 `tailscale serve status --json` 或 `tailscale serve get-config --all`。
+查看設定可隨時用 `tailscale serve status --json` 或 `tailscale serve get-config --all`（注意一般的 `status` 目前不會列出 Service 端點，見官方 [GitHub issue #18289](https://github.com/tailscale/tailscale/issues/18289)）。
 
 ## 自動核准（auto-approval）
 

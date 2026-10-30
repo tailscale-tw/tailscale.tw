@@ -16,7 +16,7 @@ Tailscale Serve 會在你的裝置上啟一個 HTTPS（或 HTTP、TCP）服務�
 
 一個 Serve 目標（target）可以是以下四種：
 
-- **本機服務**：連接埠號碼（如 `3000`）、`localhost:3000`，或完整 URL（後端自己上了 HTTPS 就寫 `https://`／`https+insecure://` 開頭的完整 URL，見範例三）。最常用來分享開發中的網站。注意反向代理永遠轉給 `http://127.0.0.1`，本機服務必須聽在 IPv4 迴路位址，只聽 `[::1]` 的會被拒絕（見範例一）。
+- **本機服務**：連接埠號碼（如 `3000`）、`localhost:3000`，或完整 URL。最常用來分享開發中的網站。注意反向代理一律連到本機迴路位址（`127.0.0.1`／`localhost`），預設按 HTTP 撥號；後端自己上了 HTTPS 就寫含 scheme 的完整 URL，TLS 撥號的選擇見範例三。所以本機服務必須聽在 IPv4 的 `127.0.0.1`，只聽 `[::1]` 的會被拒絕（見範例一）。
 - **檔案或資料夾**：絕對路徑（如 `/home/alice/demo`）。分享資料夾時會自動產生目錄列表。
 - **靜態文字**：`text:"..."`，適合放維護公告或快速測試。
 - **TCP 轉發**：`--tcp` 或 `--tls-terminated-tcp`，轉發 SSH、RDP 這類非 HTTP 的 TCP 服務。
@@ -75,7 +75,7 @@ Press Ctrl+C to exit.
 - `--bg` 會把設定寫進節點的 serve config 並持續生效；沒加 `--bg` 的前景分享在重開機或 `tailscale down/up` 後要手動重跑。
 - 關閉單一分享時，`off` 指令的旗標要和當初啟用時一致。`--bg` 輸出的最後一行會直接告訴你該跑哪一行 `off` 指令，建議先跑 `tailscale serve status` 確認連接埠與路徑再關。
 - `reset` 不會印出任何訊息，跑完用 `status` 確認，會顯示 `No serve config`。注意它連 Funnel 的監聽設定也會一起清掉。
-- `status` 與 `status --json` 目前列出的內容並不相同（官方記錄在 [GitHub issue #18289](https://github.com/tailscale/tailscale/issues/18289)），要列出掛在本機的 Service 設定，用 `tailscale serve get-config --all`，細節見 [Tailscale Services](/features/tailscale-services/)。
+- 有掛 Tailscale Service（`svc:`）端點時，`status` 目前不會列出它們（甚至顯示 `No serve config`），要改看 `status --json` 或 `tailscale serve get-config --all`；差異官方記錄在 [GitHub issue #18289](https://github.com/tailscale/tailscale/issues/18289)。Service 相關細節見 [Tailscale Services](/features/tailscale-services/)。
 
 其他實用旗標：
 
@@ -98,7 +98,7 @@ tailscale serve --bg --tcp=2222 tcp://localhost:22
 
 ## 範例一：分享本機開發中的網站
 
-以 Vite（預設 `5173`）為例。有兩個坑要先避開：Serve 永遠轉給 `http://127.0.0.1`，而 Vite 預設聽的 `localhost` 在 Node 17+ 常只綁到 IPv6 的 `[::1]`，轉發會被拒絕；而且 Vite 6.0.9 / 5.4.12 之後預設擋掉非 localhost 的 Host（DNS rebinding 防護），Serve 轉發帶的是 `*.ts.net` 的 Host，不處理會看到「Blocked request」。兩個都在 `vite.config.js` 裡處理：
+以 Vite（預設 `5173`）為例。有兩個坑要先避開：Serve 的反向代理連的是本機 `127.0.0.1`，而 Vite 預設聽的 `localhost` 在 Node 17+ 常只綁到 IPv6 的 `[::1]`，轉發會被拒絕；而且 Vite 6.0.9 / 5.4.12 之後預設擋掉非 localhost 的 Host（DNS rebinding 防護），Serve 轉發帶的是 `*.ts.net` 的 Host，不處理會看到「Blocked request」。兩個都在 `vite.config.js` 裡處理：
 
 ```js
 // vite.config.js
@@ -155,38 +155,40 @@ tailscale serve --bg text:"網站維護中，09:00 UTC 回來"
 
 ## 範例三：HTTPS 後端與自簽憑證
 
-本機服務自己上了 HTTPS（常見於配好自簽憑證的內部服務）時，target 直接寫含 scheme 的完整 URL，不用先套一層 HTTP 反代。要挑的只有後端那張憑證合不合法：
+本機服務自己上了 HTTPS 時，target 直接寫含 scheme 的完整 URL，不用先套一層 HTTP 反代。Serve 對外一樣發 tailnet 自動配發的正式憑證，差別只在它連向後端時要不要驗證後端的憑證：
 
 ```bash
-# 本機服務用合法憑證（例如 Let's Encrypt 自動續簽的那種）
+# 「真驗證」的寫法，但條件很嚴格，見下方說明
 tailscale serve --bg https://localhost:8443
 
-# 本機服務用自簽或其他無效憑證，scheme 改成 https+insecure
+# 一般情況：自簽或市售憑證的後端，用 https+insecure 跳過後端憑證驗證
 tailscale serve --bg https+insecure://localhost:8443
 ```
 
-HTTPS 連線一樣由 Tailscale daemon 終止；`https+insecure://` 只影響 **Serve 對後端這一段**的憑證檢查（轉發時跳過驗證），tailnet 上的人連進來時看到的仍是 tailnet 自動配發的正式憑證。兩種寫法的 scheme 都不能省：只寫 `localhost:8443` 而沒有 `https://` 開頭，Serve 會把它當成純 HTTP 目標。
+`https+insecure://` 只影響 Serve 對後端這一段的憑證檢查，tailnet 上的人連進來看到的仍是 tailnet 的正式憑證。而 `https://` 的適用範圍要弄清楚：TLS 驗證的是後端憑證有沒有涵蓋 target 寫的名稱——`localhost` 或 IP `127.0.0.1`——公開 CA（Let's Encrypt 之類）不會核發 `localhost`／`127.0.0.1` 的憑證，所以後端拿著自己正式網域（如 `nas.example.com`）的 Let's Encrypt 憑證，照官方這個範例連它會驗證失敗、tailnet 端拿到  502。這條真驗證的路只在後端憑證是你自己簽的（內部 CA 或自簽，SAN 明確涵蓋 `localhost`／`127.0.0.1`）時走得通；實務上本機 HTTPS 後端就用 `https+insecure://`。
+
+兩種寫法的 scheme 都不能省：只寫 `localhost:8443` 而沒有 `https://` 開頭，Serve 會把它當成純 HTTP 目標。
 
 ## 讓 TCP 後端看到原始來源 IP：PROXY protocol
 
 HTTP 後端能從身分標頭知道連線是誰（見上方說明與 [Serve 的身分標頭](/features/serve-identity-headers/)），但 `--tcp` 轉發的是不解析內容的 TCP 連線，後端只會看到一條來自 `127.0.0.1` 的連線，無從得知真正的對端。加上 `--proxy-protocol` 之後，Serve 會在每條轉發連線的開頭插入來源 IP 與連接埠資訊，後端解析後就能還原連線者，適合有 IP 白名單或要保留連線紀錄的後端：
 
 ```bash
-tailscale serve --proxy-protocol=2 --tls-terminated-tcp=443 tcp://127.0.0.1:9899
+tailscale serve --bg --proxy-protocol=2 --tls-terminated-tcp=443 tcp://127.0.0.1:9899
 ```
 
-執行後的輸出會標明 PROXY protocol 版本：
+之後的 `tailscale serve status`（或執行當下的輸出）會標明該連接埠啟用了 TLS 終止與 PROXY protocol v2：
 
 ```text
 Available within your tailnet:
 
-|-- tcp://serve-test.example.ts.net:443 (TLS terminated, PROXY protocol v2)
+|-- tcp://my-dev-machine.tailxxxxx.ts.net:443 (TLS terminated, PROXY protocol v2)
 |-- tcp://100.101.102.103:443
 |-- tcp://[fd7a:115c:a1e0::1111:2222]:443
 |--> tcp://127.0.0.1:9899
 ```
 
-注意後端那側也要有解析能力才收得下去：Caddy、HAProxy、nginx 的 stream 模組等都有對應設定；格式分 v1／v2，官方提醒大多數情況直接用 v2。
+注意後端那側要有解析 PROXY header 的能力才收得下去：HAProxy、nginx 的 stream 模組都原生支援；Caddy 是例外，它內建的 `proxy_protocol` listener 包裝只能用在 Caddy 自己的 HTTP listener 上，要在任意 TCP 串流前端解析得另裝 caddy-l4 外掛。格式分 v1／v2，官方提醒大多數情況直接用 v2。
 
 ## 把授權細節交給後端：`Tailscale-App-Capabilities` 標頭
 
@@ -199,7 +201,7 @@ tailscale serve --accept-app-caps=example.com/cap/sql --bg 8080
 
 之後凡是經由這個 Serve 的請求，使用者（或 tag 裝置）被授予的 app capability 就會以序列化 JSON 塞進 `Tailscale-App-Capabilities` 標頭，後端解析後就知道該請求帶著哪些授權；非 ASCII 內容會用 RFC 2047 Q-encoding 編碼。
 
-和身分標頭是同一套保護：請求自帶的同名標頭會先被剝除再填入正確值，防偽原理相同。tagged 裝置也接得上：grants 有授權給 tag 的話，tag 裝置的請求同樣會帶這個標頭——身分三標頭對 tag 裝置一律空白（見 [Serve 的身分標頭](/features/serve-identity-headers/)），兩者正好互補。Funnel 的公開流量不帶這個標頭。
+和身分標頭是同一套保護：請求自帶的同名標頭會先被剝除再填入正確值，防偽原理相同。tagged 裝置也接得上：grants 有授權給 tag 的話，tag 裝置的請求同樣會帶這個標頭——身分三標頭對 tag 裝置的請求則不會帶（見 [Serve 的身分標頭](/features/serve-identity-headers/)），兩者正好互補。Funnel 的公開流量不帶這個標頭。
 
 grants 的基本寫法見 [ACL / Grants 入門](/admin/acl-grants/)；app capability 在 policy 檔的完整宣告方式與 Serve 指令的搭配，見官方範例集的 [Forward app capabilities to a local service](https://tailscale.com/docs/reference/examples/serve#forward-app-capabilities-to-a-local-service)。
 
