@@ -1,0 +1,278 @@
+---
+title: 遠端存取家中的 Plex／Jellyfin
+description: 在外面經由 Tailscale 串流家裡 NAS 或伺服器上的 Jellyfin 與 Plex：Jellyfin 的 Serve HTTPS、Known Proxies 與 Base URL 設定，Plex 遠端串流付費規定、LAN Networks、Custom server access URLs 與免驗證網段限制，以及分享給家人、電視裝置連線與直連／DERP 頻寬影響
+sidebar:
+  order: 2.1
+  label: Plex／Jellyfin 遠端串流
+---
+
+把 Jellyfin 或 Plex 架在家裡的 NAS、Proxmox LXC／VM 或 Docker 主機上，出門在外想看自己的電影與影集，傳統做法是在路由器開連接埠轉送（port forwarding，開放 `8096` 或 `32400`），不但把服務直接暴露在公網讓人掃描，遇到電信商的 CGNAT 或雙層 NAT 更是連埠都開不起來；至於用 Cloudflare Tunnel 免費方案代理影音串流，則會違反其 CDN 服務條款（見 [遠端存取怎麼選](/use-cases/choosing-remote-access/)）。
+
+改用 Tailscale，家裡的影音伺服器與外面的手機、筆電、電視盒直接透過 WireGuard 加密隧道互連，全程不必在路由器開任何對外埠。不過 **Jellyfin**（完全自架、在 App 直接填網址連線）與 **Plex**（依賴 `plex.tv` 雲端探索、對「本地／遠端」有嚴格判定與付費規定）在搭配 Tailscale 時的行為差異很大，這篇分別整理兩者的設定做法與常見陷阱。
+
+> 本文依 2026 年 10 月的 Tailscale、Jellyfin 與 Plex 官方文件整理，以 Tailscale v1.104、Jellyfin v12.4、Plex Media Server 1.43 為準。Docker sidecar 的完整 compose 寫法見 [Docker 的 Tailscale sidecar](/use-cases/docker-sidecar/)，本文聚焦在兩種影音伺服器的網路設定、用戶端連線與遠端串流注意事項。
+
+## Jellyfin：直接連線與 Serve HTTPS
+
+Jellyfin 是完全獨立運作的自架軟體，不需要連回任何官方雲端驗證帳號。只要伺服器與觀看裝置都在同一個 tailnet 裡，設定非常直接。
+
+### 用 Tailscale IP 或 MagicDNS 名稱連線
+
+Jellyfin 的預設連接埠如下（見 [Jellyfin Networking 官方文件](https://jellyfin.org/docs/general/post-install/networking/)）：
+
+| 連接埠 | 協定 | 用途                                                    |
+| ------ | ---- | ------------------------------------------------------- |
+| `8096` | TCP  | 預設 HTTP 連接埠（網頁與各平台 App 連線都走這個埠）     |
+| `8920` | TCP  | 預設 HTTPS 連接埠（預設關閉，官方建議改由反向代理處理） |
+| `7359` | UDP  | 區網用戶端自動探索（Auto-Discovery）                    |
+
+UDP `7359` 的自動探索依賴區網廣播，不會跨過 Tailscale 的第三層（L3）點對點隧道，所以在外面的 Jellyfin App **不會自動掃描到伺服器**，第一次連線時要手動輸入伺服器位址：
+
+- **Tailscale IP**：`http://100.x.y.z:8096`（在 Admin console 的 [Machines](https://console.tailscale.com/admin/machines) 頁面或伺服器上執行 `tailscale ip -4` 查詢）。
+- **MagicDNS 名稱**：`http://<主機名稱>:8096` 或完整名稱 `http://<主機名稱>.<tailnet>.ts.net:8096`（格式見 [MagicDNS](/features/magicdns/)）。
+
+流量已經在 WireGuard 隧道內端對端加密，即使走 `http://...:8096` 也不會在公網上洩漏內容。
+
+### 用 Tailscale Serve 提供 HTTPS
+
+如果你習慣用瀏覽器看影片、不希望網址列跳出「不安全」警告，或是部分第三方用戶端要求 HTTPS，Jellyfin 官方文件強烈建議**把 HTTPS 交給反向代理終止**，不要在 Jellyfin 本身掛自簽憑證或手動塞憑證檔。
+
+在裝了 Tailscale 的 Jellyfin 主機上，一行 [Tailscale Serve](/features/serve/) 指令就能把本機的 `8096` 埠包裝成具備有效 Let's Encrypt 憑證的 HTTPS 服務：
+
+```bash
+tailscale serve --bg 8096
+```
+
+（若用 Docker 部署，推薦採用 `ts-jellyfin` sidecar 搭配 `serve.json` 的寫法，完整範例見 [Docker 的 Tailscale sidecar：Jellyfin 段落](/use-cases/docker-sidecar/#jellyfin單一容器)。）
+
+啟用後，Tailscale Serve 會在 tailnet 介面的 `443` 埠終止 TLS，再把請求轉發給本機的 `http://127.0.0.1:8096`，而且原生支援 Jellyfin 同步狀態所需的 WebSocket。之後無論是瀏覽器還是手機、電視 App，伺服器網址都直接填：
+
+```text
+https://<主機名稱>.<tailnet>.ts.net
+```
+
+連 `:8096` 埠號都不用帶。
+
+### Known Proxies（已知的代理伺服器）與 Local Networks
+
+當流量經過反向代理（包含 Tailscale Serve）轉發給 Jellyfin 時，Jellyfin 看到的連線來源 IP 會變成代理伺服器的位址（例如 `127.0.0.1`），而不是用戶端的真實 Tailscale IP。這會讓 Jellyfin 無法在後台顯示正確的裝置來源位址，也會導致「內網／外網（Local / Remote）」的存取控制失效。
+
+到 Jellyfin 後台的 **控制台（Dashboard）→ 網路（Networking）** 檢查兩個欄位（見 [Jellyfin Reverse Proxy 官方文件](https://jellyfin.org/docs/general/post-install/networking/reverse-proxy/#forwarded-for-headers)）：
+
+- **Known Proxies（已知的代理伺服器）**：填入反向代理的 IP 位址後，Jellyfin 才會信任該代理送來的 `X-Forwarded-For`、`X-Forwarded-Proto` 與 `X-Forwarded-Host` 標頭，將標頭記錄的位址視為真實用戶端 IP（預設會丟棄未知來源的轉發標頭，避免惡意裝置偽造 IP）。
+  - 用**同一台機器（或同一個 Docker sidecar 網路命名空間）上的 Tailscale Serve** 時，代理從本機連入，填 `127.0.0.1`。
+  - 若依 [Jellyfin 官方 Tailscale 指南](https://jellyfin.org/docs/general/post-install/networking/tailscale/) 用 tailnet 上的**另一台反向代理節點**（例如獨立的 Caddy 或 Nginx 主機）轉發到 Jellyfin 的 `100.x.y.z:8096`，則填**那台反向代理節點的 Tailscale IP**（如 `100.65.43.21`）。
+- **Local Networks（區域網路）**：以逗號分隔的 CIDR 定義哪些網段屬於「本地網路」。如果你在 Jellyfin 設定了遠端頻寬上限，或關閉了部分使用者的遠端連線權限（**Users → Edit User → Allow remote connections to this server**），又希望從 tailnet 連進來的自己人被視為本地連線，可以在 `Local Networks` 一併填上家裡區網與 Tailscale 網段（例如 `192.168.1.0/24,100.64.0.0/10`）。
+
+### Base URL（基礎 URL）的取捨
+
+Jellyfin 網路設定裡的 **Base URL** 用來幫所有網址加上子路徑前綴（例如設為 `/jellyfin` 後，網址變成 `https://example.com/jellyfin/web/index.html`），常見於「同一台主機只有一個網域，想用不同路徑分流多個服務」的情境。
+
+但 [Jellyfin 官方文件](https://jellyfin.org/docs/general/post-install/networking/#base-url)明確提醒，設定 Base URL 有不少副作用：
+
+1. **相容性問題**：設定 Base URL 已知會破壞 HDHomeRun、DLNA plugin、Sonarr、Radarr 與 MrMC 的連線。
+2. **用戶端 App 不會自動轉址**：瀏覽器連根路徑 `/` 時，Jellyfin 網頁伺服器會自動導向 `/jellyfin`；但多數原生用戶端 App（例如 Android TV App）不會自動跟隨這個轉址，在 App 輸入伺服器位址時**必須完整帶上 `/jellyfin`**（如 `https://<主機名稱>.<tailnet>.ts.net/jellyfin`），否則會連線失敗。
+3. **修改需重啟，且移除時不轉址**：變更 Base URL 需要重啟 Jellyfin 伺服器才會生效；日後若把 Base URL 清空改回根路徑 `/`，舊的 `/jellyfin` 路徑不會自動轉回 `/`，全部會變成 404。
+
+在 Tailscale 環境裡，每個 Docker sidecar 或 LXC 容器都能擁有自己獨立的 MagicDNS 名稱（如 `https://jellyfin.<tailnet>.ts.net`），就算同一台機器跑多個服務，Tailscale Serve 也能用不同 HTTPS 埠（如 `443`、`8443`）分開代理。**建議保持 Base URL 留空（預設根路徑 `/`）**，可省去大量的用戶端相容性麻煩。
+
+## Plex：遠端存取與 Tailscale 並用的注意事項
+
+和 Jellyfin 相比，Plex 的帳號認證、伺服器探索與 TLS 憑證都緊密綁定官方的 `plex.tv` 服務，對「本地」與「遠端」也有嚴格限制。把 Plex Media Server（預設埠 **TCP `32400`**）接上 Tailscale 時，有五件事一定要先搞懂。
+
+### 1. Plex 把 Tailscale 視為「遠端」與遠端串流付費規定
+
+Plex 判斷連線是不是「本地（Local）」，標準是**播放端與 Plex Media Server 是否在同一個本地子網路（subnet）**。官方文件明確指出，只要經過 VPN、多重子網路或容器的 bridge NAT，連線就會被判定為**遠端（Remote）**。
+
+Tailscale 配發的 `100.64.0.0/10` 屬於 RFC 6598 定義的電信商共用位址空間（CGNAT），既不是家裡的 `192.168.x.x` 區網，也不在 RFC 1918 私有位址範圍內。因此**透過 Tailscale IP 連進 Plex 的流量，預設一律被 Plex 當成遠端連線**。
+
+這直接影響到 Plex 自 **2025 年 4 月 29 日**起實施的個人媒體遠端串流付費規定（見官方 [Requirements for Remote Playback of Personal Media](https://support.plex.tv/articles/requirements-for-remote-playback-of-personal-media/)）：當連線被視為遠端時，要在新版 App（iOS、Android、網頁版、桌面版、Smart TV、Apple TV、遊戲主機等）串流播放個人媒體庫裡的**影片**，必須滿足以下任一條件（透過 Plexamp 聽音樂或用 Plex Photos 看照片則不受限制，仍可免費遠端串流）：
+
+1. **伺服器管理員（Admin）帳號擁有有效的 Plex Pass 訂閱**：只要架伺服器的人有 Plex Pass，自己與所有被分享媒體庫的親友帳號都能遠端看影片，親友不必另外付費。
+2. **觀看者自己的帳號擁有 Plex Pass 或 Remote Watch Pass**：如果伺服器管理員沒有 Plex Pass，觀看者可以單獨訂閱較便宜的 [Remote Watch Pass](https://support.plex.tv/articles/remote-watch-pass-overview/)（效力僅限該訂閱帳號以及同一個 Plex Home 底下的 Managed Accounts，不包含硬體轉碼等 Plex Pass 伺服器端功能）。
+
+換句話說：**單純在伺服器與手機上安裝 Tailscale，並不能自動繞過 Plex 的遠端串流付費限制**——因為對 Plex 來說，走 `100.x.y.z` 進來的連線依然是「不在同一個區網子網路」的遠端播放。
+
+> 若沒有 Plex Pass 或 Remote Watch Pass，社群常見的變通做法是在家裡把跑 Tailscale 的機器同時設為 [Subnet Router](/features/subnet-router/) 與 [Exit Node](/features/exit-node/)，並讓外面的手機或筆電開啟 Exit Node、改連伺服器的區網 IP（`192.168.1.x:32400`），使連線在 Plex 眼裡看起來像從家裡區網發起。不過這要求觀看端把全部上網流量都繞回家裡，且隨 Plex 持續更新各平台 App 的網路偵測邏輯，不保證長期有效。
+
+### 2. 頻寬限制、`LAN Networks` 與關閉 Plex Relay
+
+當 Tailscale 連線被 Plex 歸類為「遠端」時，除了上面的訂閱檢查，還會觸發所有針對遠端串流的頻寬與轉碼限制（見 [Server Settings – Bandwidth and Transcoding Limits](https://support.plex.tv/articles/227715247-server-settings-bandwidth-and-transcoding-limits/)）：
+
+- **Settings → Server → Remote Access** 裡的 **Internet upload speed** 與 **Limit remote stream bitrate**（會把遠端串流壓在指定位元率以下，強制觸發轉碼）。
+- **Settings → Server → Network** 裡的 **Remote streams allowed per user**（限制每位使用者的同時遠端串流數）。
+
+明明 Tailscale 已經打洞直連、兩端頻寬充足，影片卻被強制降成 720p 或 4 Mbps 轉碼，通常就是這個原因。要解除這個限制，請在 Plex Web App 打開 **Settings → Server → Network**，點選右上角的 **Show Advanced**，調整兩項設定（見 [Plex Network 官方文件](https://support.plex.tv/articles/200430283-network/)）：
+
+1. **LAN Networks（區域網路，需伺服器管理員具備 Plex Pass）**：填入 `100.64.0.0/10`（若有其他內部網段，以半形逗號分隔且**不可含空白或 Tab**，例如 `192.168.1.0/24,100.64.0.0/10`）。設好後，Plex 會把來自 tailnet 的流量在**頻寬計算上**視為本地網路（LAN），不再套用 Remote Access 的上傳頻寬與單一串流位元率上限。
+2. **Enable Relay（啟用中繼）**：當 Plex App 連不上伺服器的直連路徑時，預設會退回走官方的 [Plex Relay](https://support.plex.tv/articles/216766168-accessing-a-server-through-relay/) 伺服器中繼（播放狀態顯示「間接／Indirect」）。一旦走到 Relay，**即使有 Plex Pass 或 Remote Watch Pass，每個串流最高也會被硬性限制在 2 Mbps**，而且無法使用離線下載（Downloads）。如果你只打算透過 Tailscale 連線，可以把 **Enable Relay** 取消勾選，避免 App 在連線設定沒配好時默默退回 2 Mbps 的官方中繼，讓你誤以為 Tailscale 有通但畫質極差。
+
+### 3. 讓原生 Plex App 連上：`Custom server access URLs` 與 `100.x` 過濾問題
+
+用瀏覽器看 Plex 時，可以在網址列直接打 `http://100.x.y.z:32400/web`；但手機（iOS／Android）、電視盒上的**原生 Plex App 沒有手動輸入伺服器 IP 的畫面**。原生 App 的運作方式是：登入 Plex 帳號後，向 `plex.tv`（`clients.plex.tv/api/v2/resources`）取得伺服器註冊的連線位址清單，再逐一嘗試連線。
+
+過去常見的做法是在 **Settings → Server → Network → Custom server access URLs** 填入 `http://100.x.y.z:32400`，讓 Plex 把 Tailscale IP 發布到 `plex.tv`。但需要注意兩個現況：
+
+- **Plex 不會自動枚舉 `tailscale0` 介面，且自 2026 年起過濾 `100.x.y.z` 裸 IP**：`tailscale0` 是沒有預設閘道（default gateway）的點對點 TUN 介面，不會出現在 Plex 的 `Preferred network interface` 選單裡；而在 Plex Media Server 1.43.3（2026 年 8 月）之後，`servers.plex.tv` 開始拒絕帶有 `100.64.0.0/10`（RFC 6598）裸 IP 的註冊請求（伺服器 log 會出現 `PUT https://servers.plex.tv/devices/...` 回傳 HTTP `403`），導致 `100.x.y.z` 無法發布到 `plex.tv`。結果就是**同支手機用 Safari 開 `http://100.x.y.z:32400/web` 完全正常，打開原生 Plex App 卻顯示伺服器離線（Server Offline）**。
+- **TLS 憑證網域比對**：如果在 `Custom server access URLs` 改填 MagicDNS 名稱（`.ts.net`），`servers.plex.tv` 會正常接受（回傳 HTTP `200`）並發布給用戶端；但 Plex 內建的自動憑證只簽給 `*.plex.direct`，當 iOS／iPadOS 等嚴格檢查憑證的原生 App 連往 `https://<主機名稱>.<tailnet>.ts.net:32400` 時，會因為憑證網域不符而拒絕連線，同時也會跳過非本地的明文 `http://` 網址。
+
+目前讓各平台原生 Plex App 穩定透過 Tailscale 連線的做法有兩種，依你的使用情境選擇：
+
+#### 做法 A：Tailscale Serve + MagicDNS HTTPS 網址（自己與裝置分享皆適用）
+
+用 [Tailscale Serve](/features/serve/) 在 `443` 埠提供具備有效 `.ts.net` Let's Encrypt 憑證的 HTTPS，再把這個網址註冊到 `Custom server access URLs`：
+
+1. 確認 tailnet 已啟用 MagicDNS 與 HTTPS 憑證，在 Plex 主機上執行：
+
+   ```bash
+   tailscale serve --bg http://127.0.0.1:32400
+   ```
+
+2. 到 Plex 的 **Settings → Server → Network**（點選 **Show Advanced**）：
+   - **Secure connections** 設為 **Preferred**（預設值。不要設成 `Required`，因為 Serve 轉給本機 `127.0.0.1:32400` 這一段走的是本機 HTTP）。
+   - **Custom server access URLs** 填入：
+     ```text
+     https://<主機名稱>.<tailnet>.ts.net:443
+     ```
+     （注意：**務必把欄位裡原有的 `http://100.x.y.z:32400` 裸 IP 刪掉**，否則整筆註冊請求仍會被 `servers.plex.tv` 以 403 拒絕。）
+3. 儲存設定後，重開手機或電視上的 Plex App，App 就會從 `plex.tv` 拿到 `https://<主機名稱>.<tailnet>.ts.net:443` 並順利通過 TLS 驗證連線。
+
+> **關於 Plex 後台的「不安全（Insecure）」圖示**：採用 Tailscale Serve 時，因為 TLS 在本機的 Serve 終止、Serve 與 Plex 之間走 `127.0.0.1:32400` 的 HTTP，Plex 後台儀表板（或 Plex Dash）可能會把這條串流標示為無鎖頭的未加密連線。實際上，跨網路的那一段既走了 HTTPS（`.ts.net` 憑證），底層又包在 Tailscale 的 WireGuard 端對端加密隧道裡，不會在網路上暴露明文或 token。若真的很介意後台鎖頭圖示，也可以改用 `tailscale cert` 取得憑證並轉成 PKCS #12（`.p12`）格式填進 Plex Network 設定的 `Custom certificate location`／`Custom certificate domain`，但 Tailscale 憑證每 90 天到期，需要自行排程轉換與重載。
+
+#### 做法 B：透過 Subnet Router 連區網 IP（僅限同一個 tailnet 的成員）
+
+如果只有你自己（或已邀請進同一個 tailnet 的家人）要看，最省事的方式是在家裡設定 [Subnet Router](/features/subnet-router/)，把 Plex 所在的 RFC 1918 區網網段（例如 `192.168.1.0/24`）廣告進 tailnet。
+
+因為 Plex 本來就會自動把自己的區網 IP 包裝成 `https://192-168-1-x.<識別碼>.plex.direct:32400`（標記為 `local="1"`，且具備合法的 `*.plex.direct` 憑證）發布給 `plex.tv`，外面的手機、筆電只要連上 Tailscale，Plex App 就會直接透過 Subnet Router 連上這個 `192.168.1.x:32400` 位址——不但 TLS 憑證直接過關，連 `Custom server access URLs` 都不用填。
+
+### 4. `List of IP addresses and networks that are allowed without auth` 的兩個陷阱
+
+網路上許多舊教學會建議在 **Settings → Server → Network → List of IP addresses and networks that are allowed without auth**（對應 `Preferences.xml` 裡的 `allowedNetworks`）填入 `100.64.0.0/10`，試圖解決認證或遠端連線問題。這麼做有兩個嚴重的坑：
+
+1. **Plex 只接受 RFC 1918 私有位址，會直接忽略 `100.64.0.0/10`**：[Plex Network 官方文件](https://support.plex.tv/articles/200430283-network/)寫明，這個欄位只允許填入**私有／LAN 位址**（即 RFC 1918 的 `10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`）。`100.64.0.0/10` 屬於 RFC 6598 共用位址空間，填進去會被 Plex 靜默忽略（UI 不會報錯，但完全不生效）。
+2. **免驗證代表直接給予最高管理員權限**：官方文件同時發出警告——任何符合這個名單、未登入就連進伺服器的 App，**都會被直接視為伺服器的擁有者／管理員（admin/owner）**，不僅能看所有媒體庫，還能更改伺服器設定甚至刪除媒體。這個選項原本只是為了無法登入 Plex 帳號的超舊型電視內建播放程式（如早期 LG MediaLink）設計的；現代 Plex 用戶端都能正常登入帳號，**切勿把整個網段放進免驗證清單**。
+
+> **初次安裝 Plex 時找不到 Setup Wizard？** 剛在遠端 Linux 或 Docker 裝好 Plex、還沒認領（claim）伺服器時，Plex 只允許從 `127.0.0.1` 進入初次設定精靈，直接連 `http://100.x.y.z:32400/web` 只會看到一般用戶端畫面而無法認領伺服器。這時不要去湊 `allowedNetworks`，直接透過 Tailscale 建立一條 SSH 本機連接埠轉送：`ssh -L 8888:127.0.0.1:32400 <使用者>@<Plex 主機的 Tailscale IP>`，再打開自己電腦瀏覽器的 `http://127.0.0.1:8888/web`，就能以本機身分完成認領。
+
+## 分享給家人：裝置分享與只開影音埠的存取規則
+
+想讓不住在一起的家人或朋友看家裡的 Jellyfin 或 Plex，在 Tailscale 有兩種分享方式（完整操作與限制見 [分享裝置給 tailnet 以外的人](/admin/sharing/)）：
+
+| 方式                         | 對象與名額                                                          | 影音串流上的差異                                                                                                                                 |
+| ---------------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **邀請加入同一個 tailnet**   | 適合直系家人；佔用 tailnet 使用者名額（Personal 免費方案最多 6 位） | 可使用家裡的 [Subnet Router](/features/subnet-router/)（直接連區網 IP），也能共用自己的 MagicDNS 短名稱                                          |
+| **裝置分享（Node Sharing）** | 適合朋友或有自己 tailnet 的親戚；**不佔用**你的使用者名額           | 對方只看得到分享出去的那一台影音伺服器；**不會帶入 Subnet Router 的子網路路由**，用 MagicDNS 時必須打完整名稱 `<主機名稱>.<你的 tailnet>.ts.net` |
+
+幾個搭配上的細節：
+
+- **Jellyfin 搭配裝置分享**：把 Jellyfin 主機（或 `ts-jellyfin` sidecar 節點）透過 Admin console 的 **Share** 分享給對方。對方接受後，在他的 Jellyfin App 填入你的 Tailscale IP（`http://100.x.y.z:8096`）或 Serve 的完整 HTTPS 網址（`https://<主機名稱>.<你的 tailnet>.ts.net`），再用你為他在 Jellyfin 後台建好的帳號登入即可。
+- **Plex 搭配裝置分享**：除了在 Tailscale 把 Plex 主機分享給對方，還必須在 **Plex 後台（Settings → Manage Library Access）** 把媒體庫分享給對方的 Plex 帳號（且如前節所述，要遠端看影片，你必須有 Plex Pass，或對方自己有 Plex Pass／Remote Watch Pass）。另外因為**裝置分享不支援 Subnet Router**，對方的 App 連不到你家的 `192.168.1.x` 區網 IP，務必採用上一節的「做法 A（Tailscale Serve + `Custom server access URLs` 填 `https://<主機名稱>.<你的 tailnet>.ts.net:443`）」，對方的原生 Plex App 才找得到路。
+
+### 用 grants 把權限鎖在影音連接埠
+
+無論是把家人放進自訂群組（如 `group:family`），還是用裝置分享給外部朋友（`autogroup:shared`），都不應該讓對方連到影音主機上的 SSH（`22`）、SMB 芳鄰（`445`）或 NAS 管理介面（如 Synology DSM 的 `5000`／`5001`）。
+
+建議幫影音伺服器打上 tag（例如 `tag:media`，同時自動關閉金鑰到期，做法見 [Tags 與 auth key](/admin/tags-auth-keys/)），並在 [ACL / Grants](/admin/acl-grants/) 裡只放行影音服務的連接埠：
+
+```json
+{
+  "groups": {
+    "group:family": ["mom@example.com", "dad@example.com"]
+  },
+  "tagOwners": {
+    "tag:media": ["autogroup:admin"]
+  },
+  "grants": [
+    // 管理員可完整存取所有裝置
+    {
+      "src": ["autogroup:admin"],
+      "dst": ["*"],
+      "ip": ["*"]
+    },
+    // tailnet 內的家人與接受裝置分享的親友，只能連影音伺服器的指定埠
+    {
+      "src": ["group:family", "autogroup:shared"],
+      "dst": ["tag:media"],
+      "ip": ["tcp:443", "tcp:8096", "tcp:32400"]
+    }
+  ]
+}
+```
+
+依你的實際配置刪減 `ip` 陣列：
+
+- Jellyfin 與 Plex 都透過 Tailscale Serve 走 HTTPS：只留 `"tcp:443"` 最乾淨。
+- 直接開原生埠：Jellyfin 留 `"tcp:8096"`，Plex 留 `"tcp:32400"`。
+- 小心 policy 裡若有 `"src": ["*"]` 的預設全開規則，會連被分享的使用者（`autogroup:shared`）一起放行；記得把一般成員規則改成 `"src": ["autogroup:member"]`（不含外部被分享者）。
+
+## 電視與串流裝置怎麼連
+
+在手機、平板、筆電上裝 Tailscale 很直接，但在客廳的大電視上看 Jellyfin／Plex，要看電視或串流盒的系統能不能直接裝 Tailscale。
+
+### 可以直接安裝 Tailscale 的電視盒
+
+- **Apple TV（tvOS 17.0 以上）**：tvOS 的 App Store 有官方 Tailscale App，裝好後用手機掃描畫面上的 QR code 即可登入 tailnet，接著就能用 Apple TV 上的 Plex、Swiftfin 或 Infuse 串流影片。更進一步，Apple TV 常開、接有線網路又省電，非常適合順便開成家裡的 Exit Node 或 IPv4 Subnet Router，完整步驟見 [一台 Apple TV 就是家裡的 exit node](/use-cases/apple-tv-exit-node/)。
+- **Android TV／Google TV（Android 8.0 以上，如 Chromecast with Google TV、Google TV Streamer、Nvidia Shield）**：從 Google Play 商店搜尋安裝官方 Tailscale App。根據 [Tailscale Android 官方文件](https://tailscale.com/docs/install/android)，在電視上登入有兩種方式：
+  1. **掃描 QR code**：在電視上打開 Tailscale 點選 **Log in**，用已登入的手機掃描電視上的 QR code。
+  2. **輸入驗證碼（Generated code）**：記下電視畫面 QR code 下方顯示的英數驗證碼，打開 Admin console 的 [Machines](https://console.tailscale.com/admin/machines) 頁面，點選 **Add device → Client device → Android → Input code**，輸入驗證碼按 **Submit** 即可完成配對。
+- **Amazon Fire TV**：依 [Tailscale Amazon Fire 官方文件](https://tailscale.com/docs/install/amazon-fire)，Tailscale **目前已不在 Amazon Appstore 上架**（之前從 Appstore 裝的舊版也無法再收到更新），且**不支援 Fire OS 5、Fire OS 6 以及改用 Vega OS 的機型**（例如 Fire TV Stick 4K Select）。支援的 Fire OS 機型需要從 [Tailscale 套件伺服器](https://pkgs.tailscale.com/stable/#android)下載 **Universal Android APK** 側載安裝，啟動後一樣用手機掃 QR code 登入；由於 APK 不會自動更新，日後有新版時需手動重新安裝。
+
+### 無法安裝 Tailscale 的智慧電視與設備
+
+LG（webOS）、Samsung（Tizen）等電視內建系統，以及 Roku、PlayStation、Xbox 等裝置，本身無法安裝 Tailscale VPN。這類情境要從「網路層」解決，分成兩種方向：
+
+1. **伺服器端沒裝 Tailscale，但外面的觀看裝置有裝 Tailscale**：
+   如果影音伺服器跑在不便安裝 Tailscale 的設備上，可以在**家裡同一個區網**放一台常開的 [Subnet Router](/features/subnet-router/)（例如 [Raspberry Pi](/use-cases/subnet-router-raspberry-pi/)、[Apple TV](/use-cases/apple-tv-exit-node/) 或 [PVE 主機](/pve/tailscale-on-pve-host/)），把家裡的 `192.168.1.0/24` 廣告進 tailnet。外面的手機、筆電或已裝 Tailscale 的 Apple TV／Android TV 就能直接連 `192.168.1.x:8096` 或 `192.168.1.x:32400`。
+2. **外面的電視沒辦法裝 Tailscale（例如租屋處、老家的智慧電視，或出門住飯店）**：
+   在**電視所在的網路**放一台支援 Tailscale 的路由器，讓路由器連上你的 tailnet 並路由回家的網段。例如出門旅行帶一台 [GL.iNet 隨身路由器](/platforms/glinet-travel-router/)，或在老家使用刷了 [OpenWrt](/platforms/openwrt/)、[ASUS Merlin](/platforms/asus-merlin/)、[OPNsense／pfSense／UniFi](/platforms/opnsense-pfsense-unifi/) 的路由器。電視只要連上這台路由器的 Wi-Fi 或網路孔，完全不必裝任何 VPN App，就能像在家裡一樣直接連回媒體伺服器。
+
+## 頻寬與轉碼：直連與 DERP 中繼的影響
+
+高畫質影音串流對網路吞吐量與穩定度的要求，遠比看網頁或傳照片嚴苛得多：
+
+- **一般 1080p 串流**：平均位元率約 8～20 Mbps。
+- **4K 高畫質與 Blu-ray 原盤（Remux）**：平均位元率常在 40～80 Mbps 以上。而且如同 [Plex 官方文件](https://support.plex.tv/articles/227715247-server-settings-bandwidth-and-transcoding-limits/)所解釋，絕大多數影片都是**可變位元率（VBR）**——靜態對話場景流量很低，一旦遇到動作大場面或爆破畫面，瞬間所需頻寬常會飆到平均值的 **3～4 倍**（破 100 Mbps）。
+
+這讓 Tailscale 的連線路徑（**直連 Direct** 還是 **DERP 中繼**）成為決定播放順不順的關鍵：
+
+- **直連（Direct）**：兩台裝置打洞成功，透過 UDP 直接互傳 WireGuard 封包，速度上限就是「家裡固網的上傳頻寬」與「外面網路的下載頻寬」兩者取小。只要家裡上傳夠快（例如光世代 300M/300M 或 500M/500M），在外面直接播放原畫質（Direct Play／Direct Stream）非常輕鬆，伺服器也不必耗費算力轉碼。
+- **DERP 中繼（Relay）**：當兩端遇到嚴格的對稱型 NAT（Symmetric NAT，台灣行動網路與飯店、公司網路很常見）且無法穿透時，流量會退回經由 Tailscale 營運的公開 DERP 伺服器轉送（台灣距離最近的是香港 `hkg` 或東京 `tok`）。DERP 不僅要把封包先送出國再繞回來，為了讓所有用戶公平共用還會**限制頻寬**，加上底層走單一 TCP（HTTPS `443` 埠）連線，一旦掉包就會觸發 head-of-line blocking 卡住後續封包。走 DERP 時若硬播高碼率原畫質影片，幾乎一定會頻繁轉圈緩衝。
+
+在外面看影片覺得卡頓時，建議按以下順序處理：
+
+1. **先檢查有沒有直連**：在伺服器或用戶端執行 `tailscale status` 或 `tailscale ping <對方節點>`，確認是 `direct` 還是 `via DERP(...)`。如果在自己家裡，記得在路由器為影音伺服器開啟 **UDP `41641` 連接埠轉送**（或開啟 UPnP／NAT-PMP）、把 ISP 數據機改成橋接模式消除雙層 NAT——只要家裡這一端條件夠好（Easy NAT 或有轉送 UDP 埠），即使外面的手機處於行動網路 CGNAT 下，也很容易打洞直連成功。完整的診斷與改善步驟見 [直連與 DERP 中繼](/troubleshooting/direct-vs-derp/) 與 [台灣 ISP 與 NAT](/troubleshooting/taiwan-isp-nat/)。
+2. **走 DERP 或行動網路訊號不佳時，手動調降畫質觸發轉碼**：如果你人在飯店、公司或高鐵上，UDP 被擋死只能走 DERP，請在 Jellyfin 或 Plex 的播放器設定裡把畫質手動調低（例如改選 **1080p 8 Mbps** 或 **720p 4 Mbps**），讓伺服器即時把影片壓小再傳出來，就能在有限的中繼頻寬下順暢播放。
+3. **確認伺服器已啟用硬體轉碼（Hardware Transcoding）**：把高碼率 4K HEVC／AV1 影片即時轉碼成低碼率 H.264 非常吃運算資源，若用 NAS 或低功耗迷你主機純靠 CPU 軟解軟編，往往連一路 4K 轉碼都跑不動。務必在伺服器後台開啟 GPU／內顯硬體加速（如 Intel Quick Sync Video）：
+   - **Jellyfin**：硬體轉碼完全免費，在 **控制台 → 播放（Playback）→ 轉碼（Transcoding）** 設定（容器部署需把 `/dev/dri` 掛進容器）。
+   - **Plex**：硬體轉碼屬於付費功能，需要伺服器管理員具備有效的 **Plex Pass** 訂閱，在 **Settings → Server → Transcoder** 勾選 `Use hardware acceleration when available`。
+
+## 小結：Jellyfin 與 Plex 搭配 Tailscale 對照
+
+| 項目                          | Jellyfin                                                                           | Plex                                                                                                                     |
+| ----------------------------- | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| **預設連接埠**                | TCP `8096`（HTTP）                                                                 | TCP `32400`                                                                                                              |
+| **用戶端怎麼連**              | 在 App 直接填 Tailscale IP、`http://<名稱>:8096` 或 Serve 網址                     | 原生 App 依賴 `plex.tv` 下發位址；需靠 `Custom server access URLs`（搭 Serve HTTPS）或透過 Subnet Router 連區網 IP       |
+| **用 Serve 掛 HTTPS**         | `tailscale serve --bg 8096`，App 填 `https://<名稱>.<tailnet>.ts.net`              | `tailscale serve --bg http://127.0.0.1:32400`，並在 `Custom server access URLs` 填 `https://<名稱>.<tailnet>.ts.net:443` |
+| **代理與內網網段設定**        | `Known Proxies` 填 `127.0.0.1`（或代理 IP）；`Local Networks` 可加 `100.64.0.0/10` | `LAN Networks` 填 `100.64.0.0/10`（需 Plex Pass）；免驗證清單 `allowedNetworks` **不支援** `100.64.0.0/10`               |
+| **遠端影片串流付費限制**      | 完全免費                                                                           | 2025/04/29 起，被判定為遠端時需伺服器管理員有 **Plex Pass**，或觀看者有 **Plex Pass／Remote Watch Pass**                 |
+| **硬體轉碼（GPU／內顯加速）** | 完全免費                                                                           | 需伺服器管理員具備 **Plex Pass**                                                                                         |
+| **裝置分享（Node Sharing）**  | 分享節點後，對方直接填 `100.x.y.z:8096` 或完整 `.ts.net` 網址即可                  | 裝置分享不帶子網路路由，需搭配 Serve + 完整 `.ts.net:443` 網址，並在 Plex 後台分享媒體庫                                 |
+
+## 參考資料
+
+- [Access NAS, media servers, or file shares remotely（Tailscale 官方文件）](https://tailscale.com/docs/use-cases/personal-or-at-home-use/access-nas-media-file-servers)
+- [Install Tailscale on Android / Android TV（Tailscale 官方文件）](https://tailscale.com/docs/install/android)
+- [Install Tailscale on Amazon Fire devices（Tailscale 官方文件）](https://tailscale.com/docs/install/amazon-fire)
+- [Jellyfin：Networking（官方文件，連接埠、Local Networks、Base URL）](https://jellyfin.org/docs/general/post-install/networking/)
+- [Jellyfin：Tailscale（官方文件）](https://jellyfin.org/docs/general/post-install/networking/tailscale)
+- [Jellyfin：Reverse Proxy（官方文件，Known Proxies 與 Forwarded-For 標頭）](https://jellyfin.org/docs/general/post-install/networking/reverse-proxy/)
+- [Plex：Remote Streaming / Setting Up Remote Access（官方文件）](https://support.plex.tv/articles/200289506-remote-access/)
+- [Plex：Requirements for Remote Playback of Personal Media（官方文件，2025 遠端串流付費規定）](https://support.plex.tv/articles/requirements-for-remote-playback-of-personal-media/)
+- [Plex：Remote Watch Pass Overview（官方文件）](https://support.plex.tv/articles/remote-watch-pass-overview/)
+- [Plex：Network Settings（官方文件，LAN Networks、Custom server access URLs、allowedNetworks）](https://support.plex.tv/articles/200430283-network/)
+- [Plex：Accessing a Server through Relay（官方文件，2 Mbps 限制）](https://support.plex.tv/articles/216766168-accessing-a-server-through-relay/)
+- [Plex：Server Settings – Bandwidth and Transcoding Limits（官方文件）](https://support.plex.tv/articles/227715247-server-settings-bandwidth-and-transcoding-limits/)
+- [Docker 的 Tailscale sidecar：Jellyfin、Immich、Vaultwarden 共用寫法](/use-cases/docker-sidecar/)
+- [分享裝置給 tailnet 以外的人](/admin/sharing/)
+- [一台 Apple TV 就是家裡的 exit node](/use-cases/apple-tv-exit-node/)
+- [直連與 DERP 中繼：為什麼連線變慢、怎麼改善](/troubleshooting/direct-vs-derp/)
