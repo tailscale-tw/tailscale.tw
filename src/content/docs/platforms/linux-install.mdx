@@ -102,8 +102,8 @@ deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.t
 非 APT 系的發行版同樣在 [Tailscale Packages](https://pkgs.tailscale.com/stable/#linux) 有對應套件庫。注意 RPM 與 SUSE 系的套件安裝後**不會自動啟動服務**，要自己跑一次 `sudo systemctl enable --now tailscaled`（Debian／Ubuntu 的 `.deb` 套件在安裝時已自動啟用並啟動）：
 
 - **Fedora**：`sudo dnf config-manager --add-repo https://pkgs.tailscale.com/stable/fedora/tailscale.repo && sudo dnf install tailscale && sudo systemctl enable --now tailscaled`（DNF 5 改用 `sudo dnf config-manager addrepo --from-repofile=...`）。
-- **RHEL／CentOS Stream／Oracle Linux（8、9、10）**：把網址中的 `fedora` 換成 `rhel/<版本號>`、`centos/<版本號>` 或 `oracle/<版本號>`；Rocky Linux 與 AlmaLinux 可用 RHEL（或 Fedora）的套件庫。
-- **Amazon Linux 2023**：`sudo yum-config-manager --add-repo https://pkgs.tailscale.com/stable/amazon-linux/2023/tailscale.repo && sudo yum install tailscale && sudo systemctl enable --now tailscaled`。
+- **RHEL／CentOS Stream／Oracle Linux（8、9、10）**：把網址中的 `fedora` 換成 `rhel/<版本號>`、`centos/<版本號>` 或 `oracle/<版本號>`（Rocky Linux 與 AlmaLinux 手動加入時可用 `centos/<版本號>`；若跑自動腳本 `install.sh` 則會設為 `fedora` 套件庫）。
+- **Amazon Linux 2023**：出廠未附 `yum-config-manager`，需先安裝 `yum-utils`：`sudo yum install yum-utils && sudo yum-config-manager --add-repo https://pkgs.tailscale.com/stable/amazon-linux/2023/tailscale.repo && sudo yum install tailscale && sudo systemctl enable --now tailscaled`。
 - **openSUSE Leap／Tumbleweed**：用 `zypper ar -g -r` 加入對應的 `tailscale.repo`，再 `sudo zypper ref && sudo zypper in tailscale && sudo systemctl enable --now tailscaled`。
 - **Arch Linux**（`sudo pacman -S tailscale`）、**Alpine Linux**（啟用 community 套件庫後 `sudo apk add tailscale`）、**NixOS**（設定檔加上 `services.tailscale.enable = true;`）則是由各發行版自己的套件庫維護。
 - 不在上述清單的特殊環境，可以從 [Static binaries](https://pkgs.tailscale.com/stable/#static) 下載編譯好的 `tailscale` 與 `tailscaled` 壓縮檔（支援 `amd64`、`arm64`、`arm`、`riscv64`、`mips` 等架構），解壓縮後搭配裡面的 `systemd/tailscaled.service` 使用。
