@@ -40,7 +40,7 @@ curl -fsSL https://tailscale.com/install.sh | sh
 sudo tailscale up
 ```
 
-安裝程式會順手設好 systemd 服務，重開機後 `tailscaled` 會自動帶起來，不用另外設開機腳本。`tailscale up` 第一次會印出認證網址，用瀏覽器登入完成。
+安裝程式會順手設好 systemd 服務，重開機後 `tailscaled` 會自動帶起來，不用另外設開機腳本。`tailscale up` 第一次會印出認證網址，用瀏覽器登入完成。手動加 APT 套件庫、更新方式、32／64 位元與 SD 卡寫入等注意事項見 [Linux 上安裝 Tailscale（Debian、Ubuntu、Raspberry Pi OS）](/platforms/linux-install/)。
 
 這台要當伺服器用，建議到 [Admin console](https://console.tailscale.com/admin/machines) 替它 **Disable key expiry**（或改用 [tag](/admin/tags-auth-keys/)，tagged 裝置預設就停用金鑰到期），否則金鑰到期後路由會跟著失效。
 

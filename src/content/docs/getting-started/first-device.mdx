@@ -46,7 +46,7 @@ Tailscale 不提供傳統的 email／password 註冊，也沒有 Tailscale 自�
 | 平台    | 建議從哪裡開始                                                                                                                       |
 | ------- | ------------------------------------------------------------------------------------------------------------------------------------ |
 | macOS   | 參考本站的 [macOS 上安裝 Tailscale 的三種方法](/platforms/macos-install/)，選擇 Standalone、Mac App Store 或開源 `tailscaled` 版本。 |
-| Linux   | 使用下方的自動安裝腳本，或依發行版使用官方套件庫。                                                                                   |
+| Linux   | 使用下方的自動安裝腳本，或參考本站的 [Linux 上安裝 Tailscale（Debian、Ubuntu、Raspberry Pi OS）](/platforms/linux-install/)。        |
 | Windows | 參考 [Tailscale 官方 Windows 安裝文件](https://tailscale.com/kb/1022/install-windows)，下載 `.exe` 安裝程式。                        |
 | iOS     | 參考 [Tailscale 官方 iOS 安裝文件](https://tailscale.com/docs/install/ios)，從 App Store 安裝。                                      |
 | Android | 參考 [Tailscale 官方 Android 安裝文件](https://tailscale.com/docs/install/android)，從 Google Play 安裝。                            |
@@ -104,7 +104,7 @@ sudo apt-get install tailscale
 sudo tailscale up
 ```
 
-Fedora、RHEL、Amazon Linux 與 openSUSE 等系統要使用各自的 `dnf`、`yum` 或 `zypper` 指令，請直接依同一個 stable track 頁面所列的版本指令操作。套件庫安裝和自動腳本最後都要由 `sudo tailscale up` 啟動登入流程。
+Fedora、RHEL、Amazon Linux 與 openSUSE 等系統要使用各自的 `dnf`、`yum` 或 `zypper` 指令，請直接依同一個 stable track 頁面所列的版本指令操作。套件庫安裝和自動腳本最後都要由 `sudo tailscale up` 啟動登入流程。systemd 服務、DNS 管理、更新與樹莓派注意事項詳見 [Linux 上安裝 Tailscale（Debian、Ubuntu、Raspberry Pi OS）](/platforms/linux-install/)。
 
 ## 加入第二台裝置
 

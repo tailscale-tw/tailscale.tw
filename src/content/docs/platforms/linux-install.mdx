@@ -1,0 +1,382 @@
+---
+title: Linux 上安裝 Tailscale（Debian、Ubuntu、Raspberry Pi OS）
+description: 在 Debian、Ubuntu 與 Raspberry Pi OS 上用自動腳本或 APT 套件庫安裝 Tailscale，說明 tailscaled systemd 服務、up 與 set、DNS 管理機制（systemd-resolved、NetworkManager、resolv.conf）、更新方式與樹莓派注意事項
+sidebar:
+  order: 0.8
+  label: Linux 安裝（Debian、Ubuntu、Pi）
+---
+
+在 Linux 上安裝 Tailscale，裝進系統的是背景守護行程 `tailscaled` 與命令列工具 `tailscale`。Debian、Ubuntu 與 Raspberry Pi OS（樹莓派官方系統，本身就是 Debian 系）的安裝與操作步驟完全相同；Fedora、RHEL、openSUSE、Arch、Alpine 等其他發行版除了套件管理員指令不同，啟動、設定與服務管理的方式也都一樣。
+
+本文整理官方安裝腳本與手動加入套件庫的做法、`tailscale up` 與 `tailscale set` 的用法、`tailscaled` 的 systemd 服務、Linux 上的 `--accept-dns`／`--accept-routes` 與 DNS 管理機制、更新方式，以及 Raspberry Pi 的專屬注意事項。
+
+> 本文以 Tailscale v1.104（2026 年 11 月）為準，安裝腳本、支援發行版、更新機制與 DNS 管理邏輯依官方文件及 v1.104 原始碼整理，未實際驗證。
+
+## 安裝：自動腳本與手動加入套件庫
+
+### 方法一：官方自動安裝腳本（最省事）
+
+在大多數主流 Linux 發行版上，一行指令就能完成安裝：
+
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+```
+
+這支腳本（原始碼在 [`scripts/installer.sh`](https://github.com/tailscale/tailscale/blob/main/scripts/installer.sh)）不是直接塞一個固定執行檔進系統，而是自動替你設定好官方套件庫：
+
+1. 讀取 `/etc/os-release`（`ID`、`VERSION_ID`、`VERSION_CODENAME`、`UBUNTU_CODENAME`）與 `uname`，判斷發行版、版本代號與套件管理員（`apt`、`dnf`、`yum`、`zypper`、`pacman`、`apk` 等）。
+2. 向 `pkgs.tailscale.com` 確認該發行版版本是否在支援清單內。
+3. 加入對應的官方套件庫與簽章金鑰，再用系統的套件管理員安裝 `tailscale`（APT 系會一併安裝 `tailscale-archive-keyring`，讓金鑰也能隨套件更新），並啟用 `tailscaled` 服務。
+4. 腳本**只負責安裝套件與啟動 `tailscaled`**，不會自動登入 tailnet；安裝完仍要自己執行 `sudo tailscale up`。
+
+腳本支援兩個常用的環境變數：
+
+```bash
+# 鎖定安裝特定版本
+curl -fsSL https://tailscale.com/install.sh | TAILSCALE_VERSION=1.104.5 sh
+
+# 改用測試版（unstable）套件庫（預設為 stable）
+curl -fsSL https://tailscale.com/install.sh | TRACK=unstable sh
+```
+
+如果環境規範不允許直接 `curl | sh`，可以先下載回來檢查再執行：
+
+```bash
+curl -fsSL https://tailscale.com/install.sh -o tailscale-install.sh
+less tailscale-install.sh
+sh tailscale-install.sh
+```
+
+### 方法二：手動加入 APT 套件庫（Debian、Ubuntu、Raspberry Pi OS）
+
+不想跑自動腳本（例如寫進 Ansible playbook、Dockerfile 或系統佈建腳本）時，可以照 [Tailscale Packages（stable track）](https://pkgs.tailscale.com/stable/#linux) 的步驟手動加入套件庫。APT 套件庫的網址格式是：
+
+```text
+https://pkgs.tailscale.com/stable/<distro>/<codename>
+```
+
+先確認自己系統的 `<distro>` 與 `<codename>`：
+
+```bash
+. /etc/os-release && echo "distro=$ID codename=$VERSION_CODENAME"
+```
+
+常見系統對應的值如下：
+
+| 系統                           | `<distro>` | 常見 `<codename>`                                                           |
+| ------------------------------ | ---------- | --------------------------------------------------------------------------- |
+| **Debian**                     | `debian`   | `trixie`（13）、`bookworm`（12）、`bullseye`（11）、`forky`（testing）      |
+| **Ubuntu**                     | `ubuntu`   | `noble`（24.04 LTS）、`jammy`（22.04 LTS）、`focal`（20.04 LTS）、`plucky`  |
+| **Raspberry Pi OS（64 位元）** | `debian`   | `trixie`（13）、`bookworm`（12）——64 位元版直接使用 Debian `arm64`          |
+| **Raspberry Pi OS（32 位元）** | `raspbian` | `trixie`（13）、`bookworm`（12）、`bullseye`（11）——32 位元版為 Raspbian 系 |
+
+Linux Mint、Pop!\_OS、elementary OS、Zorin OS 等 Ubuntu／Debian 衍生版，請看 `/etc/os-release` 裡的 `UBUNTU_CODENAME` 或 `DEBIAN_CODENAME`，對應填 `ubuntu` 或 `debian`。
+
+以 **Debian 13（`trixie`）** 為例（Ubuntu 24.04 請把兩處 `debian/trixie` 換成 `ubuntu/noble`；Debian 12 換成 `debian/bookworm`）：
+
+```bash
+# 1. 建立 keyrings 目錄並放入 Tailscale 的 GPG 金鑰
+sudo mkdir -p --mode=0755 /usr/share/keyrings
+curl -fsSL https://pkgs.tailscale.com/stable/debian/trixie.noarmor.gpg \
+  | sudo tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
+
+# 2. 加入 APT 套件庫設定檔
+curl -fsSL https://pkgs.tailscale.com/stable/debian/trixie.tailscale-keyring.list \
+  | sudo tee /etc/apt/sources.list.d/tailscale.list
+
+# 3. 更新套件索引並安裝
+sudo apt-get update
+sudo apt-get install tailscale tailscale-archive-keyring
+```
+
+寫入的 `/etc/apt/sources.list.d/tailscale.list` 內容只有一行，透過 `signed-by` 綁定剛才下載的 keyring，不會動到系統原本的 `/etc/apt/trusted.gpg`：
+
+```text
+deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/debian trixie main
+```
+
+未來跨大版本升級作業系統（例如 Debian 12 `bookworm` 升到 13 `trixie`，或 Ubuntu 22.04 `jammy` 升到 24.04 `noble`）時，記得把 `/etc/apt/sources.list.d/tailscale.list` 裡的代號一起改掉。
+
+### 其他 Linux 發行版與靜態執行檔
+
+非 APT 系的發行版同樣在 [Tailscale Packages](https://pkgs.tailscale.com/stable/#linux) 有對應套件庫。注意 RPM 與 SUSE 系的套件安裝後**不會自動啟動服務**，要自己跑一次 `sudo systemctl enable --now tailscaled`（Debian／Ubuntu 的 `.deb` 套件在安裝時已自動啟用並啟動）：
+
+- **Fedora**：`sudo dnf config-manager --add-repo https://pkgs.tailscale.com/stable/fedora/tailscale.repo && sudo dnf install tailscale && sudo systemctl enable --now tailscaled`（DNF 5 改用 `sudo dnf config-manager addrepo --from-repofile=...`）。
+- **RHEL／CentOS Stream／Oracle Linux（8、9、10）**：把網址中的 `fedora` 換成 `rhel/<版本號>`、`centos/<版本號>` 或 `oracle/<版本號>`（Rocky Linux 與 AlmaLinux 手動加入時可用 `centos/<版本號>`；若跑自動腳本 `install.sh` 則會設為 `fedora` 套件庫）。
+- **Amazon Linux 2023**：出廠未附 `yum-config-manager`，需先安裝 `yum-utils`：`sudo yum install yum-utils && sudo yum-config-manager --add-repo https://pkgs.tailscale.com/stable/amazon-linux/2023/tailscale.repo && sudo yum install tailscale && sudo systemctl enable --now tailscaled`。
+- **openSUSE Leap／Tumbleweed**：用 `zypper ar -g -r` 加入對應的 `tailscale.repo`，再 `sudo zypper ref && sudo zypper in tailscale && sudo systemctl enable --now tailscaled`。
+- **Arch Linux**（`sudo pacman -S tailscale`）、**Alpine Linux**（啟用 community 套件庫後 `sudo apk add tailscale`）、**NixOS**（設定檔加上 `services.tailscale.enable = true;`）則是由各發行版自己的套件庫維護。
+- 不在上述清單的特殊環境，可以從 [Static binaries](https://pkgs.tailscale.com/stable/#static) 下載編譯好的 `tailscale` 與 `tailscaled` 壓縮檔（支援 `amd64`、`arm64`、`arm`、`riscv64`、`mips` 等架構），解壓縮後搭配裡面的 `systemd/tailscaled.service` 使用。
+
+## 登入與改設定：`tailscale up` 與 `tailscale set`
+
+### 首次登入：`tailscale up`
+
+裝好套件後，啟動連線並登入：
+
+```bash
+sudo tailscale up
+```
+
+終端機會印出一串 `https://login.tailscale.com/a/...` 網址。複製到任何有瀏覽器的電腦或手機打開、用你的身分提供者登入授權，這台 Linux 主機就會加入 tailnet（完整註冊與連線測試見〈[註冊帳號並安裝第一台裝置](/getting-started/first-device/)〉）。
+
+連上後確認分到的 Tailscale IP 與鄰居狀態：
+
+```bash
+tailscale ip
+tailscale status
+```
+
+在無頭伺服器、樹莓派或自動化部署時，首次 `tailscale up` 常搭配這些旗標：
+
+| 旗標                          | 用途                                                                                        |
+| ----------------------------- | ------------------------------------------------------------------------------------------- |
+| `--auth-key=<key>`            | 用 auth key 直接登入，免開瀏覽器；支援 `file:/path/to/key` 從檔案讀取，避免金鑰留在歷史紀錄 |
+| `--advertise-tags=tag:<名稱>` | 將機器設為 [tag](/admin/tags-auth-keys/) 伺服器角色（tagged 裝置預設不會金鑰到期）          |
+| `--qr`                        | 把登入網址印成終端機 QR code，用手機掃描登入                                                |
+| `--ssh`                       | 開啟 [Tailscale SSH](/features/tailscale-ssh/) 伺服器                                       |
+| `--operator=$USER`            | 讓目前的一般使用者之後不用加 `sudo` 就能操作 `tailscale` 指令                               |
+| `--hostname=<名稱>`           | 指定在 tailnet 中顯示的機器名稱，不使用作業系統的 hostname                                  |
+
+<Aside type="caution" title="常駐伺服器記得處理金鑰到期">
+  以個人帳號登入的裝置預設每 180 天需要重新驗證一次。樹莓派、NAS 或遠端 Linux
+  伺服器一旦金鑰過期就會離線，建議到 Admin console 的
+  [Machines](https://console.tailscale.com/admin/machines) 頁面點裝置右側選單的
+  **Disable key expiry**，或一開始就用 `--advertise-tags` 以 tag
+  身分加入（見〈[Tags 與 auth
+  key](/admin/tags-auth-keys/)〉）。若金鑰已經過期，執行 `sudo tailscale up
+  --force-reauth` 重新驗證。
+</Aside>
+
+### 日後改設定：用 `tailscale set`
+
+首次登入之後，想開關某個功能（例如加開 Tailscale SSH、接受路由、換 Exit Node），**請用 `tailscale set`，不要用 `tailscale up`**：
+
+- **`tailscale set`**：**只改你寫出來的旗標**，其他設定全部保留原狀。
+- **`tailscale up`**：只要帶了任何設定旗標，就要求你把**目前所有非預設的旗標全部重寫一遍**，漏寫任何一個就會報錯拒絕執行（為了防止你無意間把先前設好的 `--advertise-routes` 等選項洗回預設值）。
+
+例如這台機器原本已經是 Subnet Router，現在想多開 Tailscale SSH 並讓目前使用者免 `sudo`：
+
+```bash
+sudo tailscale set --ssh --operator=$USER
+```
+
+只有少數跟「身分驗證」綁定的旗標（`--auth-key`、`--advertise-tags`、`--login-server`）沒有放在 `tailscale set`，改這些時才需要跑 `tailscale up`。想查看目前機器上所有生效的設定值，或匯出成旗標格式：
+
+```bash
+tailscale get
+tailscale get --set-flags
+```
+
+更多子指令與除錯工具見〈[常用 tailscale CLI 指令速查](/getting-started/cli-cheatsheet/)〉。
+
+## systemd 服務與開機自動連線
+
+在 Linux 上，Tailscale 拆成兩個角色：
+
+- **`tailscaled`**：以 root 權限常駐背景的 systemd 服務，負責建立 `tailscale0` TUN 虛擬網卡、維護 WireGuard 隧道、設定路由表與 DNS。
+- **`tailscale`**：操作用的 CLI，透過 Unix socket（`/run/tailscale/tailscaled.sock`）向 `tailscaled` 下指令。
+
+這也是 Linux 跟 Windows、macOS 圖形介面版最大的差異：`tailscaled` 的 systemd unit 設為 `WantedBy=multi-user.target`，**開機進入系統就會在背景啟動，跟有沒有使用者登入桌面或 SSH 完全無關**（Windows 預設要開無人值守模式才不會登出斷線，見〈[Windows 無人值守模式與當 exit node](/platforms/windows-unattended/)〉）。只要這台機器完成過一次 `tailscale up` 登入，斷電重開機後就會自動連回 tailnet。
+
+### 常用服務與日誌指令
+
+```bash
+systemctl status tailscaled                   # 查看服務狀態
+systemctl is-enabled tailscaled               # 確認是否開機自啟（應為 enabled）
+sudo systemctl restart tailscaled             # 重新啟動守護行程
+journalctl -u tailscaled -n 100 --no-pager    # 查看最近 100 行日誌
+tailscale debug daemon-logs                   # 即時串流 tailscaled 的內部日誌
+```
+
+平常只是想暫時斷開 Tailscale 網路時，執行 `sudo tailscale down` 即可（要連回來再跑 `sudo tailscale up`），不需要 `systemctl stop tailscaled`；`down` 狀態下 `tailscaled` 會在背景待機，不影響本機網路。
+
+### 重要檔案路徑
+
+依官方套件的 [`tailscaled.service`](https://github.com/tailscale/tailscale/blob/main/cmd/tailscaled/tailscaled.service) 定義，Linux 上的關鍵路徑如下：
+
+| 路徑                                  | 用途                                                                                                      |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `/var/lib/tailscale/tailscaled.state` | 存放這台裝置的節點私鑰（node key）與所有 `up`／`set` 設定（目錄權限 `0700`）                              |
+| `/etc/default/tailscaled`             | `tailscaled` 啟動環境變數檔，可調整 `PORT="41641"`（WireGuard UDP 埠）與 `FLAGS=""`（傳給 daemon 的參數） |
+| `/run/tailscale/tailscaled.sock`      | `tailscale` CLI 與 `tailscaled` 溝通的 Unix domain socket                                                 |
+
+修改 `/etc/default/tailscaled` 後，要跑 `sudo systemctl restart tailscaled` 才會生效。另外，建立 VM 範本或複製 SD 卡映像檔到多台機器前，若已經跑過 Tailscale，記得先執行 `sudo tailscale logout` 並清除 `/var/lib/tailscale/tailscaled.state`，避免多台機器共用同一把節點金鑰互相踢下線。
+
+如果啟動時日誌報錯找不到 `/dev/net/tun`，在一般實體機或 VM 可執行 `sudo modprobe tun` 載入核心模組（需要開機自動載入則把 `tun` 寫進 `/etc/modules-load.d/tun.conf`）；若是在無特權的 Proxmox LXC 容器裡，請照〈[在 LXC 中使用 Tailscale](/pve/tailscale-on-lxc/)〉放行 TUN 裝置。
+
+## `--accept-dns`、`--accept-routes` 在 Linux 上的行為
+
+Tailscale 有兩個跟系統網路緊密相關的開關，在 Linux 上的預設值正好相反：
+
+| 旗標              | Linux 預設值 | 說明                                                                         |
+| ----------------- | ------------ | ---------------------------------------------------------------------------- |
+| `--accept-routes` | **`false`**  | **不接受**其他節點（Subnet Router）廣播的子網路由                            |
+| `--accept-dns`    | **`true`**   | **接受** tailnet 下發的 DNS 設定（MagicDNS、global nameserver 與 split DNS） |
+
+### 為什麼 `--accept-routes` 預設是關的
+
+Windows、macOS（App Store 與 Standalone 版）、iOS 與 Android 預設都會自動接受 [Subnet Router](/features/subnet-router/) 廣告的網段路由；唯獨 **Linux 預設不接受**。
+
+原因是 Linux 經常扮演伺服器、路由器或 Subnet Router 本身。如果 tailnet 裡有人廣告了 `192.168.1.0/24`，而你的 Linux 伺服器也剛好在另一個 `192.168.1.0/24` 區網裡，一旦自動接受路由，進來的區網流量就可能被導進 tailnet 造成失聯。
+
+當這台 Linux 是你的工作站或需要連往其他 Subnet Router 後方的內部網段時，手動開啟即可：
+
+```bash
+sudo tailscale set --accept-routes
+```
+
+相對地，如果這台 Linux 本身就是 Subnet Router 或 [PVE 主機](/pve/tailscale-on-pve-host/)，請保持預設的 `--accept-routes=false`。
+
+### `--accept-dns` 與 Linux 的三種 DNS 管理模式
+
+`--accept-dns` 預設為 `true`：讓作業系統把 DNS 查詢交給 `tailscaled` 在本機監聽的 `100.100.100.100`（quad100），解析 [MagicDNS](/features/magicdns/) 短名稱、完整 `*.ts.net` 名稱與 Admin console 設定的 nameserver。
+
+但 Linux 各發行版管理 `/etc/resolv.conf` 的方式五花八門。依 `tailscaled` 的 [`net/dns/manager_linux.go`](https://github.com/tailscale/tailscale/blob/main/net/dns/manager_linux.go) 原始碼，啟動時它會自動偵測系統環境，從三種模式中選一種（可用 `tailscale dns status` 查看目前狀態）：
+
+#### 1. `systemd-resolved` 模式（官方最推薦，支援 Split DNS）
+
+當系統正在執行 `systemd-resolved`，且 `/etc/resolv.conf` 的 nameserver 指到 `127.0.0.53`（標準做法是 `/etc/resolv.conf` 連往 `/run/systemd/resolve/stub-resolv.conf` 的 symlink）或 `/etc/nsswitch.conf` 啟用了 `resolve` 時，`tailscaled` 會透過 D-Bus 將 `100.100.100.100` 與搜尋網域直接綁在 `tailscale0` 介面上。
+
+- **不會動到 `/etc/resolv.conf` 檔案本身**，不會跟 DHCP 用戶端搶檔案。
+- **原生支援 Split DNS**：除非你在 Admin console 開啟了 **Override DNS servers**，否則只有 `*.ts.net` 與 split DNS 指定的網域會送給 `100.100.100.100`，一般網站查詢直接走原本網卡的 DNS（可用 `resolvectl status` 觀察各介面的 DNS Domain）。
+- **Ubuntu**（Desktop 與 Server）預設就是這種模式。
+
+#### 2. `resolvconf`／`openresolv` 模式
+
+當 `/etc/resolv.conf` 由 Debian `resolvconf` 或 `openresolv` 管理時，`tailscaled` 會呼叫 `resolvconf` 指令註冊自己的設定片段。因為這兩套工具不支援依網域分流，`100.100.100.100` 會成為全域 nameserver，非 tailnet 的查詢再由 `100.100.100.100` 轉發給原本的上游 DNS。
+
+#### 3. `direct` 模式（直接改寫 `/etc/resolv.conf`）
+
+如果系統沒有啟用 `systemd-resolved` 或 `resolvconf`——**標準安裝的 Debian** 與 **Raspberry Pi OS（Bookworm／Trixie，預設由 NetworkManager 直接寫檔）** 通常屬於這種情況——`tailscaled` 會走 `direct` 模式：
+
+1. 把原本的 `/etc/resolv.conf` 備份成 `/etc/resolv.pre-tailscale-backup.conf`。
+2. 改寫 `/etc/resolv.conf`，把唯一的 `nameserver` 指到 `100.100.100.100`：
+
+   ```text
+   # resolv.conf(5) file generated by tailscale
+   # For more info, see https://tailscale.com/s/resolvconf-overwrite
+   # DO NOT EDIT THIS FILE BY HAND -- CHANGES WILL BE OVERWRITTEN
+
+   nameserver 100.100.100.100
+   search tailxxxx.ts.net
+   ```
+
+3. 此時機器上所有 DNS 查詢都會先送到 `100.100.100.100`：屬於 tailnet 的名稱就地回答，一般網域則由 `tailscaled` 讀取 `/etc/resolv.pre-tailscale-backup.conf` 裡的原有 DNS 轉發出去。當執行 `tailscale down` 或停止 `tailscaled` 時，會自動把備份還原回 `/etc/resolv.conf`。
+
+你可能會好奇：為什麼系統有跑 NetworkManager（卻沒裝 `systemd-resolved`）時，`tailscaled` 不直接透過 NetworkManager 設定 DNS？原始碼註解說明了原因：NetworkManager 1.26.6 以上版本會忽略未託管（unmanaged）介面的 DNS 設定，而讓 NetworkManager 接管 `tailscale0` 又會導致介面上的 Tailscale IPv6 位址遺失（[issue #1699](https://github.com/tailscale/tailscale/issues/1699)），因此沒有 `systemd-resolved` 時一律退回 `direct` 模式。
+
+### 常見的 Linux DNS 問題與排解
+
+- **MagicDNS 用一陣子就失效（`/etc/resolv.conf` 被覆寫）**：在 `direct` 模式下，`dhclient` 續約或 NetworkManager 切換網路時會重寫 `/etc/resolv.conf`，把 `100.100.100.100` 蓋掉。`tailscaled` 雖然會用 `inotify` 監看檔案並在被覆寫時補寫回去（若短時間內連續被覆寫 10 次則停止重試，並在 `tailscale status` 印出 `/etc/resolv.conf overwritten` 警告），但治本做法是安裝並啟用 `systemd-resolved`，將 `/etc/resolv.conf` 指到 stub resolver（NetworkManager 看到這個 symlink 就會自動改走 `systemd-resolved`，不再自己寫檔）：
+
+  ```bash
+  sudo apt-get install systemd-resolved
+  sudo ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+  sudo systemctl restart systemd-resolved NetworkManager tailscaled
+  ```
+
+- **本機自己有跑 DNS 伺服器（Pi-hole、AdGuard Home、`dnsmasq`）或為 PVE 主機**：不要讓 `tailscaled` 接管這台機器的 DNS，否則會搶 53 埠設定、造成查詢轉發迴圈，或像 PVE 那樣把 `100.100.100.100` 複製進沒裝 Tailscale 的 LXC 容器（見〈[在 PVE 主機上安裝 Tailscale](/pve/tailscale-on-pve-host/#5-magicdns-會被複製進-lxc)〉）。在這台機器上關掉 `--accept-dns`：
+
+  ```bash
+  sudo tailscale set --accept-dns=false
+  ```
+
+  即使設為 `false`，只要整個 tailnet 有開 MagicDNS，本機的 `100.100.100.100` 依然會回應查詢——你可以視需要在自己的 DNS 伺服器上把 `ts.net` 指給 `100.100.100.100`，而且 [`tailscale ssh`](/features/tailscale-ssh/) 指令依然能直接用機器名稱連線。
+
+## 更新 Tailscale
+
+在 Debian、Ubuntu 與 Raspberry Pi OS 上有三種保持版本更新的方式：
+
+### 1. 用系統的套件管理員（APT）
+
+因為安裝時已經加入官方套件庫，日常跑 `sudo apt update && sudo apt full-upgrade` 就會連同系統套件一起升級 Tailscale。只想單獨升級 Tailscale：
+
+```bash
+sudo apt-get update
+sudo apt-get install --only-upgrade tailscale
+```
+
+RHEL／Fedora 用 `sudo dnf update tailscale`，Amazon Linux 2 用 `sudo yum update tailscale`，openSUSE 用 `sudo zypper update tailscale`。
+
+### 2. 用 `tailscale update` 指令
+
+Tailscale v1.36 起內建 `tailscale update`。在 Debian／Ubuntu／Raspberry Pi OS 上，它背後會只針對 `/etc/apt/sources.list.d/tailscale.list` 跑一次 `apt-get update` 再安裝新版（見 [`clientupdate.go`](https://github.com/tailscale/tailscale/blob/main/clientupdate/clientupdate.go)），不必更新整個系統的 APT 索引，速度很快：
+
+```bash
+sudo tailscale update --dry-run   # 只檢查目前版本與最新可用版本，不實際安裝
+sudo tailscale update             # 顯示版本並詢問確認後更新
+sudo tailscale update --yes       # 不詢問直接更新（適合寫進腳本）
+```
+
+進階用法：
+
+- **升／降級到指定版本**：`sudo tailscale update --version=1.102.5`（APT 上會帶 `--allow-downgrades`）。
+- **切換穩定／測試版軌道**：`sudo tailscale update --track=unstable`（或 `--track=stable`），會自動把 `tailscale.list` 或 `tailscale.repo` 裡的軌道網址一併改掉。
+- **靜態執行檔安裝的環境**：若偵測到系統上的 `tailscale` 不是由套件管理員安裝，它會改從 `pkgs.tailscale.com` 下載對應架構的 `.tgz` 覆蓋執行檔並重啟 `tailscaled`。
+- **不支援 `tailscale update` 的發行版**：Arch Linux 系與 NixOS 不允許單一套件脫離系統獨立升級，執行時會提示改用 `pacman -Syu` 或更新 Nix flake／channel。
+
+更新完可用 `tailscale version --daemon` 確認 CLI 與背景 `tailscaled` 的版本號是否一致。
+
+### 3. 自動更新（Auto-update）
+
+2024 年 2 月以後建立的 tailnet，預設會對新加入的裝置開啟自動更新（可在 Admin console 的 [Device management](https://console.tailscale.com/admin/settings/device-management) 頁面查看 **Auto-update new devices**）。單台 Linux 裝置也可以隨時用指令開關：
+
+```bash
+sudo tailscale set --auto-update
+sudo tailscale set --auto-update=false
+```
+
+開啟後，`tailscaled` 會在背景呼叫當初安裝時的套件管理員自動升級（Arch Linux 系與 NixOS 不支援）。官方不會在新版發佈當天立刻推送自動更新，而是先觀察數天到一週確認穩定後才分批升級；若想立刻觸發，只要裝置在線且已開啟自動更新，管理員可以直接在 Admin console 的 **Machines** 頁面對該裝置點選 **Start update**。
+
+## Raspberry Pi 的注意事項
+
+Raspberry Pi OS 就是以 Debian 為基礎打造的系統，上面的安裝、systemd 與更新指令全部通用。不過樹莓派的硬體架構與使用情境有幾個專屬細節值得留意：
+
+### 1. 32 位元（`armhf`）與 64 位元（`arm64`）
+
+- **64 位元機型優先裝 64 位元版系統**：Raspberry Pi 3、Pi 4、Pi 5 與 Pi Zero 2 W 都是 64 位元處理器。Tailscale 以 Go 語言編寫，Go 標準庫的加密運算（WireGuard 使用的 ChaCha20-Poly1305）在 64 位元 ARM（`arm64`）上有硬體與組合語言最佳化，但在 32 位元（`armhf`）上沒有同等級的最佳化，吞吐量會明顯打折（見官方追蹤的 [issue #7053](https://github.com/tailscale/tailscale/issues/7053)）。只有 Pi 1、第一代 Pi Zero（ARMv6）或舊款 32 位元板子才需要裝 32 位元版。
+- **檢查架構看 `dpkg --print-architecture`，別只看 `uname -m`**：自 Bookworm 起，即使你裝的是 **32 位元版 Raspberry Pi OS**，在 Pi 4／Pi 5 上預設也會載入 **64 位元核心**——這時跑 `uname -m` 會看到 `aarch64`，但系統的 userland 與 APT 裝進來的 `tailscaled` 其實還是 32 位元（`armhf`）。要確認實際的套件架構與套件庫來源，請執行：
+
+  ```bash
+  dpkg --print-architecture
+  . /etc/os-release && echo "$ID $VERSION_CODENAME"
+  ```
+
+  - 輸出 `arm64` 且 `ID` 為 `debian`：64 位元系統，手動加套件庫用 `pkgs.tailscale.com/stable/debian/<codename>`。
+  - 輸出 `armhf` 且 `ID` 為 `raspbian`：32 位元系統，手動加套件庫用 `pkgs.tailscale.com/stable/raspbian/<codename>`。
+  - 若直接跑 `curl -fsSL https://tailscale.com/install.sh | sh`，腳本會自動依 `/etc/os-release` 的 `ID` 選對套件庫，不用自己分。
+
+### 2. microSD 卡寫入與唯讀系統（OverlayFS）
+
+樹莓派以 microSD 卡當系統碟、24/7 長期開機時，常會做減少寫入的調校。處理 Tailscale 相關目錄時要注意：
+
+- **`/var/lib/tailscale/` 絕對不能放進 `tmpfs`（RAM disk）**：裡面的 `tailscaled.state` 保存這台裝置的節點金鑰與設定。如果把它掛到 `tmpfs`，每次重開機金鑰就會消失，重新驗證後會在 Admin console 裡不斷長出 `raspberrypi-1`、`raspberrypi-2` 等孤兒節點。
+- **開啟 Raspberry Pi OS 的 Overlay File System（唯讀根目錄）時**：若透過 `raspi-config` 開啟 OverlayFS 保護 SD 卡，務必**先完成 `tailscale up` 登入、設好所有 `tailscale set` 選項，並在 Admin console 對這台樹莓派點 Disable key expiry**（或使用 tag）之後再鎖成唯讀；否則重開機後金鑰一旦輪換或過期，變更寫不回 SD 卡就會失聯。更穩妥的做法是將 `/var/lib/tailscale` 獨立掛載在可寫分區。
+- **真正頻繁寫卡的是系統日誌**：`tailscaled` 本身只有設定改變或金鑰輪換時才會動到 `tailscaled.state`，日常寫入主要來自輸出給 `systemd-journald` 的連線日誌。想保護 SD 卡，可以搭配 `log2ram`，或在 `/etc/systemd/journald.conf` 設定 `Storage=volatile` 與 `RuntimeMaxUse=32M` 讓日誌只留在記憶體。
+- 若還想關閉 `tailscaled` 上傳給官方的連線診斷日誌，可在 `/etc/default/tailscaled` 加上 `FLAGS="--no-logs-no-support"` 後重啟服務（代價是遇到問題時無法請官方支援團隊透過 `tailscale bugreport` 調閱日誌）。
+
+### 3. 當家裡的 Subnet Router、Exit Node 或 Pi-hole
+
+樹莓派省電又安靜，很適合常駐家裡當網路樞紐：
+
+- **接有線乙太網路**：當轉送節點或 DNS 伺服器時，請接有線網路，避免 Wi-Fi 省電休眠與延遲抖動影響整個 tailnet。
+- **各代樹莓派的網卡與效能上限**：Pi 3 Model B 及更早機型是 100 Mbps 網卡；Pi 3 Model B+ 雖換上 Gigabit 晶片但受限於 USB 2.0 通道（實測上限約 300 Mbps）；Pi 4 與 Pi 5 才是完整的 Gigabit 乙太網路。在樹莓派上設定 IP forwarding、廣告區網路由、兼任 Exit Node 的取捨與順手當 Wake-on-LAN 發送端的完整步驟，見〈[Raspberry Pi 當 subnet router 兼 exit node 的實作](/use-cases/subnet-router-raspberry-pi/)〉；想拉高轉送吞吐量，記得照〈[UDP GRO forwarding](/performance/udp-gro-forwarding/)〉開啟網卡 offload。
+- **同機跑 Pi-hole 擋廣告**：樹莓派同時跑 Pi-hole 與 Tailscale 時，記得在這台機器執行 `sudo tailscale set --accept-dns=false`，並把 Pi-hole 的監聽模式設為 `Permit all origins`，完整設定見〈[用自架的 Pi-hole 替整個 tailnet 擋廣告](/use-cases/pi-hole/)〉。
+
+## 參考資料
+
+- [Install Tailscale on Linux（Tailscale 官方文件）](https://tailscale.com/docs/install/linux)
+- [Tailscale Packages：stable track](https://pkgs.tailscale.com/stable/#linux)
+- [Tailscale `installer.sh` 原始碼](https://github.com/tailscale/tailscale/blob/main/scripts/installer.sh)
+- [`tailscaled` daemon（Tailscale 官方文件）](https://tailscale.com/docs/reference/tailscaled)
+- [Configuring Linux DNS（Tailscale 官方文件）](https://tailscale.com/docs/reference/linux-dns)
+- [Why is `resolv.conf` being overwritten?（Tailscale 官方文件）](https://tailscale.com/s/resolvconf-overwrite)
+- [Update Tailscale（Tailscale 官方文件）](https://tailscale.com/kb/1067/update)
+- [Block ads on all your devices from anywhere using a Raspberry Pi（Tailscale 官方文件）](https://tailscale.com/docs/solutions/block-ads-all-devices-anywhere-using-raspberry-pi)
+- [GitHub issue #7053：Raspberry Pi 32-bit ARM performance tracking bug](https://github.com/tailscale/tailscale/issues/7053)
+- [註冊帳號並安裝第一台裝置](/getting-started/first-device/)
+- [常用 tailscale CLI 指令速查](/getting-started/cli-cheatsheet/)
+- [MagicDNS 與自訂 DNS 設定](/features/magicdns/)
+- [Raspberry Pi 當 subnet router 兼 exit node 的實作](/use-cases/subnet-router-raspberry-pi/)
+- [用自架的 Pi-hole 替整個 tailnet 擋廣告](/use-cases/pi-hole/)
