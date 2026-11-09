@@ -1,0 +1,201 @@
+---
+title: Synology 當 Subnet Router 與 Exit Node
+description: 用 Synology NAS 當 Tailscale 的 Subnet Router 與 Exit Node：SSH 與網頁介面設定、DSM 7 的 userspace（netstack）模式與 configure-host 的真正關係、為什麼不需要開 IP forwarding、重開機後的設定保存，以及 NAS CPU 對效能的影響
+sidebar:
+  order: 5.8
+  label: 當 Subnet Router 與 Exit Node
+---
+
+Synology NAS 本來就 24 小時開機、接在有線區網上，很適合順手兼任家裡的 [Subnet Router](/features/subnet-router/)（把印表機、IP Cam、路由器後台分享給 tailnet）與 [Exit Node](/features/exit-node/)（人在外面時借用家裡的網路上網）。
+
+通用的路由與核准觀念在〈[Subnet Router](/features/subnet-router/)〉與〈[Exit Node](/features/exit-node/)〉已經講過；這篇專講 **Synology DSM 上的特殊之處**——為什麼在 DSM 上不必開 `net.ipv4.ip_forward`、DSM 7 的 `configure-host`（TUN 模式）到底是不是必要條件、重開機後哪些設定會保留，以及 NAS 的 CPU 與 userspace 轉送模式帶來的限制。
+
+> 本文以 Tailscale v1.104 與 Synology DSM 7.2 為準（2026 年 11 月），依 Tailscale 官方文件與原始碼（`cmd/tailscaled/tailscaled.go`、`wgengine/netstack`、`release/dist/synology`）整理，未在實機驗證。DSM 6 的差異處會另外註明。
+
+## 前提：安裝官方 SPK 並開啟 SSH
+
+開始前，請確認 NAS 上裝的是 **Tailscale 官方套件伺服器**的版本，而不是 DSM「套件中心」內建的版本：
+
+1. **手動安裝 `.spk`**：Tailscale 官方文件明文提醒，Synology 套件中心（Package Center）上架的 Tailscale 套件**已不再維護、版本停留在舊版**。請先到 [SynoCommunity 的架構對照表](https://github.com/SynoCommunity/spksrc/wiki/Synology-and-SynoCommunity-Package-Architectures)查出 NAS 機型的 CPU 架構（例如 `x86_64`、`armv8`），再到 [Tailscale Packages](https://pkgs.tailscale.com/stable/#spks) 下載對應 DSM 版本（DSM 6、DSM 7 或 DSM 7.2）的 `.spk`，進 DSM **套件中心 → 手動安裝**上傳安裝並完成登入。
+2. **排程自動更新**：因為不是走套件中心更新，官方建議在 **控制台 → 任務排程表 → 新增 → 排程任務 → 使用者定義的指令碼**，建一個以 `root` 每天執行的任務，指令填 `tailscale update --yes`。
+3. **開啟 SSH**：到 **控制台 → 終端機及 SNMP**，勾選 **啟動 SSH 功能**，下面會用 SSH 登入 NAS 執行 `tailscale` 指令。
+
+## 1. 設定 Subnet Router 與 Exit Node
+
+### 做法一：用 SSH 執行 `tailscale set`（建議）
+
+以管理員帳號 SSH 進 NAS，依需求廣告區網網段或 Exit Node（以下假設家裡區網是 `192.168.1.0/24`，請換成自己的網段）：
+
+**只當 Subnet Router**：
+
+```bash
+sudo tailscale set --advertise-routes=192.168.1.0/24
+```
+
+有多個網段時用逗號分隔（例如 `192.168.1.0/24,192.168.2.0/24`）。
+
+**只當 Exit Node**：
+
+```bash
+sudo tailscale set --advertise-exit-node
+sudo tailscale up
+```
+
+**同時當 Subnet Router 與 Exit Node**：
+
+```bash
+sudo tailscale set --advertise-routes=192.168.1.0/24 --advertise-exit-node
+sudo tailscale up
+```
+
+> 依官方 Exit Node 文件，`--advertise-exit-node` 用 `tailscale set` 修改後，要再跑一次不帶參數的 `sudo tailscale up` 才會生效。因為偏好設定已經由 `tailscale set` 寫入，這裡跑不帶旗標的 `tailscale up` 不會觸發「漏帶舊旗標」的錯誤。
+>
+> 如果系統提示找不到 `tailscale`，可改用完整路徑 `/var/packages/Tailscale/target/bin/tailscale`。
+
+### 做法二：用 Tailscale 網頁管理介面
+
+不想開 SSH 的話，較新版的 Tailscale SPK 也支援在網頁介面開關這兩項設定：
+
+1. 在 DSM 點開 Tailscale 套件圖示，畫面會開啟本機的檢視頁（背後執行 `tailscale web -cgi`），並自動在 NAS 的 Tailscale IP `:5252` 啟動完整的網頁管理介面（`RunWebClient`）。
+2. 從已經連上同一個 tailnet 的電腦，用瀏覽器開啟 `http://<NAS 的 Tailscale IP>:5252`，完成身分驗證進入管理模式（前提是 tailnet 的 ACL 有放行這台 NAS 的 `5252` 埠）。
+3. 在網頁介面上直接設定 **Advertising exit node** 與 **Subnet routes**。
+
+網頁介面改的其實就是同一份設定；若連不上 `:5252` 或不想動 ACL，直接走做法一的 SSH 最乾脆。
+
+## 2. 到 Admin console 核准與關閉金鑰到期
+
+裝置端廣告之後，還要到 Tailscale 管理後台核准才會生效：
+
+1. 打開 [Machines](https://console.tailscale.com/admin/machines) 頁面，找到這台 Synology NAS（會出現 **Subnets** 或 **Exit Node** 標記）。
+2. 點右側選單的 **Edit route settings**。
+3. 在 **Subnet routes** 勾選要核准的網段；有廣告 Exit Node 的話，勾選 **Use as exit node**，按 **Save**。
+4. 在同一個裝置選單點 **Disable key expiry**（關閉金鑰到期）。
+
+第 4 步很容易被忽略：NAS 是常駐設備，一旦 180 天後金鑰過期，Subnet Router 的路由就會失效；而 **Exit Node 金鑰過期時會採取 fail close（阻斷連線）**——所有正在透過這台 NAS 上網的手機或筆電會直接斷網，不會自動退回原本的網路。除了手動按 Disable key expiry，也可以改用 [tag](/admin/tags-auth-keys/)（tagged 裝置預設就停用金鑰到期）搭配 `autoApprovers` 自動核准。
+
+如果你改過 tailnet 的 policy file（沒有維持預設的「允許所有存取」），記得在 `grants` 放行對應流量：
+
+- **Subnet Router**：`dst` 填區網網段（例如 `192.168.1.0/24`），完整範例見〈[Subnet Router 的存取規則](/features/subnet-router/#存取規則acl--grants)〉。
+- **Exit Node**：`dst` 必須填 **`autogroup:internet`**（填 NAS 自己的 IP 只代表允許連到 NAS，不代表允許經由它上網），完整範例見〈[Exit Node 的自訂 ACL 注意事項](/features/exit-node/#自訂-acl-時要注意)〉。
+
+## 3. 釐清：DSM 7 的 userspace 模式、TUN 與 IP forwarding
+
+在一般 Linux 主機上設定 Subnet Router 或 Exit Node，第一件事是設 `net.ipv4.ip_forward = 1`；而在 DSM 7 上，大家最常問的則是「要不要先跑 `tailscale configure-host` 開 TUN？」。把 Tailscale 的原始碼攤開來看，這兩件事在 Synology 上的運作方式跟一般 Linux 完全不同。
+
+### 為什麼子網與 Exit Node 不需要開 IP forwarding
+
+根據官方〈[Kernel vs. netstack subnet routing & exit nodes](https://tailscale.com/docs/reference/kernel-vs-userspace-routers)〉文件，Tailscale 的路由轉送有兩種底層模式：
+
+- **Kernel mode（核心模式）**：一般 Linux 的預設做法。封包解密後交給 Linux 核心的路由表與 `iptables`／`nftables` 轉發，所以必須開啟 `net.ipv4.ip_forward = 1`。
+- **Userspace（`netstack`）mode**：由 `tailscaled` 內建的 gVisor `netstack`（使用者空間 TCP/IP 堆疊）在第四層把來自 tailnet 的 TCP／UDP 連線「終止」，再由 `tailscaled` 自己以一般應用程式的身分向區網設備或網際網路發起新的連線，把兩段接起來。整個過程**不經過作業系統核心的路由轉發**。
+
+Synology DSM 雖然底層是 Linux，但因為 DSM 7 把套件關進非 root 沙箱，加上各機型 DSM 的 `iptables` 與核心模組支援不一（見 [GitHub issue #1995](https://github.com/tailscale/tailscale/issues/1995)），`tailscaled` 在判斷環境為 Synology 時，**一律強制用 `netstack` 處理 Subnet Router 與 Exit Node**（`cmd/tailscaled/tailscaled.go` 的 `handleSubnetsInNetstack()` 在 `distro.Synology` 下固定回傳 `true`，且 `NetfilterMode` 強制設為 `off`）。
+
+結果就是：
+
+- **在 Synology 上當 Subnet Router 或 Exit Node，不需要修改 `/etc/sysctl.conf` 開啟 `net.ipv4.ip_forward`**。
+- 當你執行 `tailscale set --advertise-routes` 時，`tailscaled` 看到自己是 `netstack` router（`IsNetstackRouter() == true`），也會直接跳過 IP forwarding 與 UDP GRO forwarding 的系統檢查，不會印出警告。
+
+### 那麼還需要跑 `configure-host`（開 TUN）嗎？
+
+〈[DSM 7 讓 NAS 上的其他服務也能連出去：TUN 與 configure-host](/synology/dsm7-outbound-tun/)〉介紹過：DSM 7 預設沒有 `/dev/net/tun`，`tailscaled` 啟動腳本會退回純 `--tun=userspace-networking`；執行 `tailscale configure-host`（新版別名為 `tailscale configure synology`）則會建立 `/dev/net/tun` 並用 `setcap` 賦予 `tailscaled` 執行檔 `cap_net_admin,cap_net_raw+eip` 權限，讓它能建立 `tailscale0` TUN 虛擬網卡。
+
+因為 Synology 上的 Subnet Router 與 Exit Node 本來就是由 `netstack` 用一般 socket 往區網或外網撥號，**就算完全不跑 `configure-host`，Subnet Router 與 Exit Node 的 TCP／UDP 轉送在 DSM 7 上一樣能通**。
+
+那跑與不跑 `configure-host` 差在哪裡？看下面這張表最清楚：
+
+| 情境                                                           | 不跑 `configure-host`（DSM 7 預設） | 有跑 `configure-host`（建立 `tailscale0` TUN）                  |
+| -------------------------------------------------------------- | ----------------------------------- | --------------------------------------------------------------- |
+| 從外面連進 NAS 本身（DSM、SMB、Docker 埠）                     | 可用（走 `netstack` 轉入本機）      | 可用（走 `tailscale0` 網卡）                                    |
+| 當 **Subnet Router** 轉送區網的 **TCP／UDP**                   | **可用**（`netstack` 轉送）         | **可用**（同樣走 `netstack` 轉送）                              |
+| 當 **Exit Node** 轉送上網的 **TCP／UDP**                       | **可用**（`netstack` 轉送）         | **可用**（同樣走 `netstack` 轉送）                              |
+| 透過 Subnet Router／Exit Node **`ping`（ICMP）**區網或外網目標 | **不通**（缺 `cap_net_raw` 權限）   | **基本可用**（由 `tailscaled` 代跑 `/bin/ping`，見下方說明）    |
+| NAS 本機上的其他套件／容器**主動連出**到 tailnet 其他裝置      | **不通**（沒有 `tailscale0` 網卡）  | **可用**                                                        |
+| DSM 內建防火牆管制                                             | 不受 `tailscale0` 介面規則影響      | 受 DSM 防火牆管制，有開防火牆時**必須放行來源 `100.64.0.0/10`** |
+
+重點有兩個：
+
+1. **為什麼 `ping` 跟 `configure-host` 有關？** 在 `netstack` 模式下，Tailscale 不會原封不動轉發 ICMP 封包；收到 ICMP Echo Request（`ping`）時，`tailscaled` 會在背景呼叫系統的 `/bin/ping -c 1 -W 3 <目標 IP>` 代為探測，成功才回傳 pong（見原始碼 `wgengine/netstack/netstack_userping.go`）。在 DSM 7 上 `tailscaled` 以非 root 的 `tailscale` 帳號執行，必須靠 `configure-host` 加上去的 `cap_net_raw` 權限傳遞給 `/bin/ping` 才能發送 ICMP。即便如此，這也只是「代跑單次 ping 指令」（最多同時 20 個），其他 ICMP 訊息並不會轉送——這就是為什麼官方 Synology 文件特別寫「分享的子網在 UDP 與 TCP 可達，但不一定 ping 得到」。
+2. **開了 `configure-host` 卻發現連不通？檢查 DSM 防火牆**：一旦跑了 `configure-host` 建立 `tailscale0`，Tailscale 流量就會開始經過 DSM 內建防火牆。如果你有開啟 **控制台 → 安全性 → 防火牆**，務必加一條允許規則放行來源 IP `100.64.0.0`、子網路遮罩 `255.192.0.0`（即 `100.64.0.0/10`）。
+
+結論很簡單：如果你只需要從外面連回家裡的區網設備（HTTP、SMB、RTSP 等 TCP／UDP 服務）或把 NAS 當 Exit Node 上網，不跑 `configure-host` 就能用；但如果你想用 `ping` 測試區網設備，或者 NAS 上的 Hyper Backup、Docker 容器也需要主動連向 tailnet 其他節點，就把 `configure-host` 的開機任務一起設好。
+
+## 4. 重開機與套件升級後的設定保存
+
+在 Synology 上，不同設定的保存位置不同，區分清楚才不會白做工：
+
+- **`--advertise-routes` 與 `--advertise-exit-node`：自動保留，不用設開機任務**
+  執行 `tailscale set` 後，路由與 Exit Node 設定會寫入套件資料目錄下的狀態檔 `tailscaled.state`（DSM 7 在 `/var/packages/Tailscale/var/tailscaled.state`，DSM 6 在 `/var/packages/Tailscale/etc/tailscaled.state`）。重開機或升級 Tailscale 套件後，設定都會自動恢復，**不需要**把 `tailscale set --advertise-routes=...` 放進任務排程表。
+- **`configure-host`（TUN 與權限）：重開機與升級後會消失，需要開機任務**
+  如果你有啟用 `configure-host`，`/dev/net/tun` 會在每次 NAS 重開機時消失，而 `tailscaled` 執行檔上的 capability 則會在每次 Tailscale 套件升級時被新檔案蓋掉。請照〈[DSM 7 讓 NAS 上的其他服務也能連出去：TUN 與 configure-host](/synology/dsm7-outbound-tun/#用-task-scheduler-讓它在開機時執行)〉在 **控制台 → 任務排程表** 建立一個以 `root` 在**開機**時觸發的任務：
+
+  ```shell
+  /var/packages/Tailscale/target/bin/tailscale configure-host; synosystemctl restart pkgctl-Tailscale.service
+  ```
+
+  並且在每次升級 Tailscale 套件後手動點選「執行」跑一次（或重開機 NAS）。
+
+## 5. Synology 特有的限制
+
+除了上面提過的 `ping`（ICMP）限制外，把 Synology 當網路節點還有三個架構上的限制：
+
+### 只能「廣告」路由與當出口，不能「接收」路由或用別人的出口
+
+在 Synology 上執行 `tailscale set --accept-routes` 或 `tailscale set --exit-node=<IP>`，CLI 會直接拒絕：
+
+```text
+--accept-routes is not supported on Synology; see https://github.com/tailscale/tailscale/issues/1995
+```
+
+因為 Tailscale 在 Synology 上不去動系統的路由表與 `iptables`，所以方向是單向的：
+
+- NAS **可以**當 Subnet Router 把家裡區網分享給別人（`--advertise-routes`），但 NAS 自己**不能**接收別台 Subnet Router 廣告的網段（`--accept-routes`）。
+- NAS **可以**當 Exit Node 讓別的裝置經由它上網（`--advertise-exit-node`），但 NAS 自己**不能**連上別台 Exit Node 上網（`--exit-node`）。
+
+### 永遠做 SNAT，無法保留真實來源 IP
+
+一般 Linux 的 Subnet Router 可以用 `--snat-subnet-routes=false` 關閉 SNAT，讓區網內的伺服器看到連入裝置真實的 Tailscale IP（`100.x.y.z`）。但在 Synology 上，因為連線是由 `netstack` 在 userspace 終止後再以 NAS 本機的 socket 重新連出，**區網設備看到的來源 IP 永遠是 NAS 的區網 IP**，`--snat-subnet-routes=false` 在 `netstack` 模式下沒有作用。
+
+這點反過來也有一個好處：一般 Linux 在關閉 SNAT 時，若同一台機器同時當 Subnet Router 與 Exit Node 會有上游掉封包的已知問題；Synology 既然固定由 `netstack` 做 SNAT，同一台 NAS **同時開 `--advertise-routes` 與 `--advertise-exit-node` 不會踩到這個坑**。
+
+### 只支援 TCP 與 UDP
+
+`netstack` 工作在第四層，只重建 TCP 與 UDP 連線（加上前面說的代跑 `ping`）。如果區網內有依賴其他 IP 協定（例如 SCTP、GRE、多播廣播）的特殊應用，無法透過 Synology 的 Subnet Router 轉送。
+
+## 6. 效能：NAS 的 CPU 與 userspace 模式的影響
+
+把 Subnet Router 或 Exit Node 放在 Synology 上時，效能取決於兩件事：**NAS 的處理器等級**與 **`netstack` userspace 模式的開銷**。
+
+### NAS 的 CPU 等級差異很大
+
+WireGuard 加解密完全看 CPU：
+
+- **入門 ARM 機型**（J 系列、部分 Value 系列，如 Realtek 或 Marvell 處理器）：單核效能有限，只適合連回家開路由器管理介面、看單路 IP Cam 或應急上網；拿來當 Exit Node 跑大流量下載時，很容易把 CPU 吃滿、連帶讓 DSM 反應變慢。
+- **x86 機型**（Plus 系列以上的 Intel Celeron、AMD Ryzen 等）：應付日常的 Subnet Router 與個人 Exit Node 綽綽有餘。
+
+### Userspace（`netstack`）模式與站內效能調校的關係
+
+官方〈[Kernel vs. netstack subnet routing & exit nodes](https://tailscale.com/docs/reference/kernel-vs-userspace-routers)〉指出：`netstack` 雖然省下部分進出核心的 context switch，但要把每個 TCP／UDP 連線在 userspace 重組再轉發，當**連線數（flows）多或吞吐量大**時，CPU 與記憶體使用量仍比標準 Linux 的 kernel mode 高。
+
+此外，站內〈[效能調校](/performance/)〉介紹的兩項 Linux 調校，在 Synology 當 Subnet Router／Exit Node 時效果有限或直接不適用：
+
+- **[UDP GRO forwarding](/performance/udp-gro-forwarding/) 不適用**：這項調校是加速 Linux 核心在實體網卡與 `tailscale0` 之間轉發 UDP 封包。Synology 的子網與 Exit Node 流量直接在 userspace 進 `netstack`，不走核心轉發（`tailscaled` 的 `CheckUDPGROForwarding()` 也會直接略過）。
+- **[BBR](/performance/bbr/) 只影響外側半段**：在 `netstack` 轉送下，TCP 連線被拆成兩段——朝向 tailnet 用戶端那一側跑的是 gVisor `netstack` 自己的 TCP 堆疊（固定使用 CUBIC），朝向區網或網際網路那一側才是 DSM Linux 核心發起的 socket。
+
+### 什麼時候該換別台設備當？
+
+- **順手兼任就很夠用的情境**：家裡只有這台 NAS 24 小時開著，用途是人在外面連回區網設備、出差或連公共 Wi-Fi 時當個人 Exit Node。直接用 NAS 最省事，不必多養一台機器。
+- **建議改用標準 Linux（Kernel mode）或 Apple TV 的情境**：需要跑高頻寬跨網段傳輸、多人同時掛 Exit Node 看高畫質串流，或是發現轉送流量時 DSM 資源監控裡的 `tailscaled` 明顯搶走儲存與容器的 CPU。這時只要區網裡有跑標準 Linux 的 [Proxmox VE 主機／LXC](/pve/tailscale-on-pve-host/)、[Raspberry Pi](/use-cases/subnet-router-raspberry-pi/)，或是客廳有一台 [Apple TV](/use-cases/apple-tv-exit-node/)，把 Subnet Router／Exit Node 交給它們，效能與隔離性都會更好。
+
+## 參考資料
+
+- [Access Synology NAS from anywhere（Tailscale 官方）](https://tailscale.com/docs/integrations/synology)
+- [Kernel vs. netstack subnet routing & exit nodes（Tailscale 官方）](https://tailscale.com/docs/reference/kernel-vs-userspace-routers)
+- [Subnet routers（Tailscale 官方）](https://tailscale.com/docs/features/subnet-routers)
+- [Exit nodes（Tailscale 官方）](https://tailscale.com/docs/features/exit-nodes)
+- [Synology tracking issue #1995（GitHub）](https://github.com/tailscale/tailscale/issues/1995)
+- [Tailscale 原始碼：`cmd/tailscaled/tailscaled.go`（`handleSubnetsInNetstack`）](https://github.com/tailscale/tailscale/blob/main/cmd/tailscaled/tailscaled.go)
+- [Tailscale 原始碼：`wgengine/netstack/netstack_userping.go`（Synology 上的 ICMP ping 處理）](https://github.com/tailscale/tailscale/blob/main/wgengine/netstack/netstack_userping.go)
+- [DSM 7 讓 NAS 上的其他服務也能連出去：TUN 與 configure-host](/synology/dsm7-outbound-tun/)
+- [Subnet Router：存取整個區網內沒裝 Tailscale 的設備](/features/subnet-router/)
+- [Exit Node：讓所有流量經由指定裝置出去](/features/exit-node/)

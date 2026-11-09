@@ -63,7 +63,7 @@ Tailscale 在 Synology 上走 userspace（hybrid）networking，加上 DSM 7 的
 
 這些限制有部分是 DSM 7 沙箱強加的，最新狀態見 Tailscale 的 [Synology tracking issue](https://github.com/tailscale/tailscale/issues/1995)。
 
-同一個 `tailscale configure` 家族還有另一個子指令，是幫 DSM 安裝 MagicDNS 憑證的，見 [在 Synology NAS 上安裝 Tailscale 憑證方法](/synology/install-tailscale-certificate-on-synology/)。
+同一個 `tailscale configure` 家族還有另一個子指令，是幫 DSM 安裝 MagicDNS 憑證的，見 [在 Synology NAS 上安裝 Tailscale 憑證方法](/synology/install-tailscale-certificate-on-synology/)。要把 NAS 當成區網的 Subnet Router 或上網的 Exit Node，以及釐清這兩個角色與 `configure-host` 的關係，見 [Synology 當 Subnet Router 與 Exit Node](/synology/subnet-router-exit-node-on-synology/)。
 
 ## 參考資料
 
@@ -71,3 +71,4 @@ Tailscale 在 Synology 上走 userspace（hybrid）networking，加上 DSM 7 的
 - [Tailscale 原始碼：`cmd/tailscale/cli/configure-synology.go`](https://github.com/tailscale/tailscale/blob/main/cmd/tailscale/cli/configure-synology.go)
 - [Synology tracking issue（GitHub）](https://github.com/tailscale/tailscale/issues/1995)
 - [在 Synology NAS 上安裝 Tailscale 憑證方法](/synology/install-tailscale-certificate-on-synology/)
+- [Synology 當 Subnet Router 與 Exit Node](/synology/subnet-router-exit-node-on-synology/)
