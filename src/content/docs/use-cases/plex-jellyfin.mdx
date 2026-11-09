@@ -10,7 +10,7 @@ sidebar:
 
 改用 Tailscale，家裡的影音伺服器與外面的手機、筆電、電視盒直接透過 WireGuard 加密隧道互連，全程不必在路由器開任何對外埠。不過 **Jellyfin**（完全自架、在 App 直接填網址連線）與 **Plex**（依賴 `plex.tv` 雲端探索、對「本地／遠端」有嚴格判定與付費規定）在搭配 Tailscale 時的行為差異很大，這篇分別整理兩者的設定做法與常見陷阱。
 
-> 本文依 2026 年 10 月的 Tailscale、Jellyfin 與 Plex 官方文件整理，以 Tailscale v1.104、Jellyfin v12.4、Plex Media Server 1.43 為準。Docker sidecar 的完整 compose 寫法見 [Docker 的 Tailscale sidecar](/use-cases/docker-sidecar/)，本文聚焦在兩種影音伺服器的網路設定、用戶端連線與遠端串流注意事項。
+> 本文依 2026 年 10 月的 Tailscale、Jellyfin 與 Plex 官方文件及社群討論整理，以 Tailscale v1.104、Jellyfin v12.4 為準（本文未在實機逐一驗證，屬文件整理）。Docker sidecar 的完整 compose 寫法見 [Docker 的 Tailscale sidecar](/use-cases/docker-sidecar/)，本文聚焦在兩種影音伺服器的網路設定、用戶端連線與遠端串流注意事項。
 
 ## Jellyfin：直接連線與 Serve HTTPS
 
@@ -113,7 +113,7 @@ Tailscale 配發的 `100.64.0.0/10` 屬於 RFC 6598 定義的電信商共用位�
 
 過去常見的做法是在 **Settings → Server → Network → Custom server access URLs** 填入 `http://100.x.y.z:32400`，讓 Plex 把 Tailscale IP 發布到 `plex.tv`。但需要注意兩個現況：
 
-- **Plex 不會自動枚舉 `tailscale0` 介面，且自 2026 年起過濾 `100.x.y.z` 裸 IP**：`tailscale0` 是沒有預設閘道（default gateway）的點對點 TUN 介面，不會出現在 Plex 的 `Preferred network interface` 選單裡；而在 Plex Media Server 1.43.3（2026 年 8 月）之後，`servers.plex.tv` 開始拒絕帶有 `100.64.0.0/10`（RFC 6598）裸 IP 的註冊請求（伺服器 log 會出現 `PUT https://servers.plex.tv/devices/...` 回傳 HTTP `403`），導致 `100.x.y.z` 無法發布到 `plex.tv`。結果就是**同支手機用 Safari 開 `http://100.x.y.z:32400/web` 完全正常，打開原生 Plex App 卻顯示伺服器離線（Server Offline）**。
+- **Plex 不會自動枚舉 `tailscale0` 介面，且自 2026 年起過濾 `100.x.y.z` 裸 IP**：`tailscale0` 是沒有預設閘道（default gateway）的點對點 TUN 介面，不會出現在 Plex 的 `Preferred network interface` 選單裡；而自 2026 年 8 月起，社群陸續回報 `servers.plex.tv` 開始拒絕帶有 `100.64.0.0/10`（RFC 6598）裸 IP 的註冊請求（伺服器 log 會出現 `PUT https://servers.plex.tv/devices/...` 回傳 HTTP `403`），導致 `100.x.y.z` 無法發布到 `plex.tv`。結果就是**同支手機用 Safari 開 `http://100.x.y.z:32400/web` 完全正常，打開原生 Plex App 卻顯示伺服器離線（Server Offline）**。
 - **TLS 憑證網域比對**：如果在 `Custom server access URLs` 改填 MagicDNS 名稱（`.ts.net`），`servers.plex.tv` 會正常接受（回傳 HTTP `200`）並發布給用戶端；但 Plex 內建的自動憑證只簽給 `*.plex.direct`，當 iOS／iPadOS 等嚴格檢查憑證的原生 App 連往 `https://<主機名稱>.<tailnet>.ts.net:32400` 時，會因為憑證網域不符而拒絕連線，同時也會跳過非本地的明文 `http://` 網址。
 
 目前讓各平台原生 Plex App 穩定透過 Tailscale 連線的做法有兩種，依你的使用情境選擇：
@@ -149,7 +149,7 @@ Tailscale 配發的 `100.64.0.0/10` 屬於 RFC 6598 定義的電信商共用位�
 
 網路上許多舊教學會建議在 **Settings → Server → Network → List of IP addresses and networks that are allowed without auth**（對應 `Preferences.xml` 裡的 `allowedNetworks`）填入 `100.64.0.0/10`，試圖解決認證或遠端連線問題。這麼做有兩個嚴重的坑：
 
-1. **Plex 只接受 RFC 1918 私有位址，會直接忽略 `100.64.0.0/10`**：[Plex Network 官方文件](https://support.plex.tv/articles/200430283-network/)寫明，這個欄位只允許填入**私有／LAN 位址**（即 RFC 1918 的 `10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`）。`100.64.0.0/10` 屬於 RFC 6598 共用位址空間，填進去會被 Plex 靜默忽略（UI 不會報錯，但完全不生效）。
+1. **官方只允許私有／LAN 位址，`100.64.0.0/10` 實測填入不生效**：[Plex Network 官方文件](https://support.plex.tv/articles/200430283-network/)說明這個欄位僅接受 **Private／LAN 位址**，不接受公網（WAN）位址。Tailscale 使用的 `100.64.0.0/10` 屬於 RFC 6598 共用位址空間，並非 RFC 1918 私有位址（`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`）；社群實測填入 `100.64.0.0/10` 會被 Plex 靜默忽略（UI 不會報錯，但完全不生效）。
 2. **免驗證代表直接給予最高管理員權限**：官方文件同時發出警告——任何符合這個名單、未登入就連進伺服器的 App，**都會被直接視為伺服器的擁有者／管理員（admin/owner）**，不僅能看所有媒體庫，還能更改伺服器設定甚至刪除媒體。這個選項原本只是為了無法登入 Plex 帳號的超舊型電視內建播放程式（如早期 LG MediaLink）設計的；現代 Plex 用戶端都能正常登入帳號，**切勿把整個網段放進免驗證清單**。
 
 > **初次安裝 Plex 時找不到 Setup Wizard？** 剛在遠端 Linux 或 Docker 裝好 Plex、還沒認領（claim）伺服器時，Plex 只允許從 `127.0.0.1` 進入初次設定精靈，直接連 `http://100.x.y.z:32400/web` 只會看到一般用戶端畫面而無法認領伺服器。這時不要去湊 `allowedNetworks`，直接透過 Tailscale 建立一條 SSH 本機連接埠轉送：`ssh -L 8888:127.0.0.1:32400 <使用者>@<Plex 主機的 Tailscale IP>`，再打開自己電腦瀏覽器的 `http://127.0.0.1:8888/web`，就能以本機身分完成認領。
