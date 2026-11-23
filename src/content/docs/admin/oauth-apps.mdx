@@ -1,0 +1,201 @@
+---
+title: OAuth apps：讓應用程式代表使用者把裝置加進 tailnet
+description: 說明 OAuth apps 與 OAuth client 的差異、管理員建立 app 與開發者走 authorization code flow 的完整步驟、access token 就是一次性 auth key、custom node attributes 搭配 posture 與 grants 的最小權限做法，以及官方文件沒有寫清楚的地方
+sidebar:
+  order: 2.6
+  label: OAuth apps
+---
+
+要讓自動化工具把機器加進 tailnet，前面兩種憑證各有缺點：[auth key](/admin/tags-auth-keys/) 要有人先產生再貼過去；[OAuth client](/admin/oauth-clients/) 雖然不用貼 key，但註冊出來的裝置一律是 **tag 身分**，看不出是誰加的。
+
+**OAuth apps** 補的是第三種情境：內部工具讓**某位使用者**按一下同意，工具就代表那位使用者把一台裝置加進 tailnet。裝置帶著那位使用者的身分，存取規則、稽核紀錄與裝置配額都算在這個人身上。Tailscale 在 2026 年 11 月 9 日宣布 OAuth apps 正式推出（GA），[Grok Bot](/ai/grok-bot/) 就是以它連進 tailnet。
+
+> 本文依 2026 年 11 月的 Tailscale 官方文件與部落格整理，以 Tailscale v1.104 為準。API 端點、欄位與流程對照官方〈OAuth apps〉與〈Device provisioning with OAuth apps〉兩頁（Last validated 為 2026 年 10 月）。本文未實機操作，屬文件整理；官方沒有寫的部分（撤銷授權、方案限制、PKCE 等）列在「官方沒有寫的事」一節。
+
+## 和 OAuth client 差在哪
+
+兩者名字很像，但用的是 OAuth 2.0 裡完全不同的流程：
+
+| 項目       | OAuth apps                     | OAuth client                  |
+| ---------- | ------------------------------ | ----------------------------- |
+| 流程       | authorization code flow        | client credentials flow       |
+| 裝置擁有者 | 同意授權的那位使用者           | tag                           |
+| 身分       | 個別使用者                     | 服務身分（tag）               |
+| 存取規則   | 以使用者為對象的規則適用       | 以 tag 為對象的規則適用       |
+| 稽核紀錄   | 歸屬個人                       | 歸屬 tag 或服務               |
+| 裝置配額   | 算在授權的使用者身上           | 算在 tag 上                   |
+| 同意方式   | 每台新裝置都要使用者點一次同意 | 憑 client secret 自動運作     |
+| 適合       | 要追溯到「是誰加的」的人為操作 | CI、operator、雲端 sandbox 等 |
+
+一句話：**要讓機器長期自動運作，用 [OAuth client](/admin/oauth-clients/)；要讓「某個人」在一次明確的操作裡把裝置加進來、事後還要追得到是誰，用 OAuth apps。**
+
+## 誰能做什麼
+
+整件事分成兩種角色：
+
+- **管理員**：Owner 或 Admin，用具備 admin scope 的 [API access token](https://tailscale.com/docs/reference/tailscale-api) 建立 OAuth app，並設定 redirect URI 與 scope。
+- **開發者**：實作授權流程的人，要懂 OAuth 2.0 authorization code grant，能處理 HTTP 轉址與 token 交換。
+
+限制：OAuth app 與所有授權它的使用者必須在**同一個 tailnet**，其他 tailnet 的使用者無法完成授權；同意畫面由 Tailscale 託管，無法客製化。
+
+## 步驟一：管理員建立 OAuth app
+
+用 API 建立 app。`name` 是顯示名稱，`redirectUris` 是使用者同意或拒絕後導向的網址，`scopes` 目前只有一個值：
+
+```bash
+curl -X POST "https://api.tailscale.com/api/v2/tailnet/-/oauth-apps" \
+  -u "<api-access-token>:" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "device-provisioner",
+    "redirectUris": ["https://your-tool.internal.example.com/callback"],
+    "scopes": ["auth_keys:create:once"],
+    "allowedNodeAttributes": ["custom:provisioned"]
+  }'
+```
+
+`allowedNodeAttributes` 是選填：只有要在裝置上設 node attribute 時才需要，值必須以 `custom:` 開頭，而且只能放行 custom 屬性。
+
+回應會帶出 app 的憑證：
+
+```json
+{
+  "id": "app-123456",
+  "name": "device-provisioner",
+  "clientSecret": "tskey-app-abc123-secretvalue",
+  "redirectURIs": ["https://your-tool.internal.example.com/callback"],
+  "scopes": ["auth_keys:create:once"]
+}
+```
+
+`clientSecret` 的格式是 `tskey-app-<clientID>-<secret>`，其中的 client ID 對應回應裡的 `id`（官方範例的兩個值寫得不一致，實際以你收到的回應為準）。**secret 只在建立時回傳一次，之後 API 無法再取回**，立刻存進你的 secret 管理工具。建立後可以用 `GET https://api.tailscale.com/api/v2/tailnet/-/oauth-apps/<id>` 確認 scope 與 redirect URI 設對了。
+
+## 步驟二：開發者走 authorization code flow
+
+### 1. 把使用者導到同意畫面
+
+組出授權網址，導向使用者的瀏覽器：
+
+```text
+https://login.tailscale.com/a/oauth_authorize?client_id=<client-id>&redirect_uri=<redirect-uri>&scope=auth_keys:create:once&state=<random-state>&response_type=code
+```
+
+- `redirect_uri` 要和建立 app 時註冊的**完全一致**。
+- `state` 由你的工具自己產生一個隨機值，用來防 CSRF。
+- `response_type` 必須是 `code`。
+
+### 2. 使用者同意或拒絕
+
+使用者在 Tailscale 的同意畫面核准後，會被導回你的 `redirect_uri`，網址帶 `code` 與 `state`；拒絕的話則帶 `error=access_denied`。回呼處理程式**必須檢查 `state` 與送出的值相同**，不一致就拒絕。
+
+### 3. 用 code 換 access token
+
+```bash
+curl -X POST "https://api.tailscale.com/api/v2/oauth/token" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=authorization_code" \
+  -d "code=<authorization-code>" \
+  -d "client_id=<client-id>" \
+  -d "client_secret=tskey-app-<client-id>-<secret>" \
+  -d "redirect_uri=https://your-tool.internal.example.com/callback"
+```
+
+如果建立 app 時有放行 `allowedNodeAttributes`，要在這個請求加上 `node_attributes=<屬性>`（多個用逗號分隔），指定這台裝置要帶哪些屬性。
+
+成功會回：
+
+```json
+{ "access_token": "<access-token>", "token_type": "Bearer", "expires_in": 3600 }
+```
+
+- **沒有 refresh token**。
+- access token **1 小時**後到期，期限無法設定。
+- token **只能用一次**：後端在第一次成功使用後就拒絕它，即使還沒到期。
+
+### 4. access token 就是 auth key
+
+這是這個流程最特別的地方：換到的 access token 本身就是一把有效的 auth key，不必再呼叫 API 去產生。直接拿來註冊裝置：
+
+```bash
+tailscale up --auth-key=<access-token>
+```
+
+裝置加入後，繼承授權者的完整身分：以該使用者為對象的存取規則適用、稽核紀錄記在該使用者名下、也算在該使用者的裝置配額內。在 admin console 裡，這台裝置會出現在授權使用者的裝置清單下。
+
+因為是「一次性授權」，**每新增一台裝置，使用者都要重新走一次同意畫面**。這適合每次佈建都是使用者刻意發起的工具，不適合要大量、無人值守建機器的情境（那是 OAuth client 的工作）。
+
+## 最小權限：用 node attributes 區分「人」與「工具佈建的裝置」
+
+代表使用者加進來的裝置，預設會被套上那位使用者的所有規則，等於把本人的網路權限交給工具。官方文件的做法是用 custom node attribute 標記「這台是 OAuth app 佈建的」，再用 device posture 與 grants 區分：
+
+1. 建立 app 時用 `allowedNodeAttributes` 放行 `custom:provisioned`。
+2. 工具在 token 交換時用 `node_attributes=custom:provisioned` 把屬性掛上裝置。
+3. 在 policy 用 posture 區分：讓既有規則預設只適用「沒有這個屬性」的裝置，再為工具佈建的裝置另開窄規則。
+
+寫法沿用官方部落格示範 Grok Bot 的 `postures`、`defaultSrcPosture` 與 `srcPosture`（見 [Grok Bot 那篇](/ai/grok-bot/)）；以下把屬性換成本文的 `custom:provisioned`，群組與 tag 名稱請依你的環境調整：
+
+```json
+"postures": {
+  "posture:provisioned": ["custom:provisioned == true"],
+  "posture:human":       ["custom:provisioned NOT SET"],
+},
+// 所有規則預設都要求 posture:human，工具佈建的裝置不會繼承
+"defaultSrcPosture": ["posture:human"],
+"grants": [
+  // 工程師本人的裝置：可以連到內部資料庫（受 defaultSrcPosture 約束）
+  {
+    "src": ["group:engineering"],
+    "dst": ["tag:internal-db"],
+    "ip":  ["tcp:5432"],
+  },
+  // 工具佈建的裝置：只放行到內部 API 的 HTTPS
+  {
+    "src":        ["group:engineering"],
+    "srcPosture": ["posture:provisioned"],
+    "dst":        ["tag:internal-api"],
+    "ip":         ["tcp:443"],
+  },
+],
+```
+
+官方部落格寫明 custom posture attribute 只在 Premium 與 Enterprise 方案提供（見 [Device posture](https://tailscale.com/docs/features/device-posture)）。其他方案，部落格對 Grok Bot 的建議是在裝置認證後替它指派 tag，改用 tag 規則控管；自己做的工具能否比照辦理，文件沒有說明，請先實測。規則的基礎寫法見 [ACL / Grants 入門](/admin/acl-grants/)。
+
+## 安全提醒
+
+- **client secret 只顯示一次**，存進 secret 管理工具，不要寫進程式碼或 repo。
+- **務必驗證 `state`**，並把 redirect URI 註冊成你自己控制、精確比對的網址，避免授權碼被導去別處。
+- **access token 要當成 auth key 對待**：它 1 小時內、用一次就失效，但失效前拿到的人就能把裝置加進 tailnet。不要印在記錄檔，不要經過不受信任的通道。
+- **裝置帶的是使用者的全部權限**：一定要搭配上面的 posture 或 tag 規則收窄，否則工具佈建的裝置能碰到使用者能碰到的所有東西。
+- 追溯是這條路的優點：每台裝置都能對到一個人。若你不需要追溯到個人，用 OAuth client 搭配 tag，權限更好控管。
+
+## 官方沒有寫的事
+
+下列項目在兩頁官方文件裡都沒有說明，不能當成已知事實：
+
+- **撤銷授權**：使用者或管理員怎麼撤銷已授權的 app、刪除 app 或輪替 client secret，文件沒寫。
+- **方案限制**：OAuth apps 本身有沒有方案限制，文件沒寫（只有 custom posture attribute 限 Premium／Enterprise 這一點由部落格明講）。
+- **PKCE**：文件沒有提到是否支援或要求。
+- **auth key 的屬性**：換到的 key 是否 ephemeral、是否預先核准、能不能指定 tag，文件沒寫；只說裝置歸屬使用者。
+- **錯誤回應**：token 端點的錯誤格式、token 用過或過期後 `tailscale up` 的訊息、`node_attributes` 不在放行清單時的行為，文件沒寫。
+
+要依賴這些行為之前，請先實測，或向 Tailscale 確認。
+
+## 怎麼選
+
+| 情境                                               | 用哪個                                              |
+| -------------------------------------------------- | --------------------------------------------------- |
+| 手動加一兩台伺服器                                 | [auth key](/admin/tags-auth-keys/)                  |
+| CI、Kubernetes operator、雲端 sandbox 要自動加機器 | [OAuth client](/admin/oauth-clients/)               |
+| 內部工具讓使用者按一下同意，代表他加一台裝置       | **OAuth apps**（本文）                              |
+| AI agent 要以使用者身分連進 tailnet                | OAuth apps 並限縮權限，見 [Grok Bot](/ai/grok-bot/) |
+
+雲端 agent 的通用做法見[雲端 agent sandbox 連回 tailnet](/ai/cloud-sandbox-pattern/)。
+
+## 參考資料
+
+- [OAuth apps（官方）](https://tailscale.com/docs/features/oauth-apps)
+- [Device provisioning with OAuth apps（官方）](https://tailscale.com/docs/features/oauth-apps/device-provisioning)
+- [Tailscale OAuth apps: user-identity device provisioning for agents（官方部落格，2026 年 11 月）](https://tailscale.com/blog/oauth-apps-ga)
+- [OAuth clients（官方）](https://tailscale.com/docs/features/oauth-clients)
+- [Device posture（官方）](https://tailscale.com/docs/features/device-posture)
+- [RFC 6749 第 4.1 節：Authorization Code Grant](https://www.rfc-editor.org/rfc/rfc6749.html#section-4.1)

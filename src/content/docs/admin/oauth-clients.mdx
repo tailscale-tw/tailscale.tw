@@ -161,7 +161,7 @@ OAuth client secret 不像 webhook secret 有「原地 rotate」的按鈕。要�
 - **能不能產生「永久有效」的 auth key？** 不能。但 OAuth client 本身到撤銷前都有效，可以無限次產生新的 auth key，取代永久 key 的需求。
 - **用 client secret 註冊的裝置一定要 tag 嗎？** 是。這類裝置一定是 tag 身分，且 `--advertise-tags` 必填、tag 要符合 client 設定。
 - **`ephemeral` 預設值是多少？** `true`——用 client secret 加入的裝置離線後會自動移除，要長期保留記得設 `ephemeral=false`。
-- **可以用 OAuth client 做 device provisioning、讓裝置掛某個使用者身分嗎？** OAuth client 註冊的裝置一律是 tag 身分；要掛個人使用者身分是另一套 OAuth apps 的 device provisioning 機制，不屬於本文範圍。
+- **可以用 OAuth client 做 device provisioning、讓裝置掛某個使用者身分嗎？** OAuth client 註冊的裝置一律是 tag 身分；要掛個人使用者身分，請用另一套機制：[OAuth apps](/admin/oauth-apps/) 的 device provisioning。
 
 ## 參考資料
 
