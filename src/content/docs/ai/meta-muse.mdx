@@ -1,6 +1,6 @@
 ---
 title: Meta Muse 連進 tailnet：個人 AI agent 以獨立節點加入
-description: Meta 的個人 AI agent Muse 有 Tailscale connector：登入後 Muse 以自己的節點加入 tailnet，可以查節點狀態、碰自架服務、操作 Tailscale SSH。整理官方部落格寫的預設保護、為什麼還是要用 grants 與 tag 自己收緊，以及官方沒有寫清楚的地方
+description: Meta 的個人 AI agent Muse 有 Tailscale connector：登入後 Muse 以自己的節點加入 tailnet，可以查節點狀態、碰自架服務、居中協調 Tailscale SSH 工作階段。整理官方部落格寫的預設保護、為什麼還是要用 grants 與 tag 自己收緊，以及官方沒有寫清楚的地方
 sidebar:
   order: 13
   label: Meta Muse 連進 tailnet
@@ -21,11 +21,11 @@ Meta 在 2026 年 9 月發表個人 AI agent **Muse**，主打「真的把事情
 - 列出目錄內容、查看 podman 容器的狀態，並在一台 Raspberry Pi 伺服器上執行更新，下指令與用自然語言（「check on my Podman containers」）兩種都行。
 - 查看 tailnet 其他節點的狀態。
 - 和 Immich 這類自架服務整合。
-- 參與一個 [Tailscale SSH](/features/tailscale-ssh/) 工作階段。
+- 居中協調（原文用 referee）一場 [Tailscale SSH](/features/tailscale-ssh/) 工作階段。
 
 ## 官方列出的預設保護
 
-部落格寫 Muse 遵循「最小權限」原則，並列出兩個預設：
+部落格轉述 Meta 的說法：Muse 遵循「最小權限」原則；並列出兩個預設：
 
 - **只做 outbound 連線**，其他 agent 因此更難劫持 Muse。
 - **第一次連到 tailnet 內任何一台裝置時，需要使用者明確確認**。使用者可以授予長期或一次性存取，也能隨時撤銷。
@@ -56,7 +56,7 @@ Meta 在 2026 年 9 月發表個人 AI agent **Muse**，主打「真的把事情
 - Muse 節點是否 ephemeral、離線後會不會自動消失。
 - 這個 connector 的**方案限制**（Muse 本身的可用地區與方案、tailnet 側的方案）。
 - 實際的設定頁面與步驟，部落格只描述了「登入後加入」。
-- Meta 一側的 Tailscale connector 如何儲存憑證。
+- Tailscale connector 的憑證如何儲存：部落格只提到 Muse 內部有保護憑證的機制，沒有說明這個 connector 的憑證儲存方式。
 
 要依賴這些行為之前，請先實測，或向 Meta 與 Tailscale 確認。
 
@@ -66,7 +66,7 @@ Meta 在 2026 年 9 月發表個人 AI agent **Muse**，主打「真的把事情
 | -------------- | -------------------- | --------------------------------- | ------------------------------------- |
 | 加入方式       | 登入後以獨立節點加入 | OAuth app（使用者身分）或腳本安裝 | tag 加 OAuth client 的 ephemeral 裝置 |
 | 設定者         | 使用者自己           | 使用者或團隊管理員                | 團隊管理員                            |
-| 官方文件完整度 | 只有一篇部落格       | 兩篇官方頁面                      | 官方整合頁與疑難排解                  |
+| 官方文件完整度 | 只有一篇部落格       | Tailscale 部落格與 xAI 文件各一篇 | Cursor 官方整合頁與疑難排解           |
 
 通用做法見 [雲端 agent sandbox 連回 tailnet](/ai/cloud-sandbox-pattern/)。
 
@@ -74,5 +74,6 @@ Meta 在 2026 年 9 月發表個人 AI agent **Muse**，主打「真的把事情
 
 - [Your agent, your network: How Meta's Muse agent works with Tailscale（Tailscale 官方部落格，2026 年 9 月 30 日）](https://tailscale.com/blog/meta-muse-ai-agent-tailscale)
 - [The lethal trifecta for AI agents（Simon Willison）](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/)
+- [Tailscale 整合（Cursor 官方）](https://cursor.com/docs/integrations/tailscale)
 - [Grants（官方）](https://tailscale.com/docs/features/access-control/grants)
 - [Tags（官方）](https://tailscale.com/docs/features/tags)
