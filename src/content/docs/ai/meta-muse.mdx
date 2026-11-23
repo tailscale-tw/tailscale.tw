@@ -1,0 +1,78 @@
+---
+title: Meta Muse 連進 tailnet：個人 AI agent 以獨立節點加入
+description: Meta 的個人 AI agent Muse 有 Tailscale connector：登入後 Muse 以自己的節點加入 tailnet，可以查節點狀態、碰自架服務、操作 Tailscale SSH。整理官方部落格寫的預設保護、為什麼還是要用 grants 與 tag 自己收緊，以及官方沒有寫清楚的地方
+sidebar:
+  order: 13
+  label: Meta Muse 連進 tailnet
+---
+
+Meta 在 2026 年 9 月發表個人 AI agent **Muse**，主打「真的把事情做完」，不只回答問題。Muse 在 Linux 虛擬機裡運作，預設與使用者資料及外部服務隔開，靠一組 **connector** 去碰第三方服務，其中一個就是 Tailscale。
+
+這篇整理 Tailscale 官方部落格（2026 年 9 月 30 日）對 Muse 的 Tailscale 整合的說明：它做什麼、官方列出的預設保護，以及你還該自己做什麼。想先了解 agent 的風險，見 [AI 與 agent](/ai/)。
+
+> 本文依 2026 年 11 月能讀到的 Tailscale 官方部落格整理，以 Tailscale v1.104 為準。**只有這一篇部落格說明了這個整合**，本文未實機操作，也沒有看到 Meta 或 Tailscale 的設定文件頁；官方沒寫的細節在文中明確標示。
+
+## Muse 的 Tailscale connector 做什麼
+
+部落格的描述是：用你的身分提供者（identity provider）登入後，**Muse 以它自己的節點加入你的 tailnet**。即使你在手機或筆電上已經登入 Tailscale，Muse 仍要另外登入，因為它是分開連線的。行動版、桌面版與網頁版的行為相同。
+
+加入之後，Muse 可以看到並操作 tailnet 裡的其他機器。作者的實測包括：
+
+- 列出目錄內容、查看 podman 容器的狀態，並在一台 Raspberry Pi 伺服器上執行更新，下指令與用自然語言（「check on my Podman containers」）兩種都行。
+- 查看 tailnet 其他節點的狀態。
+- 和 Immich 這類自架服務整合。
+- 參與一個 [Tailscale SSH](/features/tailscale-ssh/) 工作階段。
+
+## 官方列出的預設保護
+
+部落格寫 Muse 遵循「最小權限」原則，並列出兩個預設：
+
+- **只做 outbound 連線**，其他 agent 因此更難劫持 Muse。
+- **第一次連到 tailnet 內任何一台裝置時，需要使用者明確確認**。使用者可以授予長期或一次性存取，也能隨時撤銷。
+
+這些是 Meta 這一側的保護，**你不必也不該只靠它們**。
+
+## 你自己的那一層：把 Muse 當成一般節點收緊
+
+部落格最重要的一段是：對 Tailscale 來說，Muse 就是 tailnet 裡的一個節點，所以 [grants](/admin/acl-grants/)、[tag](/admin/tags-auth-keys/) 等存取控制照常適用。你可以在 Meta 的預設之上再加一層，把 Muse 和你不想放行的東西之間「砌一道牆」。Muse 與其他裝置之間的連線也和一般裝置一樣，端對端加密，Tailscale 看不到內容。
+
+這跟 [致命三重奏](/ai/) 的邏輯一致：Muse 一邊能碰到你的私密資料、一邊會讀不可信的內容、一邊有對外的通道，Meta 的設計想讓三者同時成立不超過兩個，但你的 tailnet 規則是另一層獨立的保險。
+
+實務上建議：
+
+1. **先找出 Muse 在 admin console 裡是哪個節點**：部落格沒說它是使用者身分還是 tag 身分、節點名稱是什麼，請連上之後自己看，再決定規則怎麼寫。
+2. **把 Muse 能連的目標收窄**：只放行它真的需要的服務與連接埠，例如只開某個自架服務的 `tcp:443`，不要讓它碰資料庫、管理介面與 SSH。如果 Muse 的節點帶的是你的使用者身分，你原本的規則會原樣套到它身上，等於把你的整個網路權限交給 agent，這點尤其要檢查。
+3. **要讓它操作 SSH，就單獨寫 [Tailscale SSH](/features/tailscale-ssh/) 規則**，限定目標主機與登入使用者，並考慮用 `check` 模式。
+4. **定期檢查**：官方也提醒，prompt injection 還是會漏網，agent 可能存取到你以為沒給它的資料，所以要「plan for the agent to misbehave」。
+
+這些步驟是依部落格的原則與站內通則整理出的建議，不是 Muse 的官方設定步驟。
+
+## 官方沒有寫的事
+
+下列項目在 Tailscale 部落格裡沒有說明，不能當成已知事實：
+
+- Muse 的節點是**使用者身分還是 tag 身分**。
+- 連線用的是 **auth key、OAuth client 還是 OAuth app**，以及憑證多久到期。
+- Muse 節點是否 ephemeral、離線後會不會自動消失。
+- 這個 connector 的**方案限制**（Muse 本身的可用地區與方案、tailnet 側的方案）。
+- 實際的設定頁面與步驟，部落格只描述了「登入後加入」。
+- Meta 一側的 Tailscale connector 如何儲存憑證。
+
+要依賴這些行為之前，請先實測，或向 Meta 與 Tailscale 確認。
+
+## 和其他 agent 整合的差別
+
+| 項目           | Muse                 | [Grok Bot](/ai/grok-bot/)         | Cursor                                |
+| -------------- | -------------------- | --------------------------------- | ------------------------------------- |
+| 加入方式       | 登入後以獨立節點加入 | OAuth app（使用者身分）或腳本安裝 | tag 加 OAuth client 的 ephemeral 裝置 |
+| 設定者         | 使用者自己           | 使用者或團隊管理員                | 團隊管理員                            |
+| 官方文件完整度 | 只有一篇部落格       | 兩篇官方頁面                      | 官方整合頁與疑難排解                  |
+
+通用做法見 [雲端 agent sandbox 連回 tailnet](/ai/cloud-sandbox-pattern/)。
+
+## 參考資料
+
+- [Your agent, your network: How Meta's Muse agent works with Tailscale（Tailscale 官方部落格，2026 年 9 月 30 日）](https://tailscale.com/blog/meta-muse-ai-agent-tailscale)
+- [The lethal trifecta for AI agents（Simon Willison）](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/)
+- [Grants（官方）](https://tailscale.com/docs/features/access-control/grants)
+- [Tags（官方）](https://tailscale.com/docs/features/tags)
