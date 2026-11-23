@@ -33,7 +33,7 @@ sidebar:
 
 整件事分成兩種角色：
 
-- **管理員**：Owner 或 Admin，用具備 admin scope 的 [API access token](https://tailscale.com/docs/reference/tailscale-api) 建立 OAuth app，並設定 redirect URI 與 scope。
+- **管理員**：Owner 或 Admin，用 [Tailscale API](https://tailscale.com/docs/reference/tailscale-api) 建立 OAuth app，並設定 redirect URI 與 scope。功能頁只寫「具備 admin scope 的 API access token」；API 參考則列明建立需要 `oauth_apps` scope，請求內容含 `allowedNodeAttributes` 時還需要 `devices:posture_attributes`。
 - **開發者**：實作授權流程的人，要懂 OAuth 2.0 authorization code grant，能處理 HTTP 轉址與 token 交換。
 
 限制：OAuth app 與所有授權它的使用者必須在**同一個 tailnet**，其他 tailnet 的使用者無法完成授權；同意畫面由 Tailscale 託管，無法客製化。
@@ -53,6 +53,8 @@ curl -X POST "https://api.tailscale.com/api/v2/tailnet/-/oauth-apps" \
     "allowedNodeAttributes": ["custom:provisioned"]
   }'
 ```
+
+> 欄位大小寫：功能頁的範例寫 `redirectUris`，但 API 參考（OpenAPI spec）的必填欄位是 `redirectURIs`（回應也是這個寫法）。兩者不一致，若請求被拒絕（HTTP 400），先試另一種寫法。
 
 `allowedNodeAttributes` 是選填：只有要在裝置上設 node attribute 時才需要，值必須以 `custom:` 開頭，而且只能放行 custom 屬性。
 
@@ -172,7 +174,7 @@ tailscale up --auth-key=<access-token>
 
 下列項目在兩頁官方文件裡都沒有說明，不能當成已知事實：
 
-- **撤銷授權**：使用者或管理員怎麼撤銷已授權的 app、刪除 app 或輪替 client secret，文件沒寫。
+- **撤銷授權與輪替**：使用者要怎麼撤回已經給出的同意，功能頁與 device provisioning 頁都沒寫。API 參考有 `PUT`（更新）與 `DELETE`（刪除）`/tailnet/{tailnet}/oauth-apps/{appId}`，需要 `oauth_apps` scope，所以 client secret 外洩時至少能刪掉 app 重建；但更新 app 不會重新產生 secret，也沒看到輪替 secret 的端點。
 - **方案限制**：OAuth apps 本身有沒有方案限制，文件沒寫（只有 custom posture attribute 限 Premium／Enterprise 這一點由部落格明講）。
 - **PKCE**：文件沒有提到是否支援或要求。
 - **auth key 的屬性**：換到的 key 是否 ephemeral、是否預先核准、能不能指定 tag，文件沒寫；只說裝置歸屬使用者。
