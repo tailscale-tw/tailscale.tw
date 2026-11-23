@@ -98,6 +98,8 @@ tailscale up --client-secret="${OAUTH_CLIENT_SECRET}?ephemeral=true&preauthorize
 
 ### Tembo：最完整的原生整合
 
+完整設定步驟見 [Tembo 連進 tailnet](/ai/tembo/)。
+
 [Tembo](https://tembo.io)（Postgres 與 AI agent sandbox 平台）把上面整套通則做成了開箱即用的整合：
 
 - **OAuth client 留在伺服器端**：你給它 `auth_keys` Write scope 的 client 與 `tag:tembo-session`，它即時 mint **單次、短效（幾分鐘）、ephemeral、pre-authorized** 的 auth key。OAuth 憑證永不進 sandbox。
