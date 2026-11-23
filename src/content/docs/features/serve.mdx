@@ -218,6 +218,8 @@ grants 的基本寫法見 [ACL / Grants 入門](/admin/acl-grants/)；app capabi
 
 如果想分享的對象是「一個邏輯服務」而不是「某一台裝置」——例如資料庫背後有多台後端、想要一個固定名稱與虛擬 IP、後端可以隨時增減——那是 [Tailscale Services](/features/tailscale-services/) 的領域：它一樣用 `tailscale serve` 指令，只是多一個 `--service` 旗標，把服務和特定裝置解耦，同一台裝置也能同時當多個 Service 的後端。
 
+想看實際例子：[OpenClaw／Hermes Agent 個人助理只開給自己](/ai/openclaw-hermes/)用 Serve 加身分驗證把 agent 的介面限定給自己；[在外面用家裡的 Ollama／LM Studio／Open WebUI](/ai/local-llm-remote/)則用 Serve 把本機的 LLM 服務分享到 tailnet。
+
 ## 常見問題
 
 - **跑 `tailscale serve` 被導去開網頁？** 表示 HTTPS 或相關設定還沒啟用，照著 CLI 給的 consent 網址點開同意即可。
