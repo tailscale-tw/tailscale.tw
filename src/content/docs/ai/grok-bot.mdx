@@ -27,7 +27,7 @@ Grok Bot 是 xAI 的主動式 AI 代理人：每個 Bot 有自己的雲端電腦
 
 ## 路線一：OAuth app
 
-2026 年 11 月 9 日，Tailscale 宣布 [OAuth apps](https://tailscale.com/docs/features/oauth-apps) 正式推出（GA），Grok Bot 就是第一個在正式環境使用它的整合。
+2026 年 11 月 9 日，Tailscale 宣布 [OAuth apps](https://tailscale.com/docs/features/oauth-apps) 正式推出（GA），官方表示 Grok Bot 已能在正式環境用它連到 tailnet 內的私有 MCP server。
 
 ### 它和 OAuth client 不一樣
 
@@ -37,7 +37,7 @@ OAuth apps 用的是標準 OAuth 2.0 的 authorization code flow：使用者在 
 
 ### 怎麼連
 
-Tailscale 官方的說明只有一句：在 Grok Bot 桌面版用 Tailscale plugin 連上你的 tailnet。連上後，Grok Bot 會以「與你的使用者身分關聯的裝置」加入 tailnet，之後你可以在 admin console 的 Machines 看到它，存取範圍由 tailnet policy 決定。官方文章沒有提供更細的逐步畫面，我們也沒有實機操作，所以不假裝寫一套步驟。
+Tailscale 官方的說明只有一句：在 Grok Bot 桌面版用 Tailscale plugin 連上你的 tailnet。官方也說，連上後 Grok Bot 會以「與你的使用者身分關聯的裝置」加入 tailnet，和 tailnet 上其他裝置一樣受 policy 控制。（依一般裝置的行為，你應該能在 admin console 的 Machines 看到它，這是我們的推論，官方文章沒有寫。）官方文章沒有提供更細的逐步畫面，我們也沒有實機操作，所以不假裝寫一套步驟。
 
 ### 最小權限：不要讓 Bot 繼承你的全部權限
 
@@ -46,7 +46,7 @@ Tailscale 官方的說明只有一句：在 Grok Bot 桌面版用 Tailscale plug
 - **Premium 或 Enterprise**：Grok Bot 裝置會帶一個自訂的 posture attribute，可以在 policy 用 `defaultSrcPosture` 讓既有規則預設只適用「非 Bot」的裝置，再為 Bot 單獨開一條規則。
 - **其他方案**：官方說法是認證之後替 Bot 裝置加 tag，改用 tag 為基礎的規則。
 
-官方部落格的 policy 範例大意如下（依文章改寫，欄位名稱以官方為準）：
+下面是官方部落格的 policy 範例（內容相同，僅註解改為中文）：
 
 ```json
 "postures": {
@@ -132,8 +132,8 @@ xAI 頁面沒有指定 tag 名稱、grants 內容或 key 的期限；key 期限�
 兩邊的說法有出入，要留意：
 
 - Tailscale 部落格寫明 **custom posture attribute 僅限 Premium 與 Enterprise**；其他方案改用 tag。
-- 官方文章沒有明講 Personal 方案能不能用 OAuth apps 本身。第三方報導與 plugin 說明對公司 tailnet 的方案要求互相矛盾，我們無法確認，請以 [Tailscale 定價頁](https://tailscale.com/pricing)與 xAI 文件為準。
-- 有使用者回報 Grok Bot 無法被設成 tagged 裝置，官方未確認；若你依賴 tag 規則，上線前先實測。
+- 官方文章沒有明講 Personal 方案能不能用 OAuth apps 本身，我們也無法確認，請以 [Tailscale 定價頁](https://tailscale.com/pricing)與 xAI 文件為準。
+- 若你依賴 tag 規則（非 Premium／Enterprise 的做法），上線前先實測 Bot 裝置是否能如預期套上 tag。
 - Team Setup 路線是「你自己營運」：Cursor 只提供執行腳本的機制，安裝、設定、更新與存取規則都由你負責，dashboard 也不顯示 client 狀態。
 - Team Setup 之外的一般網路流量，仍走共享靜態 IP，不是每個客戶專屬的出口 IP。
 
