@@ -1,0 +1,136 @@
+---
+title: Tembo 連進 tailnet：agent session 以 tag 與一次性 key 加入
+description: Tembo 的 Tailscale 整合讓 agent session 在需要時才以 tag 身分加入 tailnet，用單次、ephemeral 的 auth key，OAuth 憑證永遠不進 sandbox。整理設定步驟（tag、grants、SSH 規則、OAuth client）、managed skill、私有 MCP server 與疑難排解
+sidebar:
+  order: 14
+  label: Tembo 連進 tailnet
+---
+
+[Tembo](https://tembo.io) 的 agent 跑在雲端 sandbox 裡。要讓它碰到內部資料庫、staging 主機或管理 API，又不想把這些服務開到公網，就可以用它的 **Tailscale 整合**：session 需要時才加入 tailnet，連到的東西完全由你的 policy 決定。
+
+[雲端 agent sandbox 連回 tailnet 的通用做法](/ai/cloud-sandbox-pattern/)已經把 Tembo 當範例簡介；這篇是完整的設定版，依官方〈Tailscale〉整合頁整理。
+
+> 本文依 2026 年 11 月的 Tembo 官方文件與 Tailscale 文件整理，以 Tailscale v1.104 為準。本文未實機操作，屬文件整理；官方沒有寫的細節在文中標示。
+
+## 設計：預設安全
+
+官方列出的特性：
+
+- **需要時才加入**：session 預設不會連 tailnet，只有 agent 需要私有網路存取（透過整合安裝的 `/tailscale` skill），或連到你設成「透過 Tailscale 連線」的 MCP server 時才加入。
+- **單次、ephemeral 的 key**：每次加入都由 Tembo API 即時產生短效、單次使用、預先核准、限定你設定的 tag 的 auth key，幾分鐘內到期。**你的 OAuth 憑證不會進入 sandbox**，sandbox 看得到的只有那把 key；ephemeral 節點在 session 結束時自行從 tailnet 移除。
+- **你的 policy 決定存取**：加入後的 session 只是一台 tag 裝置，能碰什麼完全由該 tag 的規則決定，且不需要也不預期有任何 inbound 連線。
+- **無特權**：sandbox 內的 Tailscale 以 userspace networking 模式執行，沒有 root、不改核心網路設定。流量走 Tailscale 的加密 WireGuard 通道，因為 sandbox 不收 inbound UDP，通常經 HTTPS（DERP）中繼。
+
+這跟 [Tags 與 auth key](/admin/tags-auth-keys/) 和 [OAuth client](/admin/oauth-clients/) 的做法一致：憑證留在平台伺服器端，sandbox 只拿到一把用完即丟的 key。
+
+## 設定步驟
+
+需要 Tailscale 組織的管理員權限。
+
+### 一、選一個 tag，加進 policy
+
+官方建議用專屬 tag，例如 `tag:tembo-session`，這樣規則只套到 Tembo 的 session。先在 `tagOwners` 宣告：
+
+```json
+"tagOwners": {
+  "tag:tembo-session": [],
+},
+```
+
+### 二、用最小權限放行目標
+
+規則完全由你決定，建議從窄的開始。官方範例用 `acls`，讓 session 連 staging 資料庫子網與帶 `tag:staging` 的主機：
+
+```json
+"acls": [
+  {
+    "action": "accept",
+    "src": ["tag:tembo-session"],
+    "dst": ["tag:staging:*", "10.20.0.0/16:5432"],
+  },
+],
+```
+
+用 [grants](/admin/acl-grants/) 寫的話，同樣意思是下面這樣（這是我們依 grants 語法的改寫，官方範例沒有給；請把埠收得比 `*` 更窄）：
+
+```json
+"grants": [
+  {
+    "src": ["tag:tembo-session"],
+    "dst": ["tag:staging"],
+    "ip":  ["tcp:443"],
+  },
+  {
+    "src": ["tag:tembo-session"],
+    "dst": ["10.20.0.0/16"],
+    "ip":  ["tcp:5432"],
+  },
+],
+```
+
+要讓 agent 用 [Tailscale SSH](/features/tailscale-ssh/) 登入主機，另外加 `ssh` 規則，並限定可登入的使用者：
+
+```json
+"ssh": [
+  {
+    "action": "accept",
+    "src": ["tag:tembo-session"],
+    "dst": ["tag:staging"],
+    "users": ["ubuntu"],
+  },
+],
+```
+
+### 三、建立 OAuth client
+
+在 Tailscale 的 **Settings → Trust credentials** 按 **+ Credential**，選 **OAuth** 後繼續。在 **Keys → Auth keys** 勾 **Write** scope，**唯讀不夠**，因為 Tembo 要建立 key。再把剛才的 tag（`tag:tembo-session`）指派給這個 client。Tembo 用它產生短效 auth key，而且只能替它擁有的 tag 建 key。複製 client ID 與 client secret。
+
+### 四、在 Tembo 安裝整合
+
+1. 到 Tembo app 的 **Settings → Integrations**。
+2. 在 Developer Tools 群組找到 Tailscale，按 **Install**。
+3. 填連線名稱、OAuth client ID 與 secret，以及 session 要宣告的 device tag（例如 `tag:tembo-session`）。
+
+Tembo 存檔前會用 Tailscale API 驗證憑證，client ID 或 secret 不對會立刻報錯。安裝時也會替你的組織建立一個 managed 的 **`/tailscale` skill**，教 agent 怎麼加入 tailnet、怎麼連到主機，不需要額外設定。
+
+## 怎麼用
+
+直接叫 agent 做需要私有網路的事，想明確一點就提到 tailnet 或 Tailscale，例如：
+
+- 「用 tailscale 去查 staging 資料庫，整理昨天失敗的 job。」
+- 「SSH 進 tailnet 上的 metrics 主機，查磁碟用量。」
+- 「打內部管理 API，取回 feature flag 設定。」
+
+agent 會呼叫 `/tailscale` skill，向 Tembo API 要一把一次性 key，以 **`tembo-session-<session-id>`** 的名稱加入 tailnet 並做事。session 進行期間，它會以 tag 裝置的身分出現在 admin console，結束後自行移除。agent 可以透過 Tailscale SSH、本機的 SOCKS5／HTTP proxy 或 TCP tunnel 連到主機，這些 skill 都處理了。
+
+## 私有 MCP server
+
+session 也能用只在 tailnet 內可達的 MCP server：把它加成自訂的遠端 MCP server，並開啟 **Reach via Tailscale**，然後在 policy 放行你的 session tag 連到它的埠。細節見 Tembo 的 [MCP 整合說明](https://docs.tembo.io/integrations/mcp#private-servers-on-your-tailnet)。MCP server 在 tailnet 內的架設方式見 [把 MCP server 放在 tailnet](/ai/mcp-over-tailscale/)。
+
+## 進階
+
+- **憑證安全**：OAuth client 憑證加密後存放，只在 Tembo API 伺服器端使用，不會送進 sandbox；移除整合會刪掉 managed skill，你也能隨時在 Tailscale 撤銷 OAuth client，一次切斷所有 key 的產生。
+- **多個 tag 或 tailnet**：安裝時可以列多個 tag（都必須由該 OAuth client 擁有）。整合只連該 OAuth client 所屬的 tailnet，要服務多個 tailnet 就每個 tailnet 各安裝一次。
+
+## 疑難排解
+
+| 症狀                                                      | 官方指出的原因                                                                                              |
+| --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| 安裝時顯示「Invalid Tailscale credentials」               | client ID 或 secret 錯，或 OAuth client 沒有 **Keys → Auth keys** 的 Write scope                            |
+| agent 回報「requested tags are invalid or not permitted」 | 你在 Tembo 設的 tag 沒有指派給 Tailscale 裡的 OAuth client（`tagOwners` 與 client 的 tag 指派兩邊都要檢查） |
+| agent 回報連線 host 逾時                                  | policy 沒有放行 `tag:tembo-session` 到該主機與連接埠，這是 Tailscale 照設計在運作，要的話就補規則           |
+| 已經有同名 `tailscale` skill                              | 整合安裝的是 managed 的 `/tailscale` skill，不會覆蓋你自己寫的同名 skill；把你的改名或刪除再重裝            |
+
+## 官方沒有寫的事
+
+- 整合的**方案條件與價格**：整合頁沒有提到。
+- key 到期的**確切時間**：只寫「幾分鐘」。
+- session 的 tag 身分之外，是否支援其他身分模式：文件只描述 tag。
+- 實機上的連線品質（DERP 中繼對延遲的影響）：文件只說通常走中繼。
+
+## 參考資料
+
+- [Tailscale 整合（Tembo 官方）](https://docs.tembo.io/integrations/tailscale)
+- [Trust credentials（Tailscale 官方）](https://tailscale.com/docs/reference/trust-credentials)
+- [OAuth clients（Tailscale 官方）](https://tailscale.com/docs/features/oauth-clients)
+- [Tailscale SSH（Tailscale 官方）](https://tailscale.com/docs/features/tailscale-ssh)
