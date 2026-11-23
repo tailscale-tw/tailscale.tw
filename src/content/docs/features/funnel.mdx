@@ -117,6 +117,8 @@ webhook 端點一樣是公開的，記得驗證簽章（例如 GitHub 的 `X-Hub
 
 Funnel 和 Serve 的指令、目標寫法幾乎相同，主要差在誰看得到、連接埠限制與身分標頭，對照表見 [Serve 文章的「與 Funnel 的差異」](/features/serve/#與-funnel-的差異)。原則很簡單：只有自己人要用就用 Serve，要給 tailnet 外的人用才開 Funnel。
 
+Funnel 會把服務暴露給整個網際網路，AI 相關服務（本機 LLM、agent 介面）不建議這樣做，改用 Serve 只開給自己，做法見 [OpenClaw／Hermes Agent 個人助理只開給自己](/ai/openclaw-hermes/)與[在外面用家裡的 Ollama／LM Studio／Open WebUI](/ai/local-llm-remote/)。
+
 ## 常見問題
 
 - **跑 `tailscale funnel` 出現 `"funnel" node attribute not set`？** policy 的 `nodeAttrs` 沒給這台裝置 `funnel` 屬性，照「前置條件」加上，或請 tailnet 管理員處理。

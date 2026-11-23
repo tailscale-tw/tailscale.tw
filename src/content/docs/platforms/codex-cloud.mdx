@@ -10,7 +10,7 @@ OpenAI 的 [Codex Cloud](https://learn.chatgpt.com/docs/cloud) 會在雲端 VM �
 
 這項整合不是雙方合作的成果。根據 [Tailscale 官方部落格](https://tailscale.com/blog/codex-cloud-tailscale)，Tailscale 在 Codex Cloud 發表後才發現這件事；OpenAI 用的是每個人都能用的 auth key 與 ephemeral 節點機制。
 
-> 本文依 2026 年 10 月的 OpenAI Codex Cloud 文件與 Tailscale 官方部落格整理，未在 Codex Cloud 上實際驗證。Codex Cloud 正逐步開放給 ChatGPT 付費帳號（Plus 以上），功能與限制仍可能變動，請以兩邊的官方文件為準。
+> 本文依 2026 年 10 月至 11 月的 OpenAI Codex Cloud 文件與 Tailscale 官方部落格整理，未在 Codex Cloud 上實際驗證。Codex Cloud 正逐步開放給 ChatGPT 付費帳號（Plus 以上），功能與限制仍可能變動，請以兩邊的官方文件為準。
 
 這篇把重點放在怎麼設定；agent 為什麼需要 tag、grants、ephemeral 這套身分與權限的完整觀念，見 [AI 與 agent](/ai/)。
 
@@ -76,7 +76,9 @@ Codex Cloud 的 VM 不是一般的 Tailscale 裝置，限制不少：
 - **Tailscale 部落格**（2026 年 10 月 6 日）寫的是 MagicDNS 與 split DNS **都不能用**。
 - **OpenAI 的 Codex Cloud 文件**則寫任務**可以**用 MagicDNS 與 split DNS 以主機名稱連到私有服務；公司內部網域要在 Admin console 設定 split DNS，指向內部 DNS 伺服器，並使用完整網域名稱（例如 `api.corp.example.com`）。
 
-功能可能在部落格發布後有更新，以 OpenAI 文件為準比較合理。保險的做法是先用 IP 位址確認連得通，再換成主機名稱；IP 通、主機名稱不通，就是 DNS 的問題。
+兩邊的共同點是：私有網段的路由只支援 IPv4，所以連線目標要用 IPv4 位址，或能解析成 IPv4 的主機名稱（內部網域的情況，OpenAI 文件另要求使用完整網域名稱，且必須解析成 IPv4 位址）。部落格發布於 2026 年 10 月 6 日，OpenAI 文件的頁面沒有標示日期，無法判斷哪一邊較新；我們在 2026 年 11 月重新對照過，兩份文件的說法仍然不同。
+
+保險的做法是先用 IP 位址確認連得通，再換成主機名稱；IP 通、主機名稱不通，就是 DNS 的問題，改用 IP 位址即可繞過。想把同樣的做法套到其他雲端 agent sandbox，見 [雲端 agent sandbox 連回 tailnet 的通用做法](/ai/cloud-sandbox-pattern/)。
 
 ## 限制 Codex 能碰到的範圍
 

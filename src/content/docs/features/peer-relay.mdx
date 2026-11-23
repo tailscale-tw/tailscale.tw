@@ -10,7 +10,7 @@ Tailscale 的兩台裝置沒辦法直連時，流量會改走官方的 DERP 中�
 
 **Peer Relay** 讓你指定 tailnet 裡的一台裝置當中繼：直連失敗時，先改經這台裝置轉送，找不到可用的 Peer Relay 才退回 DERP。中繼的位置與頻寬由你決定，通常比 DERP 快很多。
 
-> 本文依 2026 年 10 月的 Tailscale 官方文件整理，CLI 範例以 Tailscale v1.104 為準。
+> 本文依 2026 年 11 月的 Tailscale 官方文件與部落格整理，CLI 範例以 Tailscale v1.104 為準。Peer Relay 已於 2026 年 2 月 18 日正式推出（GA，先前為 beta），所有方案都能使用，包含免費的 Personal。
 
 ## 三種連線方式的差別
 
@@ -194,6 +194,8 @@ tailscale set --relay-server-port=""
 
 ## 參考資料
 
+- [Tailscale Peer Relays: High-throughput relays for secure, flexible networks（官方部落格，beta 公告）](https://tailscale.com/blog/peer-relays-beta)
+- [Tailscale Peer Relays: Use your own devices as high-throughput relays（官方部落格，2026 年 2 月 18 日 GA 公告）](https://tailscale.com/blog/peer-relays-ga)
 - [Tailscale Peer Relays（官方）](https://tailscale.com/docs/features/peer-relay)
 - [Connection types（官方）](https://tailscale.com/docs/reference/connection-types)
 - [DERP servers（官方）](https://tailscale.com/docs/reference/derp-servers)
