@@ -1,0 +1,160 @@
+---
+title: Cursor 連進 tailnet：Rollouts 的 MCP 私有連線，與 Cloud Agents 的 userspace 做法
+description: Cursor 有兩種方式碰到 tailnet 內的東西：Rollouts 的 Tailscale 整合（tag 加 OAuth client，連只在 tailnet 內的 https MCP server），以及在 Cloud Agents 環境裡自己跑 Tailscale userspace networking。說明設定步驟、ephemeral 裝置的運作、最小權限規則、疑難排解與兩條路的取捨
+sidebar:
+  order: 12
+  label: Cursor 連進 tailnet
+---
+
+Cursor 的雲端 agent 跑在 Cursor 的基礎設施上，預設連不到你 tailnet 裡的東西。官方文件現在提供**兩條**路，用途不同，先分清楚再選：
+
+|            | Rollouts 的 Tailscale 整合                       | Cloud Agents 自己跑 Tailscale                  |
+| ---------- | ------------------------------------------------ | ---------------------------------------------- |
+| 用來做什麼 | 讓 Rollouts 連到只在 tailnet 內的遠端 MCP server | 讓 Cloud Agent 的 VM 直接連私有服務與資料庫    |
+| 誰設定     | 團隊管理員，在 Cursor Integrations 頁面          | 環境設定的人，在 Dockerfile 或 install script  |
+| 憑證       | OAuth client（建議）或 auth key，由 Cursor 保管  | 你自己決定怎麼把 auth key 放進環境             |
+| 網路模式   | Cursor 代為連線，agent 看不到 Tailscale          | VM 內啟動 `tailscaled`（userspace networking） |
+| 方案與狀態 | beta，Teams 與 Enterprise，需聯絡銷售開通        | 官方文件列為設定做法，沒有寫方案限制           |
+
+本文依官方〈Tailscale〉整合頁、〈Secrets & Network〉與〈Setup〉頁整理。想了解 agent 為什麼要關進 tailnet，見 [AI 與 agent](/ai/)。
+
+> 本文依 2026 年 11 月的 Cursor 與 Tailscale 官方文件整理，以 Tailscale v1.104 為準。本文未實機操作；Rollouts 的整合為 beta，介面與行為可能改變。官方沒有寫的部分在文中明確標示。
+
+## 路線一：Rollouts 的 Tailscale 整合
+
+這條路讓 Rollouts 連到**只在 tailnet 內才連得到的 MCP server**。Cursor 會以一台 **tag 身分、ephemeral** 的裝置加入你的 tailnet，只連你的 policy 允許的服務。
+
+限制先講清楚：
+
+- 只有使用 **https** 的遠端 MCP server 能用這種連線。stdio 型的 MCP server 跑在啟動它的那台機器上，沒有 tailnet 位址可讓 Cursor 連，所以不適用。
+- 整合目前是 **beta**，在 Teams 與 Enterprise 方案，需要聯絡 Cursor 銷售開通。
+- 一個團隊最多可以有兩個 Tailscale connection。
+
+### 一、在 tailnet 設定 tag、OAuth client 與規則
+
+Cursor 預設用 `tag:cursor`，也可以自選。步驟：
+
+1. 把 tag 加進 `tagOwners`。
+2. 在 [Trust credentials](https://tailscale.com/docs/reference/trust-credentials) 建立 [OAuth client](/admin/oauth-clients/)，給 `auth_keys` scope，並讓它能指派這個 tag。Cursor 每次連線時用它即時產生短效 key。
+3. 加一條從 Cursor tag 到 MCP server tag 與連接埠的規則。Cursor 不需要 subnet route、exit node 或 `autogroup:internet`。
+
+官方範例用的是 `acls` 寫法：
+
+```json
+{
+  "tagOwners": {
+    "tag:cursor": ["autogroup:admin"],
+    "tag:mcp": ["autogroup:admin"]
+  },
+  "acls": [
+    { "action": "accept", "src": ["tag:cursor"], "dst": ["tag:mcp:443"] }
+  ]
+}
+```
+
+如果你的 policy 已經改用 [grants](/admin/acl-grants/)，同樣的意思可以寫成下面這樣（這是我們依 grants 語法的改寫，官方範例沒有給）：
+
+```json
+"grants": [
+  { "src": ["tag:cursor"], "dst": ["tag:mcp"], "ip": ["tcp:443"] },
+],
+```
+
+MCP server 本身要用 **https，並且有符合 URL 主機名稱的憑證**，因為 Cursor 的 TLS 連線是連到你的伺服器才結束。用 MagicDNS 名稱的話，`tailscale serve --https=443` 就能提供憑證，做法見 [Tailscale Serve](/features/serve/) 與 [把 MCP server 放在 tailnet](/ai/mcp-over-tailscale/)。
+
+官方也允許貼 auth key 代替 OAuth client：要設成 reusable、ephemeral、pre-approved，並加上 Cursor 的 tag，因為 Cursor 每次需要時都會開一台新裝置。官方明說 **OAuth client 是建議做法**。
+
+### 二、在 Cursor 新增 connection
+
+需要有管理團隊 MCP server 的權限：
+
+1. 到 dashboard 的 **Integrations**，在 Tailscale 旁按 **Manage**。
+2. 按 **Add Connection**，填 Display Name 與 Tailnet Name（例如 `acme.ts.net`），Tag 填 policy 裡的 tag（必須以 `tag:` 開頭）。
+3. 選 **OAuth Client** 填 client ID 與 secret，或選 **Auth Key** 貼上 key。secret 是 write-only，要改只能整個換掉。
+4. 存檔。
+
+接著在 Rollouts 開啟該 MCP server，到 **Transport**（「Choose a private link, or keep the public path」）選你的 connection；不選就維持公網路徑。**刪掉 connection 後，使用它的 server 會 fail closed，不會退回走公網**，直到你重新選一個 transport。
+
+### Cursor 怎麼加入你的 tailnet
+
+- **ephemeral 裝置**：用 OAuth client 時，Cursor 產生**單次、預先核准、ephemeral**、**10 分鐘到期**的 key，Cursor 自己不保存這把 key。裝置在沒有任何連線 **15 分鐘**後登出。
+- **隨機裝置名**：每台叫 `cursor-external-tsnet-proxy-` 加隨機字尾。預期每次名稱都不同，也可能同時有多台在線。
+- **policy 就是存取控制**：Cursor 只能連 Cursor tag 連得到的東西；每個 server 都釘死在 URL 的主機與連接埠，URL 沒寫埠就是 443。
+- **憑證 write-only**：Cursor 加密後保存 client secret 或 auth key，之後不會再顯示。
+
+這些都是 [OAuth client](/admin/oauth-clients/) 與 [tag](/admin/tags-auth-keys/) 的標準用法，沒有特殊權限。
+
+### 疑難排解
+
+**畫面要你「choose a private link」**：這個 server 的 URL 是 tailnet 位址，但沒有指定 Tailscale connection。把 Transport 設成一個 connection。
+
+**server 顯示 Failed to connect**：依序檢查官方列的幾點：
+
+1. OAuth client 要有 `auth_keys` scope，並且有權指派該 connection 的 tag。
+2. 這個 tag 要列在 `tagOwners`。
+3. policy 要放行 Cursor tag 到該 server 的主機與連接埠（URL 沒寫埠就是 443）。
+4. 若有套到 Cursor tag 的 **posture 規則**（例如 `defaultSrcPosture`，或規則上的 `srcPosture`），Cursor 的裝置達不到，會被擋，要讓這個 tag 豁免。
+5. 有開 **Tailnet Lock** 的話，新裝置要先簽署才能連線；官方的提醒是 Cursor 每次連線都會建立新裝置，文件沒有說明如何搭配簽署，請先確認再啟用。
+
+## 路線二：Cloud Agents 在環境裡自己跑 Tailscale
+
+Cloud Agents 不一定要用整合：官方文件說，要連 VPC 或內網服務，可以在 Cloud Agent 環境裡跑 **Tailscale userspace networking**、Cloudflare Tunnel 或類似的私有網路 client。這樣你的私有服務**不必接受來自公網的連入流量**。
+
+官方〈Setup〉頁「Running Tailscale」的重點：
+
+- Tailscale 在 Cloud Agent VM 的**預設網路模式不能用**，要改用 userspace networking。
+- 用下面的參數啟動 `tailscaled`：
+
+```bash
+tailscaled --tun=userspace-networking \
+  --outbound-http-proxy-listen=localhost:1054 \
+  --socks5-server=localhost:1055
+```
+
+- 在要走 Tailscale 的 shell 裡設 proxy 環境變數，之後照常跑 `tailscale up ...`：
+
+```bash
+export ALL_PROXY=socks5h://localhost:1055/
+export HTTP_PROXY=http://localhost:1054/
+export HTTPS_PROXY=http://localhost:1054/
+```
+
+- userspace networking 讓 VM **不能當 exit node**。
+- 官方提到有客戶用 `tailscale-orb` 成功過，因為它的 Docker 模式符合這個做法。
+
+這條路的細節與 [雲端 agent sandbox 連回 tailnet](/ai/cloud-sandbox-pattern/) 的通則相同：用 tag 身分、ephemeral、最小權限規則；auth key 怎麼安全交給環境（Cursor 的 Secrets 類型）見官方〈Secrets & Network〉，Runtime Secret 會在 agent 的輸出與 commit 中被遮蔽，但使用者透過終端機仍看得到。
+
+### 搭配 egress 控制
+
+Cloud Agents 預設可以上網，而且會自動執行終端機指令，官方明講這帶來 **prompt injection 外洩資料**的風險。官方提供三種對外網路模式：
+
+| 模式                | 行為                                                     |
+| ------------------- | -------------------------------------------------------- |
+| Allow all           | 可連任何外部主機                                         |
+| Default + allowlist | 預設網域加上你加進 allowlist 的網域                      |
+| Allowlist only      | 只能連你明確加入的網域（Cursor 自己的服務與 SCM 仍可連） |
+
+使用者、已儲存的環境與團隊管理員都可以設定。如果某個環境能碰私有資料，建議把它設成 **Allowlist only**，再用 tailnet 的規則收窄它能到的內部服務；兩層一起，才不會「能連內網」又「能連到任何公網」湊成 [致命三重奏](/ai/)。
+
+## 怎麼選
+
+| 你要的                                         | 用哪條                                     |
+| ---------------------------------------------- | ------------------------------------------ |
+| 讓 Rollouts 用 tailnet 內的 https MCP server   | 路線一（整合，beta、Teams／Enterprise）    |
+| 讓 Cloud Agent 直接連內部資料庫、API、私有服務 | 路線二（環境內 userspace Tailscale）       |
+| Grok Bot（也是經 Cursor 基礎設施）連 tailnet   | 見 [Grok Bot](/ai/grok-bot/)，是另一套機制 |
+| Codex Cloud 或其他雲端 sandbox                 | 見 [Codex Cloud](/platforms/codex-cloud/)  |
+
+## 官方沒有寫的事
+
+- 整合的**實際方案條件與價格**：只寫 beta、Teams 與 Enterprise、聯絡銷售。
+- 整合的 Cursor 端到 MCP server 的**連線路徑細節**（是否經 DERP、延遲）：文件沒寫。
+- Cloud Agents 路線二用的 auth key 該怎麼申請與輪替：文件沒給範例，請依 [雲端 agent sandbox 連回 tailnet](/ai/cloud-sandbox-pattern/) 的通則。
+
+## 參考資料
+
+- [Tailscale 整合（Cursor 官方）](https://cursor.com/docs/integrations/tailscale)
+- [Secrets & Network（Cursor 官方）](https://cursor.com/docs/cloud-agent/security-network)
+- [Cloud Agents Setup：Running Tailscale（Cursor 官方）](https://cursor.com/docs/cloud-agent/setup)
+- [Trust credentials（Tailscale 官方）](https://tailscale.com/docs/reference/trust-credentials)
+- [OAuth clients（Tailscale 官方）](https://tailscale.com/docs/features/oauth-clients)
