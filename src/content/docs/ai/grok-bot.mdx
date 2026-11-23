@@ -33,7 +33,7 @@ Grok Bot 是 xAI 的主動式 AI 代理人：每個 Bot 有自己的雲端電腦
 
 站內 [OAuth client](/admin/oauth-clients/) 那篇講的是 client credentials flow：用一組 client ID／secret 建立**綁 tag、共用服務身分**的裝置，適合 CI 與 operator。
 
-OAuth apps 用的是標準 OAuth 2.0 的 authorization code flow：使用者在 Tailscale 的同意畫面授權，結果帶著**那位使用者的身分**。因此 policy、稽核紀錄與裝置配額都算在授權的使用者身上，而不是某個共用服務身分。
+OAuth apps（完整流程與 API 見[專文](/admin/oauth-apps/)）用的是標準 OAuth 2.0 的 authorization code flow：使用者在 Tailscale 的同意畫面授權，結果帶著**那位使用者的身分**。因此 policy、稽核紀錄與裝置配額都算在授權的使用者身上，而不是某個共用服務身分。
 
 ### 怎麼連
 
