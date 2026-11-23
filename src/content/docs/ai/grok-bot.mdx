@@ -1,0 +1,153 @@
+---
+title: Grok Bot 連進 tailnet：OAuth app 與 Team Setup 兩種接法
+description: xAI 的 Grok Bot 有兩條路連到 tailnet：用 Tailscale plugin 走 OAuth app（以使用者身分加入），或由 Enterprise 管理員用 Team Setup Scripts 在 Bot 電腦安裝 Tailscale。說明差異、policy 怎麼寫成最小權限，以及該選哪一種
+sidebar:
+  order: 11
+  label: Grok Bot 連進 tailnet
+---
+
+Grok Bot 是 xAI 的主動式 AI 代理人：每個 Bot 有自己的雲端電腦（瀏覽器、檔案系統、終端機），可以連 Gmail、Slack 等服務，也能透過 MCP 接自訂工具。當你想讓它用到**只在 tailnet 裡才連得到**的東西（內部 MCP server、內網網站、資料庫），就需要把它接進 tailnet。
+
+官方現在有兩條路，名字都叫「Grok Bot 用 Tailscale」，但機制完全不同，很容易搞混。這篇先分清楚這兩條路，再講怎麼用 policy 把 Bot 關在最小範圍。觀念背景見 [AI 與 agent](/ai/)。
+
+> 本文依 2026 年 11 月的 Tailscale 官方部落格與文件、xAI 官方文件（docs.x.ai）整理，以 Tailscale v1.104 為準。Grok Bot 於 2026 年 11 月仍在快速更新，xAI 與 Tailscale 兩邊的方案限制說法並不一致（見「方案與限制」），以官方當下頁面為準。本文未實機操作 Grok Bot，屬文件整理。
+
+## 兩條路的差別
+
+| 項目         | OAuth app（Tailscale plugin）           | Team Setup Scripts                              |
+| ------------ | --------------------------------------- | ----------------------------------------------- |
+| 誰設定       | 使用者自己，在 Grok Bot 桌面版授權      | 團隊管理員，在 Cursor dashboard 寫腳本          |
+| Bot 的身分   | 與授權使用者關聯的裝置                  | 腳本裡指定的身分（登入使用者，或帶 tag 的 key） |
+| 憑證         | 不必貼 key 或 secret，走 OAuth 2.0 授權 | 瀏覽器登入，或 tagged auth key 存成 Team Secret |
+| 能連到哪裡   | 依 tailnet policy                       | 依 tailnet policy，另可經 exit node 走內網出口  |
+| xAI 方案要求 | 官方部落格未明列                        | Enterprise（team admin）                        |
+| 適合         | 個人或小團隊，讓 Bot 連私有 MCP server  | 公司要整隊統一、需要經 exit node 路由到 VPC     |
+
+一句話：**要讓 Bot 用你的 tailnet 工具，走 OAuth app；要讓整隊 Bot 電腦都進你的網路並走內網出口，走 Team Setup。**
+
+## 路線一：OAuth app
+
+2026 年 11 月 9 日，Tailscale 宣布 [OAuth apps](https://tailscale.com/docs/features/oauth-apps) 正式推出（GA），Grok Bot 就是第一個在正式環境使用它的整合。
+
+### 它和 OAuth client 不一樣
+
+站內 [OAuth client](/admin/oauth-clients/) 那篇講的是 client credentials flow：用一組 client ID／secret 建立**綁 tag、共用服務身分**的裝置，適合 CI 與 operator。
+
+OAuth apps 用的是標準 OAuth 2.0 的 authorization code flow：使用者在 Tailscale 的同意畫面授權，結果帶著**那位使用者的身分**。因此 policy、稽核紀錄與裝置配額都算在授權的使用者身上，而不是某個共用服務身分。
+
+### 怎麼連
+
+Tailscale 官方的說明只有一句：在 Grok Bot 桌面版用 Tailscale plugin 連上你的 tailnet。連上後，Grok Bot 會以「與你的使用者身分關聯的裝置」加入 tailnet，之後你可以在 admin console 的 Machines 看到它，存取範圍由 tailnet policy 決定。官方文章沒有提供更細的逐步畫面，我們也沒有實機操作，所以不假裝寫一套步驟。
+
+### 最小權限：不要讓 Bot 繼承你的全部權限
+
+這是這條路最需要注意的地方。Bot 是「你的裝置」，預設就會被套上**你的**存取規則，等於你把整個人的網路權限交給 AI 代理人。Tailscale 的建議是把 Bot 與你的一般裝置分開：
+
+- **Premium 或 Enterprise**：Grok Bot 裝置會帶一個自訂的 posture attribute，可以在 policy 用 `defaultSrcPosture` 讓既有規則預設只適用「非 Bot」的裝置，再為 Bot 單獨開一條規則。
+- **其他方案**：官方說法是認證之後替 Bot 裝置加 tag，改用 tag 為基礎的規則。
+
+官方部落格的 policy 範例大意如下（依文章改寫，欄位名稱以官方為準）：
+
+```json
+"postures": {
+  "posture:grokbot": ["custom:grokbot == true"],
+  "posture:human":   ["custom:grokbot NOT SET"],
+},
+// 所有規則預設都要求 posture:human，Bot 不會繼承
+"defaultSrcPosture": ["posture:human"],
+"grants": [
+  // 工程師本人可以連到 production 資料庫
+  {
+    "src": ["group:engineering"],
+    "dst": ["tag:production-db"],
+    "ip":  ["tcp:5432"],
+  },
+  // 工程師的 Grok Bot 只能連到 MCP server 的 HTTPS
+  {
+    "src":        ["group:engineering"],
+    "srcPosture": ["posture:grokbot"],
+    "dst":        ["tag:mcp-servers"],
+    "ip":         ["tcp:443"],
+  },
+],
+```
+
+重點：資料庫那條規則受 `defaultSrcPosture` 約束，Bot 碰不到；Bot 只被明確放行到 `tag:mcp-servers` 的 `tcp:443`。posture attribute 的細節見官方 [Device posture](https://tailscale.com/docs/features/device-posture)；規則寫法見 [ACL / Grants 入門](/admin/acl-grants/)。
+
+## 路線二：Team Setup Scripts（Enterprise）
+
+這條路是 [xAI 文件的「Private networks」頁](https://docs.x.ai/grok-bot/private-networks)在講的。背景：Grok Bot 的電腦預設經由 Cursor 提供的**共享靜態出口 IP** 上網，連不到你的私有網路。Team Setup Scripts 讓管理員在團隊每台 Bot 電腦上跑一段腳本，安裝並啟動你自己的網路 client，頁面的範例就是 Tailscale。
+
+### 前提
+
+- 你是 **Enterprise 方案的 team admin**（Team Setup Scripts、Team Secrets 與 Network Controls 都只限 Enterprise）。
+- 你有一個運作中的 tailnet，並在要存取的 VPC 或內網裡有一台 [exit node](/features/exit-node/)。xAI 頁面也提到 [subnet router](/features/subnet-router/) 可以開放特定網段，但要求先在試點電腦驗證。
+- Bot 電腦是 Debian 系 Linux，腳本以該電腦使用者身分執行，可用 `sudo`。
+
+### 設定流程
+
+1. 開 Cursor dashboard 的 Bot 頁面（`https://cursor.com/dashboard/bot`），在 **Team Setup Scripts** 的 **Manifests** 旁按 **+**，建立 manifest。
+2. 在項目裡寫 **Setup Script**：依 Tailscale 的 [Linux 安裝文件](https://tailscale.com/docs/install/linux)安裝，再讓電腦加入 tailnet。
+3. **Check Script** 填 `command -v tailscale`；已安裝時就略過 Setup。
+4. 儲存。新電腦啟動時套用，既有電腦約每天刷新一次，也可以重建電腦立即套用。每個腳本逾時 30 分鐘，失敗會在下次刷新重試。
+
+### 認證：兩種方式
+
+- **瀏覽器登入（預設）**：成員在 Bot 電腦的瀏覽器完成登入，Tailscale 印出登入網址，受你的身分提供者（IdP）政策約束。
+- **tagged auth key**：把可重複使用、**帶 tag** 的 auth key 存成 Team Secret，腳本從環境變數讀取，頁面範例為 `tailscale up --auth-key "$TS_AUTHKEY"`。**不要把 key 寫進腳本本文**，manifest 是純文字、會套用到整隊。所有電腦會用同一把 key 與 tag 加入，不是成員身分，所以要照 [Tags 與 auth key](/admin/tags-auth-keys/) 的做法把該 tag 的規則收緊。
+
+xAI 頁面沒有指定 tag 名稱、grants 內容或 key 的期限；key 期限與 ephemeral 要不要開，可參考 [雲端 sandbox 通用做法](/ai/cloud-sandbox-pattern/)。
+
+### 最小權限範例
+
+用 tag 路線時，Bot 電腦只該碰到它需要的內部服務。例如只放行到內部 API 的 HTTPS，並允許用某台 exit node：
+
+```json
+"tagOwners": {
+  "tag:grokbot":      ["autogroup:admin"],
+  "tag:internal-api": ["autogroup:admin"],
+},
+"grants": [
+  {
+    "src": ["tag:grokbot"],
+    "dst": ["tag:internal-api"],
+    "ip":  ["tcp:443"],
+  },
+],
+```
+
+若要使用 exit node，還要有放行 `autogroup:internet` 的 grant，並在 admin console 核准該 exit node 的路由。記得確認 policy 裡沒有殘留的 `*` 到 `*` 全開規則。
+
+### 驗證與疑難排解
+
+- 在 admin console 的 Machines 確認 Bot 電腦出現；再在 Bot 裡請它連一個以前連不到的內部主機名稱。xAI 建議先用一兩台試點電腦，再推全隊。
+- 瀏覽器登入沒完成、Team Secret 名稱與腳本讀的不一致、auth key 過期，都會讓「已安裝但未認證」。
+- 若 xAI 的 Network policy 設為 **Team allowlist only**，要把 Tailscale 的控制平面、DERP relay 等端點加進允許清單，否則連不上。
+- exit node 沒宣告或沒核准，要到 admin console 的路由設定檢查。
+- 電腦因映像更新或重設而重建時，session 不會保留，需要重新認證。
+- 目的地允許清單仍然有效，私有網路路由不會取代它。
+
+## 方案與限制
+
+兩邊的說法有出入，要留意：
+
+- Tailscale 部落格寫明 **custom posture attribute 僅限 Premium 與 Enterprise**；其他方案改用 tag。
+- 官方文章沒有明講 Personal 方案能不能用 OAuth apps 本身。第三方報導與 plugin 說明對公司 tailnet 的方案要求互相矛盾，我們無法確認，請以 [Tailscale 定價頁](https://tailscale.com/pricing)與 xAI 文件為準。
+- 有使用者回報 Grok Bot 無法被設成 tagged 裝置，官方未確認；若你依賴 tag 規則，上線前先實測。
+- Team Setup 路線是「你自己營運」：Cursor 只提供執行腳本的機制，安裝、設定、更新與存取規則都由你負責，dashboard 也不顯示 client 狀態。
+- Team Setup 之外的一般網路流量，仍走共享靜態 IP，不是每個客戶專屬的出口 IP。
+
+## 怎麼選
+
+- 你一個人（或小團隊），想讓 Bot 連 tailnet 裡的 MCP server：**OAuth app**，並務必把 Bot 與你本人的權限分開。
+- 公司整隊使用、需要 Bot 電腦走內網出口、有 Enterprise：**Team Setup**，用 tagged key 加 Team Secret，grants 收到只剩需要的服務。
+- 兩條路的共同原則：Bot 是會讀不可信內容、又能對外動作的 agent，**預設不給它碰任何東西，再一條一條放行**。
+
+## 參考資料
+
+- [Private networks（xAI Grok Bot 文件）](https://docs.x.ai/grok-bot/private-networks)
+- [Grok Bot has a Tailscale integration—and now you can, too（Tailscale 官方部落格，2026 年 11 月）](https://tailscale.com/blog/oauth-apps-ga)
+- [OAuth apps（官方）](https://tailscale.com/docs/features/oauth-apps)
+- [Device provisioning with OAuth apps（官方）](https://tailscale.com/docs/features/oauth-apps/device-provisioning)
+- [Auth keys（官方）](https://tailscale.com/docs/features/access-control/auth-keys)
+- [Exit nodes（官方）](https://tailscale.com/docs/features/exit-nodes)
