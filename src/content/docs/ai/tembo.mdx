@@ -128,6 +128,15 @@ session 也能用只在 tailnet 內可達的 MCP server：把它加成自訂的�
 - session 的 tag 身分之外，是否支援其他身分模式：文件只描述 tag。
 - 實機上的連線品質（DERP 中繼對延遲的影響）：文件只說通常走中繼。
 
+## 其他 AI 服務的接法
+
+同類的服務做法各有不同，整體比較見 [AI 服務怎麼連進 tailnet](/ai/services-overview/)：
+
+- [Codex Cloud](/ai/codex-cloud/)：貼一把 reusable、ephemeral、帶 tag 的 auth key 到環境設定，VM 以 tag 身分加入
+- [Cursor](/ai/cursor-tailscale/)：兩條路：Rollouts 用 tag 加 OAuth client 連私有 https MCP，或在 Cloud Agents 裡自己跑 userspace Tailscale
+- [Grok Bot](/ai/grok-bot/)：OAuth app 讓使用者授權，或 Enterprise 管理員用 Team Setup 腳本安裝
+- [Meta Muse](/ai/meta-muse/)：登入後以 Muse 自己的節點加入，官方只有一篇部落格
+
 ## 參考資料
 
 - [Tailscale 整合（Tembo 官方）](https://docs.tembo.io/integrations/tailscale)

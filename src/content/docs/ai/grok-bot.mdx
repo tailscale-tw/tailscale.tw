@@ -143,6 +143,15 @@ xAI 頁面沒有指定 tag 名稱、grants 內容或 key 的期限；key 期限�
 - 公司整隊使用、需要 Bot 電腦走內網出口、有 Enterprise：**Team Setup**，用 tagged key 加 Team Secret，grants 收到只剩需要的服務。
 - 兩條路的共同原則：Bot 是會讀不可信內容、又能對外動作的 agent，**預設不給它碰任何東西，再一條一條放行**。
 
+## 其他 AI 服務的接法
+
+同類的服務做法各有不同，整體比較見 [AI 服務怎麼連進 tailnet](/ai/services-overview/)：
+
+- [Codex Cloud](/ai/codex-cloud/)：貼一把 reusable、ephemeral、帶 tag 的 auth key 到環境設定，VM 以 tag 身分加入
+- [Cursor](/ai/cursor-tailscale/)：兩條路：Rollouts 用 tag 加 OAuth client 連私有 https MCP，或在 Cloud Agents 裡自己跑 userspace Tailscale
+- [Tembo](/ai/tembo/)：OAuth client 留在服務端，每個 session 只拿到單次 ephemeral key
+- [Meta Muse](/ai/meta-muse/)：登入後以 Muse 自己的節點加入，官方只有一篇部落格
+
 ## 參考資料
 
 - [Private networks（xAI Grok Bot 文件）](https://docs.x.ai/grok-bot/private-networks)
