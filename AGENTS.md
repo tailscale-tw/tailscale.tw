@@ -52,6 +52,7 @@ The home page is `src/content/docs/index.mdx` (no `src/pages/index.astro`).
 ## Writing content
 
 - The file path is the URL: `pve/tailscale-on-lxc.mdx` → `/pve/tailscale-on-lxc/`. These URLs match the old MkDocs site — don't rename or move files without adding redirects.
+- Redirects: when a page moves, add a 301 to `public/_redirects` (Cloudflare Workers static assets), one line each for the URL with and without the trailing slash, e.g. `/platforms/codex-cloud/ /ai/codex-cloud/ 301`, and update internal links to the new path.
 - Frontmatter: `title` (required; it renders as the H1, so don't repeat it in the body), `description`, `sidebar.order`, `sidebar.label` (shorter sidebar text). There is no central nav file.
 - A section is a directory with an `index.mdx` that sets `sidebar.group.label` and a `sidebar.order` that positions the section among the others (currently getting-started `-1`, features `0`, performance `0.5`, admin `0.75`, ai `0.9`, pve `1`, synology `4`, platforms `5`, use-cases `6`, troubleshooting `7`; pick an unused value for a new section). The section `index.mdx` links its child pages manually; when adding a page, add it to that list too.
 - Write in 台灣正體中文 with Taiwan terminology. Put a space between CJK and Latin/digits (`bun run fix:text` applies it).
