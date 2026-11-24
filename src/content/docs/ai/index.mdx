@@ -9,7 +9,7 @@ sidebar:
 
 AI agent（AI 代理）和聊天機器人最大的差別，是它不只回答，還會動手：讀檔案、查資料庫、執行指令、發訊息。這些能力讓它很有用，也讓它很危險——它會接觸你的私密資料、會看到你丟給它的內容、還會往外送東西。這三個特性湊在一起，正好是攻擊者最喜歡的組合，Simon Willison 稱之為「致命三重奏（lethal trifecta）」。
 
-這篇是 `ai/` section 的觀念首篇，解釋這個風險從哪來，以及為什麼 Tailscale 的 tag、grants、ephemeral 這三樣看起來無聊的基礎建設，就是關住 agent 的關鍵。實際怎麼做，見 [Tags 與 auth key](/admin/tags-auth-keys/)、[ACL / Grants 入門](/admin/acl-grants/) 和 [Codex Cloud](/platforms/codex-cloud/)。
+這篇是 `ai/` section 的觀念首篇，解釋這個風險從哪來，以及為什麼 Tailscale 的 tag、grants、ephemeral 這三樣看起來無聊的基礎建設，就是關住 agent 的關鍵。實際怎麼做，見 [Tags 與 auth key](/admin/tags-auth-keys/)、[ACL / Grants 入門](/admin/acl-grants/) 和 [Codex Cloud](/ai/codex-cloud/)。
 
 > 本文依 2026 年 10 月的 Tailscale 官方部落格與文件整理，以 Tailscale v1.104 為準。文中沒有涉及需要實機驗證的設定，屬文件整理；觀念部分的來源見文末「參考資料」。
 
@@ -109,7 +109,7 @@ AI agent（AI 代理）和聊天機器人最大的差別，是它不只回答，
 
 ## 從 Codex Cloud 看這套原則怎麼落地
 
-站內 [Codex Cloud](/platforms/codex-cloud/) 就是三個原則的具體實作：OpenAI 的雲端任務 VM 用一把 **reusable + ephemeral + 帶 tag** 的 auth key 加入 tailnet，任務結束、VM 離線後自動移除；再用 grants 只開放必要的 HTTPS 服務。Tailscale 官方在部落格裡建議的做法也是同一套：AI agent 和它要連的資源都打上 tag、auth key 保留效期、開啟 network flow logs 觀察它實際連到哪裡。
+站內 [Codex Cloud](/ai/codex-cloud/) 就是三個原則的具體實作：OpenAI 的雲端任務 VM 用一把 **reusable + ephemeral + 帶 tag** 的 auth key 加入 tailnet，任務結束、VM 離線後自動移除；再用 grants 只開放必要的 HTTPS 服務。Tailscale 官方在部落格裡建議的做法也是同一套：AI agent 和它要連的資源都打上 tag、auth key 保留效期、開啟 network flow logs 觀察它實際連到哪裡。
 
 如果 agent 跑在你自己家裡的主機、手機、Docker 或雲端 sandbox，原理完全一樣：先想清楚它是誰、它能碰到什麼、它結束後要不要消失，剩下的就是把這三件事寫進 tag、grants 和 auth key。
 
@@ -126,6 +126,7 @@ AI agent（AI 代理）和聊天機器人最大的差別，是它不只回答，
 - [Aperture 是什麼：給個人與 homelab 的 AI gateway，還是企業工具？](/ai/aperture/)
 - [DGX Spark／華碩 Ascent GX10 用 Tailscale 遠端存取](/ai/dgx-spark/)
 - [Grok Bot 連進 tailnet：OAuth app 與 Team Setup 兩種接法](/ai/grok-bot/)
+- [Codex Cloud 連上 tailnet：讓雲端 AI 代理存取內部服務](/ai/codex-cloud/)
 - [Cursor 連進 tailnet：Rollouts 的 MCP 私有連線，與 Cloud Agents 的 userspace 做法](/ai/cursor-tailscale/)
 - [Meta Muse 連進 tailnet：個人 AI agent 以獨立節點加入](/ai/meta-muse/)
 - [Tembo 連進 tailnet：agent session 以 tag 與一次性 key 加入](/ai/tembo/)

@@ -8,7 +8,7 @@ sidebar:
 
 雲端 agent sandbox（Codex Cloud、Tembo、Daytona、Modal、E2B 這類在雲端跑一段 agent 程式的環境）要在任務裡存取你 tailnet 內的服務，做法看似各家不同，其實都收斂到同一套通則：**給 sandbox 一個 tag 身分，用一把會過期的憑證加入，跑在 userspace 網路模式，再用 grants 把它能碰到的範圍收到只剩需要的 HTTPS**。
 
-這篇先講通則，再對照幾個平台的現況，最後講 Claude Code on the web 用社群 hook 連回 tailnet 的非官方做法。具體的 step-by-step 以 [Codex Cloud 連上 tailnet](/platforms/codex-cloud/) 為例，通則背後的觀念見 [AI 與 agent](/ai/)。
+這篇先講通則，再對照幾個平台的現況，最後講 Claude Code on the web 用社群 hook 連回 tailnet 的非官方做法。具體的 step-by-step 以 [Codex Cloud 連上 tailnet](/ai/codex-cloud/) 為例，通則背後的觀念見 [AI 與 agent](/ai/)。
 
 > 本文依 2026 年 10 月的 Tailscale、OpenAI、Tembo、Daytona、Modal、E2B 官方文件與 Tailscale v1.104 原始碼整理。auth key 的 `--auth-key`、`--client-secret` 等旗標與 `?ephemeral=`、`?preauthorized=` 參數對照過 `cmd/tailscale/cli/up.go`，`tailscaled --tun=userspace-networking` 對照過 `cmd/tailscaled/tailscaled.go`。Claude Code on the web 的 hook 是社群做法（非官方），出處見該節。本文未實機跑過這些平台，屬文件整理。
 
@@ -134,7 +134,7 @@ Claude Code on the web（Anthropic 的網頁版 Claude Code）沒有官方 Tails
 - **auth key 用 `--auth-key=file:` 讀入**：先寫進 mode-600 的暫存檔再傳，避免出現在 `ps` 的參數列表給同機其他使用者看到。
 - **缺東西不阻塞、但會印 stderr 提示**：雲端環境要自備 `tailscaled`、能連上 tailscale.com、以及 `TAILSCALE_AUTHKEY`；任何一項不齊或 `tailscale up` 失敗時，hook 會在 stderr 印提示後放行 session（不阻塞啟動），不是靜默跳過。
 
-如果你只是想在網頁版 Claude Code 裡連 tailnet，與其追這個脆弱的 hook，不如先確認是否有官方整合。站內 [Codex Cloud](/platforms/codex-cloud/) 是目前唯一把 Tailscale 直接內建為環境設定的雲端 agent 平台（其環境設定的 VPN 供應商只有 Tailscale）；Tembo、Daytona 等平台則是靠各自的整合或 VPN 連線，方向不同。
+如果你只是想在網頁版 Claude Code 裡連 tailnet，與其追這個脆弱的 hook，不如先確認是否有官方整合。站內 [Codex Cloud](/ai/codex-cloud/) 是目前唯一把 Tailscale 直接內建為環境設定的雲端 agent 平台（其環境設定的 VPN 供應商只有 Tailscale）；Tembo、Daytona 等平台則是靠各自的整合或 VPN 連線，方向不同。
 
 ## 小結
 
@@ -164,6 +164,6 @@ Claude Code on the web（Anthropic 的網頁版 Claude Code）沒有官方 Tails
 - [Ephemeral nodes（官方）](https://tailscale.com/kb/1111/ephemeral-nodes)
 - [Tailscale 原始碼：`cmd/tailscale/cli/up.go`](https://github.com/tailscale/tailscale/blob/main/cmd/tailscale/cli/up.go)
 - [Tailscale 原始碼：`cmd/tailscaled/tailscaled.go`](https://github.com/tailscale/tailscale/blob/main/cmd/tailscaled/tailscaled.go)
-- [Codex Cloud 連上 tailnet：讓雲端 AI 代理存取內部服務](/platforms/codex-cloud/)
+- [Codex Cloud 連上 tailnet：讓雲端 AI 代理存取內部服務](/ai/codex-cloud/)
 - [OAuth client：給 CI、operator 與雲端 agent 用的憑證](/admin/oauth-clients/)
 - [Tags 與 auth key：給伺服器用的非互動登入](/admin/tags-auth-keys/)
