@@ -126,6 +126,15 @@ Tailscale 部落格建議的做法：
 - **Machines 頁面出現一堆 Codex 裝置？** auth key 沒開 Ephemeral。ephemeral 裝置離線後才會被自動移除，產生新的 key 時記得開啟。
 - **任務 VM 加入後卡在等待核准？** tailnet 開了 device approval，但 auth key 沒開 Pre-approved。
 
+## 其他 AI 服務的接法
+
+同類的服務做法各有不同，整體比較見 [AI 服務怎麼連進 tailnet](/ai/services-overview/)：
+
+- [Cursor](/ai/cursor-tailscale/)：兩條路：Rollouts 用 tag 加 OAuth client 連私有 https MCP，或在 Cloud Agents 裡自己跑 userspace Tailscale
+- [Grok Bot](/ai/grok-bot/)：OAuth app 讓使用者授權，或 Enterprise 管理員用 Team Setup 腳本安裝
+- [Tembo](/ai/tembo/)：OAuth client 留在服務端，每個 session 只拿到單次 ephemeral key
+- [Meta Muse](/ai/meta-muse/)：登入後以 Muse 自己的節點加入，官方只有一篇部落格
+
 ## 參考資料
 
 - [Codex Cloud shipped with Tailscale support. Nobody told us.（Tailscale 官方部落格）](https://tailscale.com/blog/codex-cloud-tailscale)

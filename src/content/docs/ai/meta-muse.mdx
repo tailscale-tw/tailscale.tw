@@ -70,6 +70,15 @@ Meta 在 2026 年 9 月發表個人 AI agent **Muse**，主打「真的把事情
 
 通用做法見 [雲端 agent sandbox 連回 tailnet](/ai/cloud-sandbox-pattern/)。
 
+## 其他 AI 服務的接法
+
+同類的服務做法各有不同，整體比較見 [AI 服務怎麼連進 tailnet](/ai/services-overview/)：
+
+- [Codex Cloud](/ai/codex-cloud/)：貼一把 reusable、ephemeral、帶 tag 的 auth key 到環境設定，VM 以 tag 身分加入
+- [Cursor](/ai/cursor-tailscale/)：兩條路：Rollouts 用 tag 加 OAuth client 連私有 https MCP，或在 Cloud Agents 裡自己跑 userspace Tailscale
+- [Grok Bot](/ai/grok-bot/)：OAuth app 讓使用者授權，或 Enterprise 管理員用 Team Setup 腳本安裝
+- [Tembo](/ai/tembo/)：OAuth client 留在服務端，每個 session 只拿到單次 ephemeral key
+
 ## 參考資料
 
 - [Your agent, your network: How Meta's Muse agent works with Tailscale（Tailscale 官方部落格，2026 年 9 月 30 日）](https://tailscale.com/blog/meta-muse-ai-agent-tailscale)
