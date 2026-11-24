@@ -1,0 +1,44 @@
+---
+title: AI 服務怎麼連進 tailnet：Codex Cloud、Cursor、Grok Bot、Tembo 與 Meta Muse 的接法比較
+description: 比較五個官方或半官方支援 Tailscale 的 AI 服務：憑證從哪來、以什麼身分加入 tailnet、方案限制與官方文件完整度，並說明怎麼選與共通的最小權限做法
+sidebar:
+  order: 6.5
+  label: AI 服務接法總覽
+---
+
+雲端的 AI agent 預設連不到你 tailnet 裡的東西。現在有五個服務各自做了 Tailscale 整合，做法卻不一樣：有的貼一把 auth key，有的走 OAuth，有的讓 agent 以獨立節點加入。這篇把它們放在同一張表比較，再告訴你怎麼選。每個服務的設定步驟，請看各自的專文。
+
+> 本文依 2026 年 11 月各服務的官方文件與 Tailscale 官方部落格整理，以各篇專文為準；本文未實機操作。這些整合多半還在 beta 或逐步開放，細節請以官方文件為準。
+
+## 五個服務一覽
+
+| 服務                            | 憑證從哪來                                                  | 加入 tailnet 的身分                 | 官方文件                          |
+| ------------------------------- | ----------------------------------------------------------- | ----------------------------------- | --------------------------------- |
+| [Codex Cloud](/ai/codex-cloud/) | 你產生一把 reusable、ephemeral、帶 tag 的 auth key 貼進環境 | tag（例如 `tag:codex`）             | OpenAI 文件加 Tailscale 部落格    |
+| [Cursor](/ai/cursor-tailscale/) | OAuth client（建議）或 auth key，由 Cursor 保管             | tag（ephemeral 裝置）               | Cursor 整合頁與疑難排解           |
+| [Grok Bot](/ai/grok-bot/)       | OAuth app（使用者授權），或 Team Setup 腳本裡的 key         | 授權使用者的裝置，或腳本指定的身分  | Tailscale 部落格與 xAI 文件各一篇 |
+| [Tembo](/ai/tembo/)             | OAuth client，Tembo 即時產生單次 ephemeral key              | tag（`tag:tembo-session`）          | Tembo 整合頁與 MCP 頁             |
+| [Meta Muse](/ai/meta-muse/)     | 登入後由 Muse 連線，細節官方沒寫                            | Muse 自己的節點（身分類型官方沒寫） | 只有一篇 Tailscale 部落格         |
+
+## 共通的幾件事
+
+- **都要自己收緊權限。** 不論哪個服務，加入之後能碰到什麼，都由你的 tailnet policy 決定。用 [tag 與 grants](/admin/acl-grants/) 只開放需要的服務與連接埠，比相信服務端的預設可靠。
+- **盡量用 tag，而不是個人身分。** 沒有 tag 的 key 會讓裝置繼承建立者的存取範圍。細節見 [Tag 與 auth key](/admin/tags-auth-keys/)。
+- **憑證留在伺服器端比較安全。** Tembo 與 Cursor 的 OAuth client 由服務保管，agent 本身只拿到短效 key；Codex Cloud 的 auth key 則會放進環境設定，要自己控管它的範圍。觀念見 [雲端 agent sandbox 連回 tailnet 的通用做法](/ai/cloud-sandbox-pattern/) 與 [OAuth client](/admin/oauth-clients/)、[OAuth apps](/admin/oauth-apps/)。
+- **官方沒寫的就當作未知。** 方案限制、key 到期時間、連線品質在多數服務的文件裡並不完整，各篇專文的「官方沒有寫的事」有列。
+
+## 怎麼選
+
+你通常不是「選」，而是看你已經在用哪個服務，再照它的專文設定。如果有選擇：
+
+- **想讓 agent 連的是私有 MCP server**：Cursor 與 Tembo 都有針對 MCP 的整合，接法見 [把 MCP server 放在 tailnet](/ai/mcp-over-tailscale/)。
+- **想要憑證不進 sandbox**：Tembo 與 Cursor 的 Rollouts 整合是 OAuth client 留在服務端。
+- **想用使用者自己的身分、不貼 key**：Grok Bot 的 OAuth app 路線。
+- **只是想快速試**：Codex Cloud 的 auth key 最直接，但記得加 tag 與 grants。
+- **想知道會不會碰到我的裝置**：Meta Muse 官方資訊最少，先用 grants 把它能碰到的範圍收到最小再開。
+
+## 延伸閱讀
+
+- [AI 與 agent：為什麼要把 agent 關進 tailnet](/ai/)
+- [雲端 agent sandbox 連回 tailnet 的通用做法](/ai/cloud-sandbox-pattern/)
+- [讓 coding agent 懂 Tailscale：官方 skill 與社群 skill](/ai/tailscale-skill/)
