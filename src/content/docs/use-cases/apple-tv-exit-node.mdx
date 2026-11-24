@@ -29,7 +29,7 @@ Exit node 需要「一直開著、一直在線」，Apple TV 天生就符合：
 
 tvOS 17 是**最低**版本，官方文件與 [App Store 頁面](https://apps.apple.com/us/app/tailscale/id1470499037)都沒有寫上限，所以目前的 tvOS 27 不在排除範圍內。App Store 上 Tailscale 的最新版是 1.104.7（2026 年 11 月 17 日更新）。
 
-2026 年 10 月發表、11 月 13 日上市的[第四代 Apple TV 4K](https://www.apple.com/newsroom/2026/10/apple-unveils-the-new-apple-tv-4k/)據媒體報導出廠搭的是 tvOS 27.2 的專用 build。依官方文件的前提（tvOS 17 以上）推論，它可以裝 Tailscale。**不過 Tailscale 官方沒有寫「已在這台新機上測試」**，官方安裝文件的最後驗證日期也是 2026 年 1 月，本站同樣沒有在新機上實測。買新機的人，請特別確認 home hub 與睡眠後仍保持連線這兩點。
+2026 年 10 月發表、11 月 13 日上市的[第四代 Apple TV 4K](https://www.apple.com/newsroom/2026/10/apple-unveils-the-new-apple-tv-4k/)上市前 Apple 為它釋出了專用的 tvOS 27.2 build（媒體報導見 [9to5Mac](https://9to5mac.com/2026/11/02/apple-releases-new-tvos-27-2-build-ahead-of-updated-apple-tv-4k-launch/)），出廠搭載的應該就是這個版本。依官方文件的前提（tvOS 17 以上）推論，它可以裝 Tailscale。**不過 Tailscale 官方沒有寫「已在這台新機上測試」**，官方安裝文件的最後驗證日期也是 2026 年 1 月，本站同樣沒有在新機上實測。買新機的人，請特別確認 home hub 與睡眠後仍保持連線這兩點。
 
 ## 安裝 tvOS 版 Tailscale
 
@@ -76,12 +76,13 @@ Apple TV 是「放著不管、專職出口」的好選擇：常開、有線、�
 - [Secret tunnel to your local area network with Apple TV and Tailscale](https://www.youtube.com/watch?v=x5iB_yTHZ_s)（Joyce Lin，4:44）：把 Apple TV 設成 exit node 並兼當 subnet router，影片章節有專講 exit node 的一段。
 - [Use Tailscale on your Apple TV!](https://www.youtube.com/watch?v=C8XoZYJcFtI)（Tailscale 官方頻道，8:35）：從 00:21 起講 Apple TV 當 exit node，後面接 Mullvad 與 Jellyfin 遠端存取的示範。
 
-這兩支影片都是 tvOS 17 剛支援時拍的（兩到三年前），App 的介面可能和現在不同，步驟請以官方文件為準。
+這兩支影片都是 tvOS 17 剛支援時拍的（約三年前後），App 的介面可能和現在不同，步驟請以官方文件為準。
 
 ## 參考資料
 
 - [Install Tailscale on an Apple TV（Tailscale 官方）](https://tailscale.com/docs/install/appletv)
 - [Apple unveils the new Apple TV 4K（Apple 新聞稿）](https://www.apple.com/newsroom/2026/10/apple-unveils-the-new-apple-tv-4k/)
+- [Apple releases new tvOS 27.2 build ahead of updated Apple TV 4K launch（9to5Mac）](https://9to5mac.com/2026/11/02/apple-releases-new-tvos-27-2-build-ahead-of-updated-apple-tv-4k-launch/)
 - [Subnet routers（Tailscale 官方，Apple TV 僅 IPv4）](https://tailscale.com/docs/features/subnet-routers)
 - [Tailscale SSH（Tailscale 官方，伺服器端僅 Linux／macOS 開源版）](https://tailscale.com/docs/features/tailscale-ssh)
 - [Exit Node：讓所有流量經由指定裝置出去](/features/exit-node/)
