@@ -1,6 +1,6 @@
 ---
 title: MagicRoute：多台備援路由節點的自動選路
-description: 用 MagicRoute 在多台重疊的 Subnet Router、App connector、Tailscale Service host 與推薦 Exit Node 之間依優先分數自動選路，降低 DERP 區域抖動造成的連線中斷，並支援自架 DERP 伺服器
+description: 用 MagicRoute 在多台備援路由節點間依優先分數自動選路，減少 DERP 抖動斷線並支援自架 DERP
 sidebar:
   order: 4.5
   label: MagicRoute
@@ -45,12 +45,12 @@ MagicRoute 改以**優先分數（priority score）**從每個用戶端的視角
 
 2026 年 10 月推出 MagicRoute 時，管理後台把原本單一的「Regional Routing」開關改成 **Route selection** 設定，提供四種模式：
 
-| 模式                                         | 運作方式                                                                                                          | 適用方案                                                   | 支援自架 DERP |
-| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- | ------------- |
-| **Active-passive failover**                  | 選最早加入 tailnet 的合格節點當主機，其餘待機；主機執行 `tailscale down` 後約 15 秒切到下一台（網路中斷可能更久） | 全方案預設                                                 | 支援          |
-| **Regional routing**                         | 依 DERP 區域分組並定期重測延遲，同區內採穩定偽隨機分配                                                            | Premium、Enterprise                                        | 不支援        |
-| **Regional routing with in-region failover** | 先依 DERP 區域分組，同區內再改用最舊優先的主備容錯                                                                | Premium、Enterprise（需聯絡支援開啟）                      | 不支援        |
-| **MagicRoute（beta）**                       | 依優先分數替每個用戶端排名選路，健康時維持穩定、平手時分流                                                        | Premium、Enterprise（須具 regional routing 資格並 opt-in） | 支援          |
+| 模式                                         | 運作方式                                                                                                                                                                                                     | 適用方案                                                   | 支援自架 DERP |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------- | ------------- |
+| **Active-passive failover**                  | 選最早加入 tailnet 的合格節點當主機，其餘待機；依[官方文件](https://tailscale.com/docs/features/route-selection#active-passive-failover)，主機執行 `tailscale down` 後約 15 秒切到下一台（網路中斷可能更久） | 全方案預設                                                 | 支援          |
+| **Regional routing**                         | 依 DERP 區域分組並定期重測延遲，同區內採穩定偽隨機分配                                                                                                                                                       | Premium、Enterprise                                        | 不支援        |
+| **Regional routing with in-region failover** | 先依 DERP 區域分組，同區內再改用最舊優先的主備容錯                                                                                                                                                           | Premium、Enterprise（需聯絡支援開啟）                      | 不支援        |
+| **MagicRoute（beta）**                       | 依優先分數替每個用戶端排名選路，健康時維持穩定、平手時分流                                                                                                                                                   | Premium、Enterprise（須具 regional routing 資格並 opt-in） | 支援          |
 
 ### 對 Exit Node 的特別說明
 
@@ -80,7 +80,7 @@ MagicRoute 改以**優先分數（priority score）**從每個用戶端的視角
    - Subnet Router：至少兩台廣告**完全相同前綴**的網段並已核准（注意高可用備援機不要開 `--accept-routes`，見 [Subnet Router](/features/subnet-router/#延伸)）。
    - App connector：多台 connector 掛上相同 tag 並指派給相同 app。
    - Tailscale Services：多台 tagged 主機已廣告並核准為該 Service 的 host。
-3. **存取控制**：候選節點必須通過你的 [ACL / Grants](/admin/acl-grants/) 規則才會對用戶端可見。若 grants 有設定 `via`，MagicRoute 只會在 `via` 允許的節點中選路。
+3. **存取控制**：候選節點必須通過你的 [ACL / Grants](/admin/acl-grants/) 規則才會對用戶端可見。依[官方 Route selection 文件](https://tailscale.com/docs/features/route-selection#route-eligibility-and-prefix-matching)，若 grants 有設定 `via`，MagicRoute 只會在 `via` 允許的節點中選路。
 
 從其他模式切到 MagicRoute 時，**不需要**重建既有的 Tailscale Services、Kubernetes `Ingress` 資源或重新設定 connector。
 
@@ -214,7 +214,7 @@ sudo tailscale set --exit-node=auto:any  # 持續追蹤推薦結果
 - **仍是 beta 功能**：評分訊號與行為仍會調整（官方部落格提到未來計畫加入用戶端 reachability checks 與更多評分訊號，但目前尚未實作）。
 - **選路粒度是 per-client，不是 per-connection**：MagicRoute 減少了 DERP 抖動引發的不必要切換，但沒有 flow affinity。如果用戶端正在使用的節點真的離線或發生切換，經由它建立的既有 TCP 連線仍會中斷（Tailscale 工程師於 issue [#22056](https://github.com/tailscale/tailscale/issues/22056) 討論中明確證實）。
 - **沒有效能或負載平衡保證**：官方文件明寫 MagicRoute **不保證**各節點流量均等、**不提供**依主機容量分配流量，也**不保證**永遠選到地理最近或延遲最低的節點。
-- **全 tailnet 單一開關，無法針對單一節點 opt-out**：你不能替某個網段開 MagicRoute、另一個網段留 active-passive。若要限制某群使用者只能走特定幾台 Subnet Router，請改用 [ACL / Grants](/admin/acl-grants/) 的 `via` 欄位（`via` 只限縮候選池，不指定先後順序）。
+- **全 tailnet 單一開關，無法針對單一節點 opt-out**：你不能替某個網段開 MagicRoute、另一個網段留 active-passive。若要限制某群使用者只能走特定幾台 Subnet Router，請改用 [ACL / Grants](/admin/acl-grants/) 的 `via` 欄位（依[官方說明](https://tailscale.com/docs/reference/troubleshooting/network-configuration/overlapping-subnet-route-failover)，`via` 只限縮候選池，不指定先後順序）。
 - **不會跨前綴容錯**：Subnet Router 必須廣告**完全相同**的網段前綴才能互為備援。例如一台廣告 `10.0.0.0/16`、另一台廣告 `10.0.0.0/24`，若 `/24` 的路由器全部離線，流量會直接黑洞丟包，不會自動退回 `/16`（見官方[重疊網段容錯文件](https://tailscale.com/docs/reference/troubleshooting/network-configuration/overlapping-subnet-route-failover)與 issue [#18550](https://github.com/tailscale/tailscale/issues/18550)）。
 - **不偵測「機器在線但後端不通」**：目前控制平面判斷節點是否健康，主要看它是否連著控制平面，不驗證它背後能不能連到目的網段（見 issue [#16357](https://github.com/tailscale/tailscale/issues/16357)，目前常見繞法是在路由器本機跑健康檢查腳本，失敗時用 `tailscale set --advertise-routes=` 撤銷路由）。推薦 Exit Node 也有類似的不可達節點未自動退回議題（issue [#16821](https://github.com/tailscale/tailscale/issues/16821)）。
 - **無法從 CLI 查詢評分細節**：目前沒有指令能列出 MagicRoute 給各候選節點的分數（issue [#16543](https://github.com/tailscale/tailscale/issues/16543) 仍開啟），除錯時主要依賴 `tailscale status --json` 的 `PrimaryRoutes`。
@@ -241,5 +241,3 @@ sudo tailscale set --exit-node=auto:any  # 持續追蹤推薦結果
 - [Exit Node：讓所有流量經由指定裝置出去](/features/exit-node/)
 - [自架 DERP 伺服器：在台灣架一台自己的中繼](/features/custom-derp/)
 - [方案與限制比較](/getting-started/plans/)
-
-最後更新：2026 年 11 月 26 日
