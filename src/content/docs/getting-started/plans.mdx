@@ -8,7 +8,7 @@ sidebar:
 
 Tailscale 的方案名稱、價格與功能會調整，尤其是從舊方案轉到 seat-based pricing 之後，不能拿幾年前的比較表直接套用。本文記錄目前新註冊會看到的方案、本站常用功能在 Personal 免費方案的狀態，以及如何在 Admin console 確認自己的方案與用量。
 
-> 本文以 Tailscale v1.102、官方 [Pricing](https://tailscale.com/pricing) 頁面於 2026 年 10 月 7 日的內容為準。價格以美元（USD）與定價頁目前顯示的月繳單價整理；方案與功能可能隨時變動，購買或升級前請重新查看官方定價頁。
+> 本文以 Tailscale v1.104、官方 [Pricing](https://tailscale.com/pricing) 頁面於 2026 年 11 月 26 日的內容為準。價格以美元（USD）與定價頁目前顯示的月繳單價整理；方案與功能可能隨時變動，購買或升級前請重新查看官方定價頁。
 
 ## 先講結論
 
@@ -53,19 +53,20 @@ Ephemeral resource 是短期存在的 tagged resource，例如短暫的 CI/CD ru
 
 定價頁的 Compare plans 表格以勾選表示功能是否包含在方案中。下表只挑與本站文章和個人使用最相關的項目：
 
-| 功能                                         | Personal | Standard | Premium | Enterprise |
-| -------------------------------------------- | -------- | -------- | ------- | ---------- |
-| Secure peer-to-peer connections              | 可       | 可       | 可      | 可         |
-| Split tunneling、MagicDNS                    | 可       | 可       | 可      | 可         |
-| ACL／grants 基本存取控制                     | 可       | 可       | 可      | 可         |
-| Peer Relay                                   | 可       | 可       | 可      | 可         |
-| Funnel（beta）                               | 可       | 可       | 可      | 可         |
-| SCIM 使用者與群組佈建                        | —        | 可       | 可      | 可         |
-| Advanced user roles                          | —        | 可       | 可      | 可         |
-| Device posture integrations（MDM、EDR、XDR） | —        | 可       | 可      | 可         |
-| Network flow logs                            | —        | —        | 可      | 可         |
-| Log streaming                                | —        | —        | 可      | 可         |
-| Configuration audit logs                     | 可       | 可       | 可      | 可         |
+| 功能                                                           | Personal | Standard | Premium | Enterprise |
+| -------------------------------------------------------------- | -------- | -------- | ------- | ---------- |
+| Secure peer-to-peer connections                                | 可       | 可       | 可      | 可         |
+| Split tunneling、MagicDNS                                      | 可       | 可       | 可      | 可         |
+| ACL／grants 基本存取控制                                       | 可       | 可       | 可      | 可         |
+| Peer Relay                                                     | 可       | 可       | 可      | 可         |
+| Funnel（beta）                                                 | 可       | 可       | 可      | 可         |
+| SCIM 使用者與群組佈建                                          | —        | 可       | 可      | 可         |
+| Advanced user roles                                            | —        | 可       | 可      | 可         |
+| Device posture integrations（MDM、EDR、XDR）                   | —        | 可       | 可      | 可         |
+| [MagicRoute](/features/magicroute/)（beta）與 regional routing | —        | —        | 可      | 可         |
+| Network flow logs                                              | —        | —        | 可      | 可         |
+| Log streaming                                                  | —        | —        | 可      | 可         |
+| Configuration audit logs                                       | 可       | 可       | 可      | 可         |
 
 幾個需要單獨理解的地方：
 
@@ -104,7 +105,7 @@ Ephemeral resource 是短期存在的 tagged resource，例如短暫的 CI/CD ru
 
 - **個人、非商業、最多 6 位使用者**：先用 Personal。user devices 無限，本站的 Serve、Funnel、Subnet Router、Exit Node 與效能調校情境都能開始。
 - **小團隊或需要組織管理**：Standard 是 US$8／每位使用者／月，使用者數無上限，並加入 SCIM、advanced user roles 與 10 個 ACL groups。
-- **需要較多 ACL groups、較大的 ephemeral 分鐘池、network flow logs 或 log streaming**：Premium 是 US$18／每位使用者／月，ACL groups 為 300 個，ephemeral resources 為每月 10,000 分鐘。
+- **需要較多 ACL groups、較大的 ephemeral 分鐘池、[MagicRoute](/features/magicroute/)／regional routing、network flow logs 或 log streaming**：Premium 是 US$18／每位使用者／月，ACL groups 為 300 個，ephemeral resources 為每月 10,000 分鐘。
 - **需要客製數量、合約、SLA 或企業導入服務**：Enterprise 需聯絡 Sales，價格與限制依合約確認。
 
 ## 參考資料

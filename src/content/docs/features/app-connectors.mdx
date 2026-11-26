@@ -26,7 +26,7 @@ App connector 是 tailnet 裡一台被指定用來「轉送特定網域流量」
 - **SaaS 的 IP allowlist**：讓服務只看到 app connector 的固定出口 IP，tailnet 內獲准的人都能用，其他人就算拿到帳密也連不進（服務會擋掉）。
 - **自架服務、雲端 VPC**：把內部服務或雲端資源的流量集中管理。
 - **集中管理**：在一處控制哪些裝置能用哪些 app，不必逐台設定。
-- **監控與備援**：部署多台 app connector 提供冗餘，用第三方工具監看流量。
+- **監控與備援**：部署多台 app connector 提供冗餘（跨區自動選路可參考 [MagicRoute](/features/magicroute/)），用第三方工具監看流量。
 
 App connectors 適用[所有方案](https://tailscale.com/pricing)。
 

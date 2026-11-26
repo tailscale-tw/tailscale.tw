@@ -35,7 +35,7 @@ Tailscale 允許自己架 DERP 伺服器（`derper`），加到 tailnet 的 DERP
 
 - 自架的 DERP **不支援裝置分享**等跨 tailnet 的功能。
 - [Mullvad Exit Node](/features/mullvad-exit-node/) 不能搭配自架 DERP 使用。
-- 自架的 DERP 不會用於高可用設定中的 regional routing。
+- 自架的 DERP 不會用於高可用設定中的 regional routing，但可搭配 [MagicRoute](/features/magicroute/)（beta，Premium／Enterprise 方案）進行自動選路。
 - 享受不到 Tailscale 控制平面對官方 DERP 的某些最佳化。
 - DERP 只轉送加密後的封包，看不到內容，對網路除錯沒有幫助。
 - 不能放在 NAT、防火牆或負載平衡器後面（見下一節）。

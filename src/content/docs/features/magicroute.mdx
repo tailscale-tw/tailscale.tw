@@ -1,0 +1,245 @@
+---
+title: MagicRoute：多台備援路由節點的自動選路
+description: 用 MagicRoute 在多台重疊的 Subnet Router、App connector、Tailscale Service host 與推薦 Exit Node 之間依優先分數自動選路，降低 DERP 區域抖動造成的連線中斷，並支援自架 DERP 伺服器
+sidebar:
+  order: 4.5
+  label: MagicRoute
+---
+
+當你的 tailnet 裡有兩台以上廣告**相同網段**的 [Subnet Router](/features/subnet-router/)、負責**相同服務**的 [App connectors](/features/app-connectors/)，或是同一個 [Tailscale Services](/features/tailscale-services/) 的多台後端主機時，用戶端該把流量送往哪一台？
+
+**MagicRoute** 是 Tailscale 控制平面提供的 tailnet 層級選路模式。它會從每個用戶端的角度替合格的候選節點評分排序，在節點健康時讓用戶端穩定走第一順位，平手時把不同用戶端分散到多台節點，節點離線時再依順位容錯切換。與舊的 Regional routing 不同，MagicRoute 不再依賴 DERP 區域分組，因此能減少網路小幅波動造成的斷線，也支援[自架 DERP 伺服器](/features/custom-derp/)。
+
+先講方案門檻，避免白忙一場：**MagicRoute 目前為 beta，僅限 Premium（US$18／人／月）與 Enterprise 方案**。免費的 Personal 與 Standard 方案無法開啟，但全方案預設都已經內建主備容錯（active-passive failover）。
+
+> 本文以 Tailscale v1.104（2026 年 11 月）與 Tailscale Terraform Provider v0.30.0 為準，MagicRoute 目前為 beta，規格與介面可能變動。設定步驟與 API／Terraform 欄位已核對官方文件、官方部落格與 provider 原始碼；本文未於 Premium 環境實機切換驗證，屬文件整理。
+
+## MagicRoute 解決什麼問題
+
+在傳統網路裡，要在多個據點或備援閘道之間自動選路，往往得部署實體路由器並維護 BGP、OSPF 等動態路由協定。Tailscale 讓你在不同主機上部署重疊的路由節點（官方統稱為 connectors），涵蓋四種資源：
+
+- **[Subnet Router](/features/subnet-router/)**：多台主機廣告完全相同的已核准網段前綴（例如跨雲端區域或跨據點連進同一個內網／骨幹）。
+- **[App connectors](/features/app-connectors/)**：多台 connector 負責同一批 SaaS 或內部網域，包含回傳地理相依 DNS 結果的服務。
+- **[Tailscale Services](/features/tailscale-services/) 主機**：同一個邏輯 Service 底下的多台後端（含 Kubernetes multi-cluster ingress）。
+- **[Exit Node](/features/exit-node/)**：改變「推薦 Exit Node（recommended exit nodes）」的評分演算法，不會覆蓋使用者手動選定的出口。
+
+### 為什麼舊的 Regional routing 不夠穩
+
+在 MagicRoute 之前，Tailscale 提供 **Regional routing**，做法是依節點連上的 home DERP 區域分組，讓用戶端優先配對相同或最近的 DERP 區域裡的節點。
+
+實務上這套做法有兩個明顯痛點：
+
+1. **DERP 延遲微幅波動就會切斷連線**：如果節點或用戶端到兩個 DERP 區域的延遲很接近（例如只差幾毫秒），或遇到短暫網路抖動，用戶端的 home DERP 可能每隔幾分鐘就來回跳動。只要 home DERP 一換，該用戶端經由 Regional routing 的流量會立刻切去另一台節點，導致進行中的 SSH 或長連線 TCP 被中斷（見 GitHub issue [#22056](https://github.com/tailscale/tailscale/issues/22056) 的實際回報）。
+2. **不相容自架 DERP**：Regional routing 依賴 Tailscale 官方公開 DERP 區域，使用[自架 DERP 伺服器](/features/custom-derp/)的 tailnet 無法套用。
+
+### MagicRoute 的運作方式
+
+MagicRoute 改以**優先分數（priority score）**從每個用戶端的視角替所有合格候選節點排名：
+
+- **目前主要訊號是粗略地理位置（coarse location）**：官方估算用戶端與各節點的大約距離，只保留配對最近節點所需的精準度。因為位置在人沒移動時不會亂跳，比起即時延遲量測穩定得多。
+- **固定首選、同分分流**：每個用戶端會持續使用自己的第一順位節點，只要它保持健康就不輕易切換；如果有多台節點同列第一順位，不同用戶端會被平均分散到這些節點上。
+- **依序容錯**：首選節點離線時，Tailscale 會順著該用戶端的排名清單往下找下一台健康節點。
+- **不依賴 DERP 區域**：因此可以在有自架 DERP 的 tailnet 裡運作。
+
+## 四種 Route selection 模式比較
+
+2026 年 10 月推出 MagicRoute 時，管理後台把原本單一的「Regional Routing」開關改成 **Route selection** 設定，提供四種模式：
+
+| 模式                                         | 運作方式                                                                                                          | 適用方案                                                   | 支援自架 DERP |
+| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- | ------------- |
+| **Active-passive failover**                  | 選最早加入 tailnet 的合格節點當主機，其餘待機；主機執行 `tailscale down` 後約 15 秒切到下一台（網路中斷可能更久） | 全方案預設                                                 | 支援          |
+| **Regional routing**                         | 依 DERP 區域分組並定期重測延遲，同區內採穩定偽隨機分配                                                            | Premium、Enterprise                                        | 不支援        |
+| **Regional routing with in-region failover** | 先依 DERP 區域分組，同區內再改用最舊優先的主備容錯                                                                | Premium、Enterprise（需聯絡支援開啟）                      | 不支援        |
+| **MagicRoute（beta）**                       | 依優先分數替每個用戶端排名選路，健康時維持穩定、平手時分流                                                        | Premium、Enterprise（須具 regional routing 資格並 opt-in） | 支援          |
+
+### 對 Exit Node 的特別說明
+
+- Subnet Router、App connector 與 Tailscale Service 主機的選路發生在控制平面，**所有版本的用戶端都能生效**。
+- **推薦 Exit Node** 改用 MagicRoute 優先分數，則需要用戶端為 **Tailscale v1.86.0 以上**；舊版用戶端會維持原本的推薦邏輯。
+- 開啟 MagicRoute 不會改變你的方案能不能用推薦 Exit Node，也不會覆蓋使用者手動選定的 Exit Node。
+
+## 方案資格與前置條件
+
+先確認方案，避免在後台找不到選項：
+
+| 方案           | 價格（USD） | Active-passive failover | MagicRoute（beta）        |
+| -------------- | ----------- | ----------------------- | ------------------------- |
+| **Personal**   | 免費        | 可用（預設）            | 無法使用                  |
+| **Standard**   | $8／人／月  | 可用（預設）            | 無法使用                  |
+| **Premium**    | $18／人／月 | 可用（預設）            | 可用（須具資格並 opt-in） |
+| **Enterprise** | 客製        | 可用（預設）            | 可用（須具資格並 opt-in） |
+
+官方定價頁目前在 Premium 方案重點欄列出「MagicRoute and regional routing」（頁尾的詳細比較表同一列名稱仍顯示為 Regional routing，方案歸屬一致為 Premium 與 Enterprise）。關於各方案的完整比較，見[方案與限制比較](/getting-started/plans/)。
+
+> 既有已經開啟 Regional routing 的客戶不會被自動升級成 MagicRoute，需要手動切換（opt-in）。此外，官方文件註明須為「符合 regional routing 資格且具 MagicRoute beta 權限」的 Premium／Enterprise tailnet；舊版 legacy 付費方案是否具備資格，官方文件未明說，請以管理後台實際顯示為準。
+
+切換前請先確認以下前置條件：
+
+1. **管理員角色**：必須是 **Owner、Admin 或 IT admin** 才能修改 Route selection。
+2. **已完成多台節點與核准**：
+   - Subnet Router：至少兩台廣告**完全相同前綴**的網段並已核准（注意高可用備援機不要開 `--accept-routes`，見 [Subnet Router](/features/subnet-router/#延伸)）。
+   - App connector：多台 connector 掛上相同 tag 並指派給相同 app。
+   - Tailscale Services：多台 tagged 主機已廣告並核准為該 Service 的 host。
+3. **存取控制**：候選節點必須通過你的 [ACL / Grants](/admin/acl-grants/) 規則才會對用戶端可見。若 grants 有設定 `via`，MagicRoute 只會在 `via` 允許的節點中選路。
+
+從其他模式切到 MagicRoute 時，**不需要**重建既有的 Tailscale Services、Kubernetes `Ingress` 資源或重新設定 connector。
+
+## 如何啟用 MagicRoute
+
+Route selection 是**整個 tailnet 共用一組設定**，可透過管理後台、Terraform 或 Tailscale API 調整。
+
+### 方式一：管理後台（Admin console）
+
+1. 打開 Admin console 的 [Settings > General](https://console.tailscale.com/admin/settings/general) 頁面。
+2. 找到 **Route selection** 區塊（若介面顯示 **Configure** 按鈕，先點開對話框）。
+3. 選擇 **MagicRoute**。
+4. 點選儲存（Save）。
+5. 看到儲存成功通知後，**重新整理頁面**確認已保持在 MagicRoute，接著再從用戶端驗證實際路徑。
+
+### 方式二：Terraform（Provider v0.30.0 以上）
+
+Tailscale Terraform Provider 在 **v0.30.0**（2026 年 11 月 13 日發布）於 `tailscale_tailnet_settings` 新增了 `route_selection` 屬性，原本的 `regional_routing_on` 已標示為棄用。
+
+```hcl
+terraform {
+  required_providers {
+    tailscale = {
+      source  = "tailscale/tailscale"
+      version = ">= 0.30.0"
+    }
+  }
+}
+
+resource "tailscale_tailnet_settings" "default" {
+  route_selection = "magicroute"
+}
+```
+
+`route_selection` 接受的四個字串值（對應 API 值，provider 會在 plan 階段驗證）：
+
+- `"active-passive-failover"`
+- `"regional-routing"`
+- `"regional-routing-failover"`
+- `"magicroute"`
+
+使用 Terraform 管理時要注意三個細節：
+
+- **不可與舊欄位並存**：如果在同一個 `tailscale_tailnet_settings` 裡同時寫 `regional_routing_on` 和 `route_selection`，provider 會在 plan 階段直接報錯（API 也會拒絕）。從舊設定遷移時，請移除 `regional_routing_on` 並改寫 `route_selection`。
+- **既有 tailnet 可先匯入**：`terraform import tailscale_tailnet_settings.default tailnet_settings`。
+- **destroy 不會還原設定**：刪除 `tailscale_tailnet_settings` resource 只會把它移出 Terraform state，不會把 tailnet 改回預設模式；想切回主備模式要明確設成 `"active-passive-failover"` 或手動到後台改。
+
+### 方式三：Tailscale API
+
+若用腳本呼叫 [Tailnet settings API](https://tailscale.com/api#tag/tailnetsettings)，使用具 `feature_settings:read`（讀取）或 `feature_settings`（寫入，含讀取）scope 的憑證（`TAILNET_ID` 為你的 tailnet ID 或 `-`）：
+
+```bash
+# 切換為 MagicRoute
+curl --fail-with-body \
+  --request PATCH \
+  --header "Authorization: Bearer $ACCESS_TOKEN" \
+  --header "Content-Type: application/json" \
+  --data '{"routeSelection":"magicroute"}' \
+  "https://api.tailscale.com/api/v2/tailnet/$TAILNET_ID/settings"
+
+# 讀回確認
+curl --fail-with-body \
+  --header "Authorization: Bearer $ACCESS_TOKEN" \
+  "https://api.tailscale.com/api/v2/tailnet/$TAILNET_ID/settings"
+```
+
+> **舊自動化腳本的陷阱**：舊欄位 `regionalRoutingOn` 只有在模式為 `regional-routing` 時才會是 `true`，設成 `magicroute` 時會回傳 `false`。如果有舊腳本持續對 API 送出 `{"regionalRoutingOn": false}`，會把你的 tailnet **覆寫回 `active-passive-failover`**。切換前請清查所有會呼叫 settings API 的自動化流程。
+
+## 如何驗證選路結果
+
+官方文件特別提醒：**後台顯示已儲存，不代表特定請求真的走了哪一台節點**，必須從不同位置的用戶端實際檢查。
+
+### 1. 用 `tailscale status --json` 看主路由歸屬
+
+從已接受路由（Linux 需開 `--accept-routes`）的用戶端執行：
+
+```bash
+tailscale status --json
+```
+
+檢查輸出中各個 `Peer` 條目的 `PrimaryRoutes` 欄位，找出包含你目標 IP 的**最長前綴**，該 `Peer` 就是這台用戶端目前為該網段選定的主路由節點。如果是驗證 App connector，先查該網域透過 DNS 解析出來的目的 IP，再去對照 `PrimaryRoutes`。
+
+也可以搭配 `jq` 直接列出有擔任主路由的 peer：
+
+```bash
+tailscale status --json | jq '.Peer[] | select(.PrimaryRoutes != null) | {HostName, PrimaryRoutes}'
+```
+
+### 2. 用 `tailscale status` 觀察流量活動
+
+在用戶端發送測試流量到目標網段或 app 網域的同時，執行：
+
+```bash
+tailscale status
+```
+
+比對各候選節點的 `active` 狀態與 `tx`／`rx` 位元組數變化。官方提醒，這組數字會包含該節點的其他往來流量，只能當作輔助觀察，判斷特定目的地的實際路由歸屬仍應以上方的 `PrimaryRoutes` 為準。
+
+### 3. 驗證推薦 Exit Node
+
+在執行 Tailscale v1.86.0 以上的用戶端上查看推薦結果或開啟自動追蹤：
+
+```bash
+tailscale exit-node suggest              # 查看目前推薦的 Exit Node ID
+sudo tailscale set --exit-node=auto:any  # 持續追蹤推薦結果
+```
+
+圖形介面則是在 **Exit Nodes** 選單選擇 **Recommended**。接著確認作用中的 Exit Node 與對外 IP。注意目前 `tailscale exit-node list` 還不會列出 MagicRoute 的優先分數（見 issue [#16543](https://github.com/tailscale/tailscale/issues/16543)）。
+
+## 台灣使用者的情境評估
+
+### 官方文件直接對應的企業情境
+
+- **台灣與海外多區部署**：例如同時在台灣本地機房與東京、新加坡或美西雲端 VPC 部署廣告相同網段或服務的 Subnet Router、App connector 或 Tailscale Service host，讓台灣員工就近進台灣節點、海外同事走海外節點，免去自建 BGP／Anycast。
+- **台灣自架 DERP 搭配就近選路**：過去因為台灣沒有官方 DERP 區域，有法規或延遲需求而[自架 DERP](/features/custom-derp/) 的企業 tailnet 無法使用 Regional routing；改用 MagicRoute 後，自架 DERP 與就近選路可以同時成立。
+
+### 常見但容易誤解的情境（含推測與限制分析）
+
+1. **家裡與辦公室各一台 Subnet Router，廣告不同網段**
+   - 例如家裡廣告 `192.168.10.0/24`、辦公室廣告 `10.20.0.0/24`。因為網段不重疊，本來就只有唯一入口，**完全不需要 MagicRoute**。
+2. **同一地點掛雙 ISP（例如中華電信＋凱擘／遠傳），各架一台 Subnet Router 廣告同一個網段（推測用法，官方未保證）**
+   - 官方文件沒有把「同地點雙 ISP 選快線」列為 MagicRoute 用途。從目前公開機制推論，這類用法有三個現實限制：
+     - MagicRoute 目前主要以**粗略地理位置**評分，兩台都在台灣同一縣市時距離分數幾乎相同，只會被視為平手而把不同用戶端平均分流，**不會**即時量測兩條 ISP 的延遲來替單一用戶端挑較快線路。
+     - 若其中一條 ISP 連往區網的介面出問題，但該台 Subnet Router 依然連得到 Tailscale 控制平面，MagicRoute 不會知道後端不通（見下方 `#16357`）。
+     - MagicRoute 屬於 Premium（US$18／人／月）以上方案。如果你只是家用或小型自架環境想避免單台 Subnet Router 當機失聯，免費 Personal 方案內建的 **active-passive failover**（主機離線自動切備援）就已經夠用。
+
+## 限制、已知問題與 beta 風險
+
+採用前請先評估以下官方限制與社群回報狀況：
+
+- **仍是 beta 功能**：評分訊號與行為仍會調整（官方部落格提到未來計畫加入用戶端 reachability checks 與更多評分訊號，但目前尚未實作）。
+- **選路粒度是 per-client，不是 per-connection**：MagicRoute 減少了 DERP 抖動引發的不必要切換，但沒有 flow affinity。如果用戶端正在使用的節點真的離線或發生切換，經由它建立的既有 TCP 連線仍會中斷（Tailscale 工程師於 issue [#22056](https://github.com/tailscale/tailscale/issues/22056) 討論中明確證實）。
+- **沒有效能或負載平衡保證**：官方文件明寫 MagicRoute **不保證**各節點流量均等、**不提供**依主機容量分配流量，也**不保證**永遠選到地理最近或延遲最低的節點。
+- **全 tailnet 單一開關，無法針對單一節點 opt-out**：你不能替某個網段開 MagicRoute、另一個網段留 active-passive。若要限制某群使用者只能走特定幾台 Subnet Router，請改用 [ACL / Grants](/admin/acl-grants/) 的 `via` 欄位（`via` 只限縮候選池，不指定先後順序）。
+- **不會跨前綴容錯**：Subnet Router 必須廣告**完全相同**的網段前綴才能互為備援。例如一台廣告 `10.0.0.0/16`、另一台廣告 `10.0.0.0/24`，若 `/24` 的路由器全部離線，流量會直接黑洞丟包，不會自動退回 `/16`（見官方[重疊網段容錯文件](https://tailscale.com/docs/reference/troubleshooting/network-configuration/overlapping-subnet-route-failover)與 issue [#18550](https://github.com/tailscale/tailscale/issues/18550)）。
+- **不偵測「機器在線但後端不通」**：目前控制平面判斷節點是否健康，主要看它是否連著控制平面，不驗證它背後能不能連到目的網段（見 issue [#16357](https://github.com/tailscale/tailscale/issues/16357)，目前常見繞法是在路由器本機跑健康檢查腳本，失敗時用 `tailscale set --advertise-routes=` 撤銷路由）。推薦 Exit Node 也有類似的不可達節點未自動退回議題（issue [#16821](https://github.com/tailscale/tailscale/issues/16821)）。
+- **無法從 CLI 查詢評分細節**：目前沒有指令能列出 MagicRoute 給各候選節點的分數（issue [#16543](https://github.com/tailscale/tailscale/issues/16543) 仍開啟），除錯時主要依賴 `tailscale status --json` 的 `PrimaryRoutes`。
+
+## 參考資料
+
+- [MagicRoute: Routing without physical routers（官方部落格，2026-10-19）](https://tailscale.com/blog/magicroute-beta)
+- [MagicRoute（官方文件）](https://tailscale.com/docs/features/magicroute)
+- [Route selection（官方文件）](https://tailscale.com/docs/features/route-selection)
+- [Recommended exit nodes（官方文件）](https://tailscale.com/docs/features/exit-nodes/auto-exit-nodes)
+- [Set up high availability（官方文件）](https://tailscale.com/docs/how-to/set-up-high-availability)
+- [Troubleshoot overlapping subnet route failover（官方文件）](https://tailscale.com/docs/reference/troubleshooting/network-configuration/overlapping-subnet-route-failover)
+- [Tailscale Changelog](https://tailscale.com/changelog)
+- [Tailscale Pricing](https://tailscale.com/pricing)
+- [Terraform Registry：`tailscale_tailnet_settings`（v0.30.0）](https://registry.terraform.io/providers/tailscale/tailscale/latest/docs/resources/tailnet_settings)
+- [GitHub Issue #22056：Regional routing mid-session TCP drops](https://github.com/tailscale/tailscale/issues/22056)
+- [GitHub Issue #16357：Subnet router failover when broken router is online](https://github.com/tailscale/tailscale/issues/16357)
+- [GitHub Issue #18550：No fallback to broader overlapping subnet route](https://github.com/tailscale/tailscale/issues/18550)
+- [GitHub Issue #16821：Exit node suggest unreachable fallback](https://github.com/tailscale/tailscale/issues/16821)
+- [GitHub Issue #16543：Show priorities in `tailscale exit-node list`](https://github.com/tailscale/tailscale/issues/16543)
+- [Subnet Router：存取整個區網內沒裝 Tailscale 的設備](/features/subnet-router/)
+- [App connectors：以網域而不是 IP 做路由](/features/app-connectors/)
+- [Tailscale Services：一個名稱、一個 TailVIP、多台後端](/features/tailscale-services/)
+- [Exit Node：讓所有流量經由指定裝置出去](/features/exit-node/)
+- [自架 DERP 伺服器：在台灣架一台自己的中繼](/features/custom-derp/)
+- [方案與限制比較](/getting-started/plans/)
+
+最後更新：2026 年 11 月 26 日
