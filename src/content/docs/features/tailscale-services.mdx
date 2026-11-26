@@ -186,7 +186,7 @@ Service 的 `dst` 是邏輯服務，而不是某台主機——後端換機器�
 
 ## 多台後端與容錯
 
-同一個 Service 可以有多台 host 各自廣告相同或不同的端點。只要至少一台 host 處於啟用（active）狀態，Service 就算可用；Tailscale 會依網路可用性、廣告狀態與區域路由（regional routing）把流量導到可用、最近的後端——regional routing 需先在管理後台啟用，才有同區域的負載平衡。搬機器、上線新後端、滾動更新時，用戶端不用改任何設定。
+同一個 Service 可以有多台 host 各自廣告相同或不同的端點。只要至少一台 host 處於啟用（active）狀態，Service 就算可用；Tailscale 會依後台的 Route selection 設定把流量導到可用的後端（預設為主備容錯，Premium／Enterprise 方案可開啟 regional routing 或 [MagicRoute](/features/magicroute/) 做跨區就近選路與分流）。搬機器、上線新後端、滾動更新時，用戶端不用改任何設定。
 
 下線前記得先 `tailscale serve drain svc:<名稱>`，讓既有連線跑完，不要直接拔掉設定，否則正在進行的連線會被硬生生切斷。
 
